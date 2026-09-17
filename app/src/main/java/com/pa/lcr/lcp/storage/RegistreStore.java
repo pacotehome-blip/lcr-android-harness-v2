@@ -45,6 +45,7 @@ public class RegistreStore {
     public static final String COL_DATE_DESCELLEMENT = "date_de_descellement";
     public static final String COL_NUMERO_SCELLE     = "numero_de_scelle";
     public static final String COL_IDENTIFIANT_LC3   = "identifiant_unite_lc3";
+    public static final String COL_FIRMWARE          = "firmware";
     public static final String COL_DATAVERSE_VERSION = "dataverse_version";
     public static final String COL_SYNC_STATUS       = "sync_status";
     public static final String COL_UPDATED           = "updated_at";
@@ -83,6 +84,7 @@ public class RegistreStore {
         public final String dateDescellement;
         public final String numeroScelle;
         public final String identifiantLc3;
+        public final String firmware;
         public final String dataverseVersion;
         public final String syncStatus;
         public final long   updatedAt;
@@ -104,6 +106,7 @@ public class RegistreStore {
             dateDescellement = getStr(c, COL_DATE_DESCELLEMENT);
             numeroScelle     = getStr(c, COL_NUMERO_SCELLE);
             identifiantLc3   = getStr(c, COL_IDENTIFIANT_LC3);
+            firmware         = getStr(c, COL_FIRMWARE);
             dataverseVersion = getStr(c, COL_DATAVERSE_VERSION);
             syncStatus       = getStr(c, COL_SYNC_STATUS);
             updatedAt        = c.getLong(c.getColumnIndexOrThrow(COL_UPDATED));
@@ -135,18 +138,24 @@ public class RegistreStore {
 
     /**
      * Met à jour la fiche existante ou en crée une nouvelle, à partir des
-     * seules informations connues au moment d'une validation de connexion
-     * réussie. Ne touche jamais les champs administratifs (calibration,
-     * scellé, coefficient, identifiant LC3) — laissés null/inchangés s'ils
-     * n'existaient pas déjà, jamais écrasés par une valeur vide.
+     * seules informations connues lors d'une VALIDATION MANUELLE réussie
+     * (Configurer → Démarrer la validation) — plus jamais automatiquement
+     * à chaque connexion normale (retiré du flux INIT 1/7, demande Paul
+     * du 17 sept 2026 : "je voulais que la validation soit faite
+     * uniquement quand je demande dans configure, démarrer la
+     * validation"). Ne touche jamais les champs administratifs
+     * (calibration, scellé, coefficient, identifiant LC3) — laissés
+     * null/inchangés s'ils n'existaient pas déjà, jamais écrasés par une
+     * valeur vide.
      *
      * @return true si une fiche a été créée OU modifiée (donc à synchroniser),
      *         false si la fiche existait déjà avec exactement les mêmes valeurs.
      */
-    public boolean upsertOnConnexion(String serialId, int nud, String btAddr, String btNom,
-                                      String ipAddr, Integer ipPort, Integer transportPrefere) {
+    public boolean upsertDepuisValidation(String serialId, int nud, String btAddr, String btNom,
+                                           String ipAddr, Integer ipPort, Integer transportPrefere,
+                                           String firmware) {
         if (serialId == null || serialId.trim().isEmpty()) {
-            Log.w(TAG, "upsertOnConnexion: numero_de_serie vide — ignoré");
+            Log.w(TAG, "upsertDepuisValidation: numero_de_serie vide — ignoré");
             return false;
         }
 
@@ -157,7 +166,8 @@ public class RegistreStore {
             || !eq(existing.btNom, btNom)
             || !eq(existing.ipAddr, ipAddr)
             || !eqInt(existing.ipPort, ipPort)
-            || !eqInt(existing.transportPrefere, transportPrefere);
+            || !eqInt(existing.transportPrefere, transportPrefere)
+            || !eq(existing.firmware, firmware);
 
         SQLiteDatabase db = helper.getWritableDatabase();
         ContentValues cv = new ContentValues();
@@ -168,15 +178,18 @@ public class RegistreStore {
         if (ipAddr != null) cv.put(COL_IP_ADDR, ipAddr);
         if (ipPort != null) cv.put(COL_IP_PORT, ipPort);
         if (transportPrefere != null) cv.put(COL_TRANSPORT_PREFERE, transportPrefere);
+        if (firmware != null && !firmware.trim().isEmpty() && !"?".equals(firmware.trim())) {
+            cv.put(COL_FIRMWARE, firmware);
+        }
         cv.put(COL_UPDATED, System.currentTimeMillis());
         if (changed) cv.put(COL_SYNC_STATUS, SYNC_PENDING);
 
         long rows = db.update(TABLE, cv, COL_SERIAL + "=?", new String[]{ serialId });
         if (rows == 0) {
             db.insertWithOnConflict(TABLE, null, cv, SQLiteDatabase.CONFLICT_REPLACE);
-            Log.i(TAG, "upsertOnConnexion: nouvelle fiche registre — serial=" + serialId + " nud=" + nud);
+            Log.i(TAG, "upsertDepuisValidation: nouvelle fiche registre — serial=" + serialId + " nud=" + nud);
         } else if (changed) {
-            Log.i(TAG, "upsertOnConnexion: fiche registre mise à jour — serial=" + serialId + " nud=" + nud);
+            Log.i(TAG, "upsertDepuisValidation: fiche registre mise à jour — serial=" + serialId + " nud=" + nud);
         }
         return changed;
     }

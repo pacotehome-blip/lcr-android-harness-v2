@@ -6918,6 +6918,9 @@ private boolean ensureBtConnectPermission() {
                 long ms = System.currentTimeMillis() - t0;
                 if (trouve != null) {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, trouve.node, 255, true);
+                    String fwUsb = null;
+                    try { fwUsb = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
+                    enregistrerRegistreDepuisValidation("USB", trouve.node, trouve.serial, fwUsb);
                     String detailBauds = "";
                     if (usbPort != null) {
                         java.util.List<String> lignesBaud = detecterBaudDetaille(usbPort, trouve.node);
@@ -6989,6 +6992,9 @@ private boolean ensureBtConnectPermission() {
                 long ms = System.currentTimeMillis() - t0;
                 if (trouve != null) {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, trouve.node, 255, true);
+                    String fwBt = null;
+                    try { fwBt = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
+                    enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwBt);
                     return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)");
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés) — débit du pont BT à vérifier séparément (voir guide)";
@@ -7013,6 +7019,9 @@ private boolean ensureBtConnectPermission() {
                 long ms = System.currentTimeMillis() - t0;
                 if (trouve != null) {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, trouve.node, 255, true);
+                    String fwTcp = null;
+                    try { fwTcp = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
+                    enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwTcp);
                     return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)");
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés) — mauvais débit probable";
@@ -7023,6 +7032,42 @@ private boolean ensureBtConnectPermission() {
             }
         }
         return "❌ Type de candidat inconnu";
+    }
+
+    /**
+     * ✅ AJOUTÉ (17 sept 2026, demande Paul) — enregistre/met à jour la
+     * fiche registre locale, uniquement depuis ce flux de validation
+     * manuelle (Configurer → Démarrer la validation) — c'est le seul
+     * endroit où l'app lit ensemble transport, #série, lcrnode ET
+     * firmware au même moment. Best-effort, jamais bloquant pour
+     * l'affichage du résultat de validation.
+     */
+    private void enregistrerRegistreDepuisValidation(String candidatKey, int node, String serial,
+                                                       String firmware) {
+        try {
+            String btAddr = null, btNom = null, ipAddr = null;
+            Integer ipPort = null, transportPrefere = null;
+            if (candidatKey.startsWith("BT:")) {
+                btAddr = candidatKey.substring(3);
+                transportPrefere = com.pa.lcr.lcp.storage.RegistreStore.TRANSPORT_BT;
+            } else if (candidatKey.startsWith("TCP:")) {
+                String[] parts = candidatKey.substring(4).split(":");
+                ipAddr = parts.length > 0 ? parts[0] : null;
+                if (parts.length > 1) { try { ipPort = Integer.parseInt(parts[1]); } catch (Exception ignored) {} }
+                transportPrefere = com.pa.lcr.lcp.storage.RegistreStore.TRANSPORT_TCP;
+            } else if (candidatKey.equals("USB")) {
+                // Valeur Dataverse filgo_transportprefere pour USB pas encore
+                // confirmée (seules TRANSPORT_BT et TRANSPORT_TCP ont été vues
+                // dans un export réel) — laissée null plutôt que de deviner.
+                btNom = "USB";
+            }
+            if (serial != null && !serial.trim().isEmpty()) {
+                new com.pa.lcr.lcp.storage.RegistreStore(getApplicationContext())
+                    .upsertDepuisValidation(serial, node, btAddr, btNom, ipAddr, ipPort, transportPrefere, firmware);
+            }
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "enregistrerRegistreDepuisValidation ERR (non-bloquant): " + e.getMessage());
+        }
     }
 
     private String decodeSerialBytes(byte[] raw) {

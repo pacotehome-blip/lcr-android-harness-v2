@@ -1415,55 +1415,6 @@ public class RegisterTabFragment extends Fragment {
             });
             if (!registreOk) return; // dépendance dure : le reste ne peut pas continuer
 
-            // ✅ AJOUTÉ (17 sept 2026, demande Paul — "on va mettre à jour
-            // la table locale ou ajouter une nouvelle fiche dans
-            // registre" lors d'une validation de connexion réussie) —
-            // registreOk vient de confirmer un état CONNECTED/IDLE réel :
-            // c'est le bon moment, ni avant (pas encore confirmé), ni
-            // plus tard (le reste de la séquence ne doit pas attendre
-            // sur de l'IO disque non-critique). Best-effort, jamais
-            // bloquant pour la livraison elle-même.
-            try {
-                String serialPourRegistre = serialFromArgs;
-                int nudPourRegistre = getNodeFromArgs();
-                String btAddrPourRegistre = null, btNomPourRegistre = null;
-                String ipAddrPourRegistre = null;
-                Integer ipPortPourRegistre = null, transportPreferePourRegistre = null;
-                if (tabTransportKey != null && tabTransportKey.startsWith("BT:")) {
-                    btAddrPourRegistre = tabTransportKey.substring(3);
-                    btNomPourRegistre = tabMediaShort;
-                    transportPreferePourRegistre = com.pa.lcr.lcp.storage.RegistreStore.TRANSPORT_BT;
-                } else if (tabTransportKey != null && tabTransportKey.startsWith("TCP:")) {
-                    String reste = tabTransportKey.substring(4);
-                    int sep = reste.lastIndexOf(':');
-                    if (sep > 0) {
-                        ipAddrPourRegistre = reste.substring(0, sep);
-                        try { ipPortPourRegistre = Integer.parseInt(reste.substring(sep + 1)); } catch (Exception ignored) {}
-                    } else {
-                        ipAddrPourRegistre = reste;
-                    }
-                    transportPreferePourRegistre = com.pa.lcr.lcp.storage.RegistreStore.TRANSPORT_TCP;
-                } else if (tabTransportKey != null && tabTransportKey.startsWith("USB")) {
-                    // ✅ AJOUTÉ (17 sept 2026, demande Paul — "j'ai besoin
-                    // de savoir quel média est utilisé") — troisième média
-                    // réel, sans adresse BT ni IP (voir RegisterSessionManager,
-                    // clé "USB:<node>"). Valeur Dataverse filgo_transportprefere
-                    // pour USB pas encore confirmée (seules TRANSPORT_BT et
-                    // TRANSPORT_TCP ont été vues dans un export réel) — laissée
-                    // null volontairement plutôt que de deviner un chiffre qui
-                    // pourrait être faux dans Dataverse.
-                    btNomPourRegistre = "USB";
-                }
-                if (serialPourRegistre != null && !serialPourRegistre.trim().isEmpty()) {
-                    new com.pa.lcr.lcp.storage.RegistreStore(requireContext().getApplicationContext())
-                        .upsertOnConnexion(serialPourRegistre, nudPourRegistre,
-                            btAddrPourRegistre, btNomPourRegistre,
-                            ipAddrPourRegistre, ipPortPourRegistre, transportPreferePourRegistre);
-                }
-            } catch (Exception eRegistre) {
-                android.util.Log.w("RegistreStore", "upsertOnConnexion (INIT 1/7) ERR (non-bloquant): " + eRegistre.getMessage());
-            }
-
             // ✅ AJOUTÉ (14 sept 2026, demande Paul — "je n'ai pas le
             // running_flowing et je n'ai pas la livraison complétée.
             // pourquoi" — confirmé par le registre lui-même : SaleNumber

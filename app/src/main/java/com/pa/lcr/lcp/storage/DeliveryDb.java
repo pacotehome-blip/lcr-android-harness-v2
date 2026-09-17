@@ -43,7 +43,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      chaque soir) + diagnostic_match_history (persiste chaque résultat de
     //      DiagnosticRuleEngine, jusqu'ici calculé à la volée et jamais stocké — nécessaire
     //      pour calibrer les règles / futur agent IA, demande Paul 31 juillet 2026).
-    public static final int DB_VERSION = 25;
+    public static final int DB_VERSION = 27;
 
     private static final String TAG = "DeliveryDb";
 
@@ -76,6 +76,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
         createBtSignalTable(db);
         createRegisterProductsTable(db);
         createKnownTcpDeviceTable(db);
+        createRegistreTable(db);
         createApiTraceTable(db);
         createDiagnosticEventsView(db);
         createDiagnosticRulesTable(db);
@@ -236,6 +237,22 @@ public class DeliveryDb extends SQLiteOpenHelper {
             addColumnIfMissing(db, "register_products", "product_type",    "INTEGER NOT NULL DEFAULT -1");
             addColumnIfMissing(db, "register_products", "fsm_code",        "TEXT");
             addColumnIfMissing(db, "register_products", "fsm_description", "TEXT");
+        }
+        // v26 (demande Paul, 17 sept 2026 — "j'ai une table registre dans
+        // dataverse et localement, peux-tu me confirmer ça?") — nouvelle
+        // table locale, miroir de filgo_registrecompteur, alimentée à
+        // chaque validation de connexion réussie (INIT 1/7 REGISTRE).
+        if (oldVersion < 26) {
+            createRegistreTable(db);
+        }
+        // v27 (demande Paul, 17 sept 2026 — "c'est là qu'on récupère...
+        // le firmware") — la validation ne se déclenche plus qu'à la
+        // demande (Configurer → Démarrer la validation), plus
+        // automatiquement à chaque connexion — et capture maintenant
+        // aussi le firmware, déjà lu à cet endroit précis pour
+        // l'affichage diagnostic mais jamais conservé jusqu'ici.
+        if (oldVersion < 27) {
+            addColumnIfMissing(db, "registre", "firmware", "TEXT");
         }
     }
 
@@ -777,6 +794,45 @@ public class DeliveryDb extends SQLiteOpenHelper {
         );
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_bt_signal_ts ON bt_signal(transport_key, ts_ms);");
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_bt_signal_mac ON bt_signal(mac, ts_ms);");
+    }
+
+    /**
+     * ✅ AJOUTÉ (17 sept 2026, demande Paul) — registre : table locale
+     * miroir de filgo_registrecompteur dans Dataverse. Clé métier =
+     * numero_de_serie (même valeur que filgo_numerodeserie côté
+     * Dataverse), pas le GUID Dataverse — l'app ne connaît le GUID
+     * qu'une fois la fiche déjà trouvée/créée là-bas.
+     * dataverse_version conserve le versionnumber lu à la dernière
+     * synchronisation, pour détecter un changement concurrent avant
+     * d'écraser une fiche déjà modifiée côté Dataverse (ex. par
+     * Jacques) — voir RegistreStore pour la logique de comparaison.
+     */
+    private static void createRegistreTable(SQLiteDatabase db) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS registre (" +
+            "numero_de_serie          TEXT    NOT NULL PRIMARY KEY," +
+            "registrecompteur_id      TEXT," +          // GUID Dataverse, une fois connu
+            "nom                      TEXT," +          // filgo_registrecompteur1
+            "nud                      INTEGER NOT NULL DEFAULT 0," + // filgo_nud (node)
+            "adresse_bluetooth        TEXT," +
+            "nom_bluetooth            TEXT," +
+            "adresse_ip               TEXT," +
+            "port_ip                  INTEGER," +
+            "transport_prefere        INTEGER," +
+            "type_dappareil           INTEGER," +
+            "vitesse_de_communication INTEGER," +
+            "coefficient_brut_net     REAL," +
+            "date_de_calibration      TEXT," +
+            "date_de_descellement     TEXT," +
+            "numero_de_scelle         TEXT," +
+            "identifiant_unite_lc3    TEXT," +
+            "firmware                 TEXT," +          // lu uniquement lors de la validation manuelle (Configurer → Démarrer la validation)
+            "dataverse_version        TEXT," +          // dernier versionnumber connu, pour éviter d'écraser un changement concurrent
+            "sync_status              TEXT    NOT NULL DEFAULT 'PENDING'," +
+            "updated_at               INTEGER NOT NULL DEFAULT 0" +
+            ");"
+        );
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_registre_sync ON registre(sync_status);");
     }
 
     private static void createRegisterProductsTable(SQLiteDatabase db) {
