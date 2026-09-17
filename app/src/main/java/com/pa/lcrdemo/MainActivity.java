@@ -6501,6 +6501,37 @@ private boolean ensureBtConnectPermission() {
                 try { Thread.sleep(200); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
             }
             if (listener != null) runOnUiThread(() -> listener.onDone(false, "✅ Validation terminée."));
+            // ✅ AJOUTÉ (17 sept 2026, demande Paul — "pourquoi je n'ai
+            // pas le firmware d'ajouté dans dataverse à quel moment
+            // c'est mise à jour") — trouvé : la validation écrivait
+            // seulement en local (sync_status=PENDING), sans jamais
+            // déclencher elle-même l'envoi vers Dataverse — il fallait
+            // attendre un redémarrage, une fin de livraison, ou le
+            // bouton "Retour WO" (seuls appels réels à syncAll(), voir
+            // LcrDeliverySync.java). Même DeliverySyncScheduler.triggerNow()
+            // ne suffit pas : il ne fait que pushPending() (livraisons),
+            // jamais le registre. Déclenche maintenant un vrai syncAll()
+            // avec un token frais, juste après la validation — best-effort,
+            // n'affecte jamais le message "Validation terminée" déjà
+            // affiché à l'utilisateur au-dessus.
+            try {
+                MsalTokenProvider msalValidation = new MsalTokenProvider(MainActivity.this);
+                msalValidation.init(new MsalTokenProvider.InitCallback() {
+                    @Override public void onReady() {
+                        msalValidation.acquireToken(MainActivity.this, new MsalTokenProvider.TokenCallback() {
+                            @Override public void onSuccess(String token) {
+                                new Thread(() -> com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(
+                                    MainActivity.this, token)).start();
+                            }
+                            @Override public void onError(Exception e) {
+                                android.util.Log.w("MainActivity", "syncAll (post-validation) token ERR (non-bloquant): " + e.getMessage());
+                            }
+                        });
+                    }
+                });
+            } catch (Exception eSyncValidation) {
+                android.util.Log.w("MainActivity", "syncAll (post-validation) ERR (non-bloquant): " + eSyncValidation.getMessage());
+            }
           } finally {
               validationEnCoursDepuisMs = 0L;
           }
