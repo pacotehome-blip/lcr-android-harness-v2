@@ -92,18 +92,40 @@ public class LcrDeliverySync {
         return local;
     }
 
+    // ✅ CORRIGÉ (17 sept 2026, demande Paul — "j'ai trois inscriptions
+    // dans la bd dataverse") — confirmé par le CSV Dataverse fourni :
+    // 2 enregistrements identiques (payload compact "armement", 302
+    // caractères) avec des GUID différents, pour la même livraison.
+    // Cause : pushPendingInternal() lit les lignes PENDING, les POST une
+    // par une, et ne les marque SYNCED qu'APRÈS le POST — sans aucun
+    // verrou contre une exécution concurrente. Trois déclencheurs
+    // indépendants peuvent lancer ce chemin presque simultanément :
+    // NetworkSync (démarrage réseau), DeliverySyncScheduler.triggerNow()
+    // (juste après l'armement), et le worker périodique WorkManager
+    // (15 min). Si deux tournent en même temps, les deux lisent la MÊME
+    // ligne encore PENDING avant que l'un ou l'autre ne la marque
+    // SYNCED — chacun POST alors son propre nouvel enregistrement
+    // Dataverse pour la même livraison locale. Un verrou statique en
+    // mémoire sérialise maintenant tous les appels : le deuxième
+    // déclencheur attend que le premier ait fini de marquer ses lignes
+    // SYNCED avant de lire à son tour — il ne trouve alors plus rien à
+    // pousser pour cette livraison.
+    private static final Object PUSH_PENDING_LOCK = new Object();
+
     public static void pushPending(Context ctx, String accessToken) throws Exception {
-        // ✅ FIX (4 août 2026) — même classe de bug que les 14 fuites corrigées le
-        // 24 juillet dans RegisterTabFragment.java (SQLiteConnectionPool
-        // exhaustion) : cette connexion n'était JAMAIS fermée. Particulièrement
-        // grave ici car pushPending() tourne maintenant sur le cycle périodique
-        // du worker (toutes les 15 min, depuis le fix du 3 août qui l'a enfin
-        // raccroché) — donc une fuite à CHAQUE cycle, indéfiniment.
-        LcrDeliveryStatusDb db = new LcrDeliveryStatusDb(ctx);
-        try {
-            pushPendingInternal(ctx, accessToken, db);
-        } finally {
-            try { db.close(); } catch (Exception ignored) {}
+        synchronized (PUSH_PENDING_LOCK) {
+            // ✅ FIX (4 août 2026) — même classe de bug que les 14 fuites corrigées le
+            // 24 juillet dans RegisterTabFragment.java (SQLiteConnectionPool
+            // exhaustion) : cette connexion n'était JAMAIS fermée. Particulièrement
+            // grave ici car pushPending() tourne maintenant sur le cycle périodique
+            // du worker (toutes les 15 min, depuis le fix du 3 août qui l'a enfin
+            // raccroché) — donc une fuite à CHAQUE cycle, indéfiniment.
+            LcrDeliveryStatusDb db = new LcrDeliveryStatusDb(ctx);
+            try {
+                pushPendingInternal(ctx, accessToken, db);
+            } finally {
+                try { db.close(); } catch (Exception ignored) {}
+            }
         }
     }
 
@@ -202,6 +224,36 @@ public class LcrDeliverySync {
         String bodyStr  = body.toString();
         byte[] bodyBytes = bodyStr.getBytes(StandardCharsets.UTF_8);
 
+        // ✅ CORRIGÉ (17 sept 2026, demande Paul — "j'ai trois
+        // inscriptions dans la bd dataverse", puis "si tu as besoin
+        // d'un champ utilise le payload... cette info n'est plus
+        // nécessaire lorsqu'elle est sync") — trouvé le VRAI deuxième
+        // trou : même avec le verrou anti-concurrence (pushPending),
+        // rien n'empêchait un doublon si l'app mourait ENTRE le POST
+        // réussi (plus bas) et le markSynced() local — la ligne restait
+        // PENDING, et le prochain cycle de sync la repoussait en un
+        // nouvel enregistrement Dataverse. Pas besoin d'un nouveau
+        // champ ni de coordonner avec Jacques sur une clé alternative :
+        // filgo_name porte déjà la valeur déterministe voulue
+        // (wo_num + "-" + ticket, ex. "apr-5004473-234", construite
+        // dans buildDeliveryJson()) — depuis les données du payload
+        // local, pas depuis un champ Dataverse dédié. Une requête de
+        // validation dessus AVANT le POST suffit : si une ligne existe
+        // déjà pour ce filgo_name, on réutilise son GUID et on saute le
+        // POST — sync_status=true/false suffit après coup, ce GUID n'a
+        // plus besoin d'être cherché une fois la ligne marquée SYNCED
+        // localement.
+        String deliveryName = body.optString("filgo_name", "");
+        if (!deliveryName.isEmpty()) {
+            String existingId = findExistingDataverseId(deliveryName, orgUrl, accessToken);
+            if (existingId != null) {
+                Log.i(TAG, "pushDeliveryRow: filgo_name=" + deliveryName
+                    + " déjà présent dans Dataverse (id=" + existingId
+                    + ") — POST sauté, réutilisation directe");
+                return existingId;
+            }
+        }
+
         // Toujours POST — une ligne SQLite = une nouvelle ligne Dataverse
         // Chaque impression génère son propre enregistrement
         String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY;
@@ -249,6 +301,55 @@ public class LcrDeliverySync {
             }
         } finally {
             conn.disconnect();
+        }
+    }
+
+    /**
+     * ✅ AJOUTÉ (17 sept 2026, demande Paul) — requête de validation
+     * avant le POST, purement à partir de filgo_name (déjà déterministe
+     * depuis les données locales, wo_num + "-" + ticket) : évite un
+     * doublon Dataverse si un cycle de sync précédent a réussi côté
+     * serveur sans que le markSynced() local n'ait eu le temps de
+     * s'exécuter (crash, app tuée, etc). Retourne le GUID de la ligne
+     * existante si trouvée, null sinon — jamais bloquant : toute erreur
+     * de requête est traitée comme "rien trouvé", pour ne pas empêcher
+     * le POST normal en cas de souci réseau sur cette seule vérification.
+     */
+    private static String findExistingDataverseId(String deliveryName, String orgUrl,
+                                                    String accessToken) {
+        try {
+            String filter = java.net.URLEncoder.encode(
+                "filgo_name eq '" + deliveryName.replace("'", "''") + "'", "UTF-8");
+            String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY
+                + "?$select=filgo_lcr_delivery_statusid&$top=1&$filter=" + filter;
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            try {
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
+                conn.setRequestProperty("Authorization",    "Bearer " + accessToken);
+                conn.setRequestProperty("Accept",           "application/json");
+                conn.setRequestProperty("OData-MaxVersion", "4.0");
+                conn.setRequestProperty("OData-Version",    "4.0");
+
+                int code = conn.getResponseCode();
+                if (code != 200) return null;
+
+                InputStream is = conn.getInputStream();
+                byte[] respBytes = readStream(is);
+                JSONObject resp = new JSONObject(new String(respBytes, StandardCharsets.UTF_8));
+                JSONArray values = resp.optJSONArray("value");
+                if (values != null && values.length() > 0) {
+                    return values.getJSONObject(0).optString("filgo_lcr_delivery_statusid", null);
+                }
+                return null;
+            } finally {
+                conn.disconnect();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "findExistingDataverseId ERR (non-bloquant, POST normal fera foi): " + e.getMessage());
+            return null;
         }
     }
 
