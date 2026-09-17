@@ -1234,7 +1234,23 @@ public class DeepLinkHandler {
                 Fragment fArm = activity.getSupportFragmentManager().findFragmentByTag("regtab_" + tabKeyArm);
                 if (fArm instanceof RegisterTabFragment) {
                     tabArmRef = (RegisterTabFragment) fArm;
-                    for (int waitProduit = 0; waitProduit < 100; waitProduit++) {
+                    // ✅ CORRIGÉ (17 sept 2026, demande Paul — "explique
+                    // moi : en reconnexion à froid") — confirmé par log
+                    // réel (nouveau_7.txt) : recréation d'Activity entre
+                    // deux livraisons (Android tue MainActivity en
+                    // arrière-plan, RegisterSessionManager/le socket BT
+                    // survit mais tabsByKey repart vide) force une vraie
+                    // renégociation matérielle (REGISTRE ~3.8s, PRODUIT
+                    // ~5.8s dans le cas mesuré) — ~11s au total, au-delà
+                    // des 10s d'origine. Le plafond n'est PAS une attente
+                    // fixe (la boucle sort dès isPeutDemarrerLivraison()
+                    // vraie, comme avant — le cas chaud normal reste
+                    // aussi rapide qu'avant), seulement le MAXIMUM avant
+                    // refus a été élargi (100 → 200 itérations de 100ms)
+                    // pour couvrir ce cas de reconnexion à froid légitime,
+                    // sans affaiblir le refus lui-même contre un registre
+                    // réellement en panne.
+                    for (int waitProduit = 0; waitProduit < 200; waitProduit++) {
                         if (tabArmRef.isPeutDemarrerLivraison()) { produitValideAvantArmement = true; break; }
                         try { Thread.sleep(100); } catch (Exception ignored) {}
                     }
@@ -1242,7 +1258,7 @@ public class DeepLinkHandler {
             } catch (Exception ignored) {}
 
             if (!produitValideAvantArmement) {
-                android.util.Log.w(TAG, "lancerLivraison: REFUS armement — initialisation (7 étapes) jamais approuvée après 10s");
+                android.util.Log.w(TAG, "lancerLivraison: REFUS armement — initialisation (7 étapes) jamais approuvée après 20s");
                 logError(serialId, woNum, "INIT_NON_APPROUVEE", "Initialisation jamais complétée avant armement (registre/produit/preset/live/retour_wo) — livraison refusée par sécurité");
                 retournerFieldService(woNum, woIdGuid, "erreur_init_non_approuvee",
                     buildErrorJson("INIT_NON_APPROUVEE", "L'initialisation n'a pas pu se compléter avant l'armement — livraison refusée par sécurité. Réessayez, ou vérifiez le registre."));
