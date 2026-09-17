@@ -2528,6 +2528,64 @@ public class DeepLinkHandler {
                                     break;
                                 }
                             }
+                            // ✅ CORRIGÉ (17 sept 2026, demande Paul — "si
+                            // on n'imprime pas le ticket de livraison, la
+                            // il est resté jusqu'à la fin à 237, j'ai été
+                            // obligé de faire status pour voir 238, le
+                            // fichier json dans le running_flowing était
+                            // 237") — trouvé : cette re-lecture existait
+                            // déjà, mais SEULEMENT dans la branche d'échec
+                            // de Continue (voir ticketChanged plus bas) —
+                            // jamais dans le cas normal (succès). Le
+                            // sale_number lu à l'armement (juste après
+                            // ARMED, ligne ~1497) est celui de la livraison
+                            // PRÉCÉDENTE — le registre ne l'avance qu'au
+                            // vrai démarrage du flux (ce Continue/RUN
+                            // ci-dessus), pas à l'armement. Relit
+                            // maintenant après un Continue réussi et
+                            // corrige la BD locale + le JSON déjà écrits à
+                            // l'armement si le numéro a changé — jamais
+                            // bloquant pour la suite de la livraison.
+                            if (continueOk) {
+                                try {
+                                    MultiRegisterApiFacadeImpl facadeApresContinue =
+                                        new MultiRegisterApiFacadeImpl(activity);
+                                    com.pa.lcr.lcp.ApiResult snapApresContinue =
+                                        facadeApresContinue.api_deliveryJobGet(jobId);
+                                    String ticketApresContinue = (snapApresContinue != null && snapApresContinue.data != null)
+                                        ? snapApresContinue.data.optString("ticket_no", "") : "";
+                                    if (!ticketApresContinue.isEmpty()
+                                            && !ticketApresContinue.equals(ticketNoAtStart)) {
+                                        android.util.Log.i(TAG, "job/continue: sale_number corrigé après démarrage réel du flux — "
+                                            + ticketNoAtStart + "→" + ticketApresContinue);
+                                        lastKnownTicketNo.put(ticketCacheKey(serialId, woNum), ticketApresContinue);
+                                        final String fTicketCorrige = ticketApresContinue;
+                                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbCorrige =
+                                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                                        try {
+                                            android.content.ContentValues cvCorrige = new android.content.ContentValues();
+                                            cvCorrige.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, jobId);
+                                            cvCorrige.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, woNum);
+                                            cvCorrige.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketCorrige);
+                                            cvCorrige.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO, fTicketCorrige);
+                                            dbCorrige.upsertByJobId(cvCorrige);
+                                        } finally {
+                                            try { dbCorrige.close(); } catch (Exception ignored) {}
+                                        }
+                                        try {
+                                            org.json.JSONObject payloadCorrige = new org.json.JSONObject();
+                                            payloadCorrige.put("status", "RUNNING_FLOWING");
+                                            payloadCorrige.put("job_id", jobId);
+                                            payloadCorrige.put("note", "sale_number corrigé après démarrage réel du flux (était "
+                                                + ticketNoAtStart + " à l'armement)");
+                                            com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+                                                activity.getApplicationContext(), woNum, jobId, payloadCorrige);
+                                        } catch (Exception ignoredJsonCorrige) {}
+                                    }
+                                } catch (Exception eCorrige) {
+                                    android.util.Log.w(TAG, "job/continue: correction sale_number post-Continue ERR (non-bloquant): " + eCorrige.getMessage());
+                                }
+                            }
                             if (!continueOk) {
                                 android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
 
