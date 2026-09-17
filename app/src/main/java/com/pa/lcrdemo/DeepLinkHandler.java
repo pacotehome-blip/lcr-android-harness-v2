@@ -2548,6 +2548,36 @@ public class DeepLinkHandler {
                             // bloquant pour la suite de la livraison.
                             if (continueOk) {
                                 try {
+                                    // ✅ AJOUTÉ (17 sept 2026, demande Paul
+                                    // — "est-ce que tu tiens compte aussi
+                                    // de mettre à jour si c'est le
+                                    // ticket_number qu'on utilise? et que
+                                    // l'on doit imprimer le ticket") —
+                                    // trouvé : sans ce garde, la correction
+                                    // s'appliquait AUSSI quand l'impression
+                                    // est obligatoire — mauvais, puisque
+                                    // dans ce cas ticketArm reste
+                                    // délibérément vide à l'armement (voir
+                                    // ligne ~1492) : le VRAI ticket_number
+                                    // n'existe qu'après impression, à la
+                                    // fin de la livraison, pas ici. Cette
+                                    // correction post-Continue ne
+                                    // s'applique qu'au cas sale_number-
+                                    // comme-ticket (impression non
+                                    // obligatoire) — jamais quand un vrai
+                                    // ticket imprimé est attendu.
+                                    boolean impressionObligatoireApresContinue = true;
+                                    try {
+                                        com.pa.lcr.lcp.DeliveryController dcApresContinue =
+                                            com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                                .getController(transportKey, node);
+                                        if (dcApresContinue != null) {
+                                            impressionObligatoireApresContinue = !dcApresContinue.api_isTicketRequiredNeverPrint();
+                                        }
+                                    } catch (Exception ignoredReqApresContinue) {}
+                                    if (impressionObligatoireApresContinue) {
+                                        android.util.Log.i(TAG, "job/continue: impression obligatoire — correction sale_number sautée, le vrai ticket viendra à la fin de la livraison");
+                                    } else {
                                     MultiRegisterApiFacadeImpl facadeApresContinue =
                                         new MultiRegisterApiFacadeImpl(activity);
                                     com.pa.lcr.lcp.ApiResult snapApresContinue =
@@ -2581,6 +2611,7 @@ public class DeepLinkHandler {
                                             com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                                                 activity.getApplicationContext(), woNum, jobId, payloadCorrige);
                                         } catch (Exception ignoredJsonCorrige) {}
+                                    }
                                     }
                                 } catch (Exception eCorrige) {
                                     android.util.Log.w(TAG, "job/continue: correction sale_number post-Continue ERR (non-bloquant): " + eCorrige.getMessage());
