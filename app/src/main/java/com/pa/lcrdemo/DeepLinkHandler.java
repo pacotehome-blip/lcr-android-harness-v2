@@ -2567,8 +2567,9 @@ public class DeepLinkHandler {
                                     // obligatoire) — jamais quand un vrai
                                     // ticket imprimé est attendu.
                                     boolean impressionObligatoireApresContinue = true;
+                                    com.pa.lcr.lcp.DeliveryController dcApresContinue = null;
                                     try {
-                                        com.pa.lcr.lcp.DeliveryController dcApresContinue =
+                                        dcApresContinue =
                                             com.pa.lcr.lcp.RegisterSessionManager.get(activity)
                                                 .getController(transportKey, node);
                                         if (dcApresContinue != null) {
@@ -2578,12 +2579,51 @@ public class DeepLinkHandler {
                                     if (impressionObligatoireApresContinue) {
                                         android.util.Log.i(TAG, "job/continue: impression obligatoire — correction sale_number sautée, le vrai ticket viendra à la fin de la livraison");
                                     } else {
-                                    MultiRegisterApiFacadeImpl facadeApresContinue =
-                                        new MultiRegisterApiFacadeImpl(activity);
-                                    com.pa.lcr.lcp.ApiResult snapApresContinue =
-                                        facadeApresContinue.api_deliveryJobGet(jobId);
-                                    String ticketApresContinue = (snapApresContinue != null && snapApresContinue.data != null)
-                                        ? snapApresContinue.data.optString("ticket_no", "") : "";
+                                    // ✅ CORRIGÉ (17 sept 2026, demande Paul
+                                    // — "je veux que tu respectes ce que
+                                    // dit le registre et ne pas inventer
+                                    // quoi que ce soit") — trouvé : cette
+                                    // relecture utilisait
+                                    // snapApresContinue.data.optString("ticket_no")
+                                    // — le champ BRUT, non validé, du
+                                    // snapshot général (le même champ qui a
+                                    // produit "301" dans un cas observé
+                                    // plus tôt ce soir, une valeur qui ne
+                                    // représentait PAS le sale_number de
+                                    // cette livraison). Utilise maintenant
+                                    // api_readTicketNo23Frais() — le seul
+                                    // point d'entrée qui applique la vraie
+                                    // règle documentée du fabricant
+                                    // (#22 SaleNumber fiable dès le début,
+                                    // #23 TicketNumber seulement après
+                                    // impression, avec repli), journalisée
+                                    // via [TICKET-SOURCE] pour rester
+                                    // traçable — jamais le champ brut
+                                    // directement.
+                                    String ticketApresContinue = dcApresContinue != null
+                                        ? dcApresContinue.api_readTicketNo23Frais() : "";
+                                    // ✅ AJOUTÉ (18 sept 2026, demande Paul
+                                    // — "il faut vraiment avoir à
+                                    // running_flowing le bon numéro, on ne
+                                    // peut pas reconstruire un ticket sur
+                                    // des erreurs") — la correction BD
+                                    // ci-dessous ne suffisait pas : le job
+                                    // EN MÉMOIRE dans DeliveryController
+                                    // (apiJobs, séparé de la BD) gardait
+                                    // sa toute première valeur capturée
+                                    // (à l'armement, avant Continue) pour
+                                    // TOUTE la durée de la livraison — donc
+                                    // chaque sondage pendant RUNNING_FLOWING
+                                    // continuait de retourner l'ancien
+                                    // numéro, peu importe la correction BD.
+                                    // Force maintenant ce job précis à se
+                                    // relire réellement, pour que le
+                                    // snapshot lui-même soit bon dès
+                                    // maintenant — pas seulement la BD
+                                    // corrigée après coup.
+                                    if (dcApresContinue != null) {
+                                        try { dcApresContinue.forceRefreshTicketEtSaleNoPourJob(jobId); } catch (Exception ignoredRefresh) {}
+                                    }
                                     if (!ticketApresContinue.isEmpty()
                                             && !ticketApresContinue.equals(ticketNoAtStart)) {
                                         android.util.Log.i(TAG, "job/continue: sale_number corrigé après démarrage réel du flux — "

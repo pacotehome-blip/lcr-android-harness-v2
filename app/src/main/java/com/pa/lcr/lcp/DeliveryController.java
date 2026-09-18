@@ -3124,6 +3124,35 @@ softResync("retry/" + step);
         }
     }
 
+    // ✅ AJOUTÉ (18 sept 2026, demande Paul — "il faut vraiment avoir à
+    // running_flowing le bon numéro, on ne peut pas reconstruire un
+    // ticket sur des erreurs") — trouvé la VRAIE cause de la valeur
+    // périmée qui persistait dans le snapshot brut (payload_complet)
+    // tout au long de RUNNING_FLOWING, même après la correction BD
+    // post-Continue : api_deliveryJobGet() (ligne ~4993) ne relit
+    // job.ticketNo/job.saleNo QUE si vides — "lu une seule fois par
+    // job, jamais relu une fois capturé" (voir ce commentaire plus
+    // haut). Si la toute première lecture a eu lieu avant que le
+    // registre n'avance réellement SaleNumber pour CETTE livraison
+    // (donc à l'armement, avant Continue), cette valeur périmée reste
+    // figée pour TOUTE la durée du job — peu importe combien de fois
+    // l'app sonde ensuite. La correction BD (DeepLinkHandler) ne
+    // touchait jamais ce job en mémoire (apiJobs), séparé de la BD.
+    // Ce wrapper public force job.ticketNo ET job.saleNo à se
+    // relire réellement pour CE jobId précis — appelé juste après un
+    // Continue réussi, une seule fois, pour que TOUT snapshot ultérieur
+    // (y compris pendant RUNNING_FLOWING, pas seulement à la toute fin)
+    // reflète la vraie valeur, sans jamais reconstruire/corriger après
+    // coup.
+    public void forceRefreshTicketEtSaleNoPourJob(String jobId) {
+        if (jobId == null || jobId.isEmpty()) return;
+        ApiJob job;
+        synchronized (apiJobs) { job = apiJobs.get(jobId); }
+        if (job == null) return;
+        try { job.ticketNo = readTicketNo23Uncached(); } catch (Exception ignored) {}
+        try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
+    }
+
     private String readTicketNo23() throws Exception {
         // ✅ AJOUTÉ (12 août 2026, demande Paul — "oui pas utilisé
         // autrement") — court-circuite toute communication LCP si déjà
