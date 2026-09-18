@@ -762,6 +762,57 @@ public class LocalDeliveryBackup {
         return best;
     }
 
+    /**
+     * ✅ AJOUTÉ (18 sept 2026, demande Paul — "je n'ai pas le fichier json
+     * de la fin de livraison" / preset/produit jamais récupérés sur BD
+     * vierge) — trouvé, confirmé par log réel (log_bus_event) : sur une
+     * BD vraiment vide, lookupWoForTicket() se saute lui-même dès que
+     * l'état est déjà RUNNING_FLOWING ("livraison active, sauté") — un
+     * vrai cercle vicieux, puisque c'est justement lookupWoForTicket()
+     * qui devait remplir currentWoNum, et findLatestRunningFlowingByWoNum()
+     * ci-dessus EXIGE un wo_num non vide pour chercher. Résultat : le
+     * fichier JSON existe bel et bien sur le disque, mais n'est jamais
+     * trouvé — confirmé par "[RECUP-RUNNING] aucune ligne filet de
+     * sécurité trouvée". Cette variante cherche par #série+node à la
+     * place — toujours connus dès la connexion au tab, même sans wo_num
+     * résolu — pour casser ce cercle vicieux.
+     */
+    public static BackupMatch findLatestRunningFlowingBySerial(Context ctx, String serialId, int node) {
+        if (serialId == null || serialId.trim().isEmpty()) return null;
+
+        List<String> messages = new ArrayList<>();
+        List<byte[]> files = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                ? listBackupFilesMediaStore(ctx, messages)
+                : listBackupFilesLegacy(ctx, messages);
+
+        BackupMatch best = null;
+        for (byte[] raw : files) {
+            try {
+                JSONObject j = new JSONObject(new String(raw, StandardCharsets.UTF_8));
+                if (!serialId.equals(j.optString("serial_id", ""))) continue;
+                if (j.optInt("lcrnode", -1) != node) continue;
+                String payloadComplet = j.optString("payload_complet", "");
+                if (!payloadComplet.contains("RUNNING_FLOWING")) continue;
+
+                long ts = j.optLong("backup_ts", 0L);
+                if (best == null || ts > best.backupTs) {
+                    best = new BackupMatch(j, ts);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "findLatestRunningFlowingBySerial: fichier ignoré (parsing) — " + e.getMessage());
+                try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.findLatestRunningFlowingBySerial", e); } catch (Exception ignored) {}
+            }
+        }
+
+        if (best == null) {
+            Log.i(TAG, "findLatestRunningFlowingBySerial: aucun filet de sécurité trouvé pour serial=" + serialId + " node=" + node);
+        } else {
+            Log.i(TAG, "findLatestRunningFlowingBySerial: match serial=" + serialId + " node=" + node
+                    + " backup_ts=" + best.backupTs);
+        }
+        return best;
+    }
+
     public static BackupMatch findLatestByTicketNo(Context ctx, String ticketNo) {
         if (ticketNo == null || ticketNo.trim().isEmpty()) return null;
 

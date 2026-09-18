@@ -1169,11 +1169,28 @@ public class RegisterTabFragment extends Fragment {
             // QUE dans la BD locale — vide sur une BD vierge (réinstall).
             // Repli sur les fichiers JSON (survivent au réinstall) par
             // wo_num si la BD locale ne trouve rien.
-            if ((safetyNet == null || safetyNet.jobId == null || safetyNet.jobId.isEmpty())
-                    && currentWoNum != null && !currentWoNum.isEmpty()) {
-                com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch matchJson =
-                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestRunningFlowingByWoNum(
+            if (safetyNet == null || safetyNet.jobId == null || safetyNet.jobId.isEmpty()) {
+                com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch matchJson = null;
+                if (currentWoNum != null && !currentWoNum.isEmpty()) {
+                    matchJson = com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestRunningFlowingByWoNum(
                         requireContext(), currentWoNum);
+                }
+                // ✅ AJOUTÉ (18 sept 2026, demande Paul — "je n'ai pas le
+                // fichier json de la fin de livraison" / preset/produit
+                // jamais récupérés) — trouvé, confirmé par log réel
+                // ("[RECUP-RUNNING] aucune ligne filet de sécurité
+                // trouvée" alors que le fichier JSON existait bel et
+                // bien) : sur une BD vraiment vide, lookupWoForTicket()
+                // se saute lui-même dès que l'état est déjà
+                // RUNNING_FLOWING ("livraison active, sauté") — currentWoNum
+                // ne se remplit donc JAMAIS, empêchant la recherche
+                // ci-dessus de même démarrer. #série+node, eux, sont
+                // toujours connus dès la connexion au tab — repli ici si
+                // la recherche par wo_num n'a rien donné.
+                if (matchJson == null && serialFromArgs != null && !serialFromArgs.isEmpty()) {
+                    matchJson = com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestRunningFlowingBySerial(
+                        requireContext(), serialFromArgs, node);
+                }
                 if (matchJson != null) {
                     org.json.JSONObject j = matchJson.json;
                     safetyNet = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow();
