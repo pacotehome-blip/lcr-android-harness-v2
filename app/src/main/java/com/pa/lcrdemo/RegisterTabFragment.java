@@ -2562,6 +2562,98 @@ public class RegisterTabFragment extends Fragment {
                             txtDeliveryUid.setText("Delivery UID : "
                                     + currentWoNum.trim() + "-" + ticketPourAffichage.trim());
                         }
+                        // ✅ AJOUTÉ (18 sept 2026, demande Paul — "si tu
+                        // l'as dans le ui tu devrais aussi l'avoir dans
+                        // le json... si le ui est devenu ex 254, le
+                        // fichier le devient aussi") — même endroit
+                        // exact que la mise à jour de l'UI juste
+                        // au-dessus, protégé par la même condition
+                        // (saleNoActuel a VRAIMENT changé) — pas une
+                        // écriture à chaque battement de 2s, seulement
+                        // au moment précis où l'UI elle-même change.
+                        // ticketPourAffichage EST la dernière lecture
+                        // réelle du champ #23 ou #22 (confirmé par
+                        // isDernierTicketSaleNumberFallback() juste
+                        // au-dessus) — jamais une valeur inventée.
+                        // ✅ CORRIGÉ (18 sept 2026, même demande — "revoit
+                        // l'entièreté du processus") — trouvé un vrai
+                        // risque : lastActiveJobId (utilisé plus bas) ne
+                        // se remet jamais à zéro entre deux livraisons,
+                        // et ce battement tourne dans TOUS les états —
+                        // sans garde, un changement de dernierSaleNoConnu
+                        // après la fin d'une livraison (armement déjà
+                        // supprimé par deleteArmementBackupAsync) aurait
+                        // pu RECRÉER ce fichier supprimé avec un job_id
+                        // périmé. Le but réel (confirmé par Paul) : ces
+                        // données doivent permettre de reprendre une
+                        // livraison après un crash sans AUCUNE lecture du
+                        // registre (produit, preset, ticket_number,
+                        // wo/delivery_uid déjà connus) — donc seulement
+                        // pertinent PENDANT une vraie livraison active,
+                        // jamais pendant CONNECTED/IDLE.
+                        com.pa.lcr.lcp.DeliveryState etatActuelHeartbeat =
+                            controller.getState();
+                        boolean livraisonActiveHeartbeat =
+                            etatActuelHeartbeat == com.pa.lcr.lcp.DeliveryState.PRESTART
+                            || etatActuelHeartbeat == com.pa.lcr.lcp.DeliveryState.STARTING
+                            || etatActuelHeartbeat == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                            || etatActuelHeartbeat == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED;
+                        if (livraisonActiveHeartbeat) {
+                        try {
+                            String jobIdActuel = controller.getLastActiveJobId();
+                            if (jobIdActuel != null && !jobIdActuel.isEmpty()
+                                    && ticketPourAffichage != null && !ticketPourAffichage.isEmpty()) {
+                                final String fJobIdActuel = jobIdActuel;
+                                final String fTicketActuel = ticketPourAffichage.trim();
+                                final String fWoNumActuel = currentWoNum;
+                                final String fWoIdGuidActuel = currentWoIdGuid;
+                                final String fSerialActuel = serialFromArgs;
+                                final String fMacActuel = (tabTransportKey != null) ? tabTransportKey.trim() : "";
+                                final int fNodeActuel = node;
+                                safeBg(() -> {
+                                    try {
+                                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbHeartbeat =
+                                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                                        try {
+                                            android.content.ContentValues cvHeartbeat = new android.content.ContentValues();
+                                            cvHeartbeat.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, fJobIdActuel);
+                                            cvHeartbeat.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, fWoNumActuel);
+                                            cvHeartbeat.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketActuel);
+                                            cvHeartbeat.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO, fTicketActuel);
+                                            dbHeartbeat.upsertByJobId(cvHeartbeat);
+                                        } finally {
+                                            try { dbHeartbeat.close(); } catch (Exception ignored) {}
+                                        }
+                                        com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch existantHeartbeat =
+                                            com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(
+                                                requireContext(), fJobIdActuel);
+                                        org.json.JSONObject payloadHeartbeat;
+                                        if (existantHeartbeat != null && existantHeartbeat.json != null) {
+                                            payloadHeartbeat = existantHeartbeat.json;
+                                        } else {
+                                            payloadHeartbeat = new org.json.JSONObject();
+                                            payloadHeartbeat.put("job_id", fJobIdActuel);
+                                            payloadHeartbeat.put("wo_num", fWoNumActuel != null ? fWoNumActuel : "");
+                                            payloadHeartbeat.put("wo_id_guid", fWoIdGuidActuel != null ? fWoIdGuidActuel : "");
+                                            payloadHeartbeat.put("serial_id", fSerialActuel != null ? fSerialActuel : "");
+                                            payloadHeartbeat.put("lcrnode", fNodeActuel);
+                                            payloadHeartbeat.put("btmac", fMacActuel);
+                                            payloadHeartbeat.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                                            payloadHeartbeat.put("net_l", 0);
+                                            payloadHeartbeat.put("gross_l", 0);
+                                            payloadHeartbeat.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + fJobIdActuel + "\"}");
+                                        }
+                                        payloadHeartbeat.put("ticket_no", fTicketActuel);
+                                        payloadHeartbeat.put("sale_no", fTicketActuel);
+                                        payloadHeartbeat.put("backup_ts", System.currentTimeMillis());
+                                        payloadHeartbeat.put("sync_status", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                                        com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+                                            requireContext().getApplicationContext(), fWoNumActuel, fJobIdActuel, payloadHeartbeat);
+                                    } catch (Exception ignoredHeartbeatWrite) {}
+                                });
+                            }
+                        } catch (Exception ignoredHeartbeatOuter) {}
+                        }
                     }
                 }
                 if (texteReelementChange) {
