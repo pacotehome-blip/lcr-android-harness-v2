@@ -2642,12 +2642,49 @@ public class DeepLinkHandler {
                                         } finally {
                                             try { dbCorrige.close(); } catch (Exception ignored) {}
                                         }
+                                        // ✅ CORRIGÉ (18 sept 2026, demande
+                                        // Paul — "assure-toi que le fichier
+                                        // json du début de la livraison
+                                        // porte le bon ticket_number
+                                        // (sales_number)") — trouvé : ce
+                                        // JSON correctif ne contenait QUE
+                                        // status/job_id/note — jamais
+                                        // ticket_no/sale_no à la racine du
+                                        // fichier, donc le fichier de
+                                        // départ (nommé par jobId, pas
+                                        // encore par le vrai ticket)
+                                        // gardait toujours l'ancien
+                                        // numéro. Relit maintenant le
+                                        // fichier existant (pour préserver
+                                        // produit/preset déjà écrits à
+                                        // l'armement), corrige seulement
+                                        // ticket_no/sale_no, et réécrit —
+                                        // même fichier (même jobId),
+                                        // jamais un nouveau.
                                         try {
-                                            org.json.JSONObject payloadCorrige = new org.json.JSONObject();
-                                            payloadCorrige.put("status", "RUNNING_FLOWING");
-                                            payloadCorrige.put("job_id", jobId);
-                                            payloadCorrige.put("note", "sale_number corrigé après démarrage réel du flux (était "
-                                                + ticketNoAtStart + " à l'armement)");
+                                            com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch existantArm =
+                                                com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(
+                                                    activity.getApplicationContext(), jobId);
+                                            org.json.JSONObject payloadCorrige;
+                                            if (existantArm != null && existantArm.json != null) {
+                                                payloadCorrige = existantArm.json;
+                                            } else {
+                                                payloadCorrige = new org.json.JSONObject();
+                                                payloadCorrige.put("job_id", jobId);
+                                                payloadCorrige.put("wo_num", woNum != null ? woNum : "");
+                                                payloadCorrige.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
+                                                payloadCorrige.put("serial_id", serialId != null ? serialId : "");
+                                                payloadCorrige.put("lcrnode", node);
+                                                payloadCorrige.put("btmac", mac != null ? mac : "");
+                                                payloadCorrige.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                                                payloadCorrige.put("net_l", 0);
+                                                payloadCorrige.put("gross_l", 0);
+                                                payloadCorrige.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}");
+                                            }
+                                            payloadCorrige.put("ticket_no", fTicketCorrige);
+                                            payloadCorrige.put("sale_no", fTicketCorrige);
+                                            payloadCorrige.put("backup_ts", System.currentTimeMillis());
+                                            payloadCorrige.put("sync_status", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
                                             com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                                                 activity.getApplicationContext(), woNum, jobId, payloadCorrige);
                                         } catch (Exception ignoredJsonCorrige) {}
