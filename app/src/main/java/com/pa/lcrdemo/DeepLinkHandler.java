@@ -132,12 +132,75 @@ public class DeepLinkHandler {
                 com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery adGate = adsGate.load();
                 if (adGate != null && "PENDING".equals(adGate.status)
                         && adGate.woNum != null && !adGate.woNum.equals(woNum)) {
-                    android.util.Log.w(TAG, "handleDeepLink: REFUS — livraison PENDING déjà en attente pour wo="
-                        + adGate.woNum + " (demande actuelle wo=" + woNum + ") — doit être réglée avant quoi que ce soit");
-                    retournerFieldService(woNum, woIdGuid, "erreur_livraison_pending_en_attente",
-                        buildErrorJson("LIVRAISON_PENDING_EN_ATTENTE",
-                            "Une livraison pour le WO " + adGate.woNum + " est déjà en attente — réglez-la avant d'en démarrer une nouvelle."));
-                    return;
+                    // ✅ CORRIGÉ (18 sept 2026, demande Paul — "je n'ai
+                    // aucun pending sur le registre cela est faut??????")
+                    // — trouvé, confirmé par Paul : ce verrou peut se
+                    // désynchroniser du vrai état du registre (ex. tab
+                    // fermé sans jamais relancer après un mismatch — point
+                    // resté ouvert depuis le tout début de cette session).
+                    // Avant de refuser, vérifie maintenant le VRAI état
+                    // du registre pour ce node/série précis — si le
+                    // registre confirme lui-même qu'aucun ticket
+                    // n'attend et qu'aucune livraison n'est active, le
+                    // verrou local est prouvé périmé : on le nettoie et
+                    // on laisse le nouveau deep link procéder normalement.
+                    // S'il montre vraiment quelque chose (ou si la
+                    // vérification échoue), on garde le refus tel quel —
+                    // jamais d'abandon silencieux d'une vraie livraison.
+                    boolean verrouPerime = false;
+                    try {
+                        // ✅ CORRIGÉ (18 sept 2026, même demande — confirmé
+                        // par log réel : ActiveDelivery{...mac= node=250
+                        // serial=16466294...} — le mac était VIDE, cette
+                        // entrée PENDING ayant été sauvegardée avant que le
+                        // transport soit connu. Sans mac, impossible
+                        // d'appeler getController(transportKey, node)
+                        // directement — retombe sur listKnownRegisters()
+                        // pour retrouver le transport via #série+node à la
+                        // place, déjà exposé pour ce même genre de
+                        // rattrapage ailleurs dans le code.
+                        String macPourVerif = (adGate.mac != null && !adGate.mac.trim().isEmpty())
+                            ? adGate.mac.trim() : null;
+                        if (macPourVerif == null && adGate.serialId != null && !adGate.serialId.trim().isEmpty()) {
+                            for (String[] reg : com.pa.lcr.lcp.RegisterSessionManager.get(activity).listKnownRegisters()) {
+                                if (reg.length >= 3 && String.valueOf(adGate.node).equals(reg[0])
+                                        && adGate.serialId.trim().equals(reg[1]) && !reg[2].isEmpty()) {
+                                    macPourVerif = reg[2];
+                                    break;
+                                }
+                            }
+                        }
+                        if (macPourVerif != null) {
+                            com.pa.lcr.lcp.DeliveryController dcVerifGate =
+                                com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                    .getController(macPourVerif, adGate.node);
+                            if (dcVerifGate != null) {
+                                int dcCodeGate = dcVerifGate.getLastDelCode();
+                                boolean ticketPendingGate = (dcCodeGate & com.pa.lcr.lcp.LcpLink.DC_TICKET_PENDING) != 0;
+                                boolean deliveryActiveGate = (dcCodeGate & com.pa.lcr.lcp.LcpLink.DC_DELIVERY_ACTIVE) != 0;
+                                com.pa.lcr.lcp.DeliveryState etatGate = dcVerifGate.getState();
+                                boolean enFluxGate = etatGate == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                                    || etatGate == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED;
+                                if (!ticketPendingGate && !deliveryActiveGate && !enFluxGate) {
+                                    verrouPerime = true;
+                                    android.util.Log.w(TAG, "handleDeepLink: verrou PENDING pour wo="
+                                        + adGate.woNum + " prouvé périmé par le registre (aucun ticket pending, "
+                                        + "aucune livraison active, état=" + etatGate + ") — nettoyé, nouveau deep link autorisé");
+                                    adsGate.clear();
+                                }
+                            }
+                        }
+                    } catch (Exception eVerifGate) {
+                        android.util.Log.w(TAG, "handleDeepLink: vérif registre pour verrou PENDING ERR (non-bloquant, refus maintenu): " + eVerifGate.getMessage());
+                    }
+                    if (!verrouPerime) {
+                        android.util.Log.w(TAG, "handleDeepLink: REFUS — livraison PENDING déjà en attente pour wo="
+                            + adGate.woNum + " (demande actuelle wo=" + woNum + ") — doit être réglée avant quoi que ce soit");
+                        retournerFieldService(woNum, woIdGuid, "erreur_livraison_pending_en_attente",
+                            buildErrorJson("LIVRAISON_PENDING_EN_ATTENTE",
+                                "Une livraison pour le WO " + adGate.woNum + " est déjà en attente — réglez-la avant d'en démarrer une nouvelle."));
+                        return;
+                    }
                 }
             } catch (Exception eGate) {
                 android.util.Log.w(TAG, "handleDeepLink: erreur vérif PENDING — " + eGate.getMessage());
