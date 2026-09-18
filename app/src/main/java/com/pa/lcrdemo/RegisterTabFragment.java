@@ -5072,11 +5072,26 @@ public class RegisterTabFragment extends Fragment {
                         // bon de travail après une annulation.
                         boolean isAnnulation = row != null && "ANNULATION".equalsIgnoreCase(row.type);
                         boolean hasTicket = row != null && row.ticketNo != null && !row.ticketNo.isEmpty();
-                        hasData = row != null && (hasTicket || isAnnulation);
+                        // ✅ AJOUTÉ (18 sept 2026, demande Paul — "si
+                        // toutefois l'impression est obligatoire ou doit
+                        // tenir compte du jobid pour récupérer le
+                        // ticket_number") — quand l'impression est
+                        // obligatoire, ticket_no reste légitimement vide
+                        // pendant TOUT RUNNING_FLOWING (le vrai numéro
+                        // n'existe qu'après impression, à la toute fin —
+                        // documenté, pas un bug). La ligne existe bel et
+                        // bien, retrouvable par job_id — donc considérée
+                        // comme une vraie donnée même sans ticket_no,
+                        // pour que le bouton ne reste pas caché à tort
+                        // pendant qu'une livraison à impression
+                        // obligatoire est en cours.
+                        boolean hasJobId = row != null && row.jobId != null && !row.jobId.trim().isEmpty();
+                        hasData = row != null && (hasTicket || isAnnulation || hasJobId);
                         LogBus.api(node, "[BTN-RETOUR-WO] woCheck=" + woCheck + " connectedFinal=" + connectedFinal
                                 + " row=" + (row != null) + " row.ticketNo=" + (row != null ? row.ticketNo : "n/a")
                                 + " row.type=" + (row != null ? row.type : "n/a")
-                                + " isAnnulation=" + isAnnulation + " hasTicket=" + hasTicket + " hasData=" + hasData);
+                                + " isAnnulation=" + isAnnulation + " hasTicket=" + hasTicket
+                                + " hasJobId=" + hasJobId + " hasData=" + hasData);
                     } catch (Exception e) {
                         LogBus.api(node, "[BTN-RETOUR-WO] ERR pendant getLatestForWo(" + woCheck + "): " + e.getMessage());
                     } finally {
