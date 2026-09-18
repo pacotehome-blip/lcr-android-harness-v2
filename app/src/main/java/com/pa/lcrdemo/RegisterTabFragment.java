@@ -950,6 +950,52 @@ public class RegisterTabFragment extends Fragment {
             com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(requireContext(), ticketFroidFinal);
         if (backupExistant != null) return;
 
+        // ✅ AJOUTÉ (18 sept 2026, demande Paul — "pourquoi j'ai ça reviens
+        // avec le delivery-uid.json pour la fin et le fichier json pour
+        // le running_flowing" — confirmé par les fichiers réels : des
+        // fantômes RECONSTRUCTION_FROIDE (wo_num vide dans le nom de
+        // fichier, "filgo_livraison__242.json") apparaissaient pour des
+        // tickets DÉJÀ suivis normalement et déjà synchronisés) — trouvé :
+        // les deux gardes ci-dessus (BD locale, JSON local) ne couvrent
+        // pas le cas où la trace locale a fini par disparaître (BD
+        // purgée, ou JSON déjà nettoyé par cleanupOldBackupsAsync — ne
+        // garde que les 3 dernières livraisons SYNCED) alors que
+        // Dataverse, lui, garde la vraie trace indéfiniment. Avant de
+        // conclure "jamais vue par l'app", vérifie maintenant aussi
+        // Dataverse (pullDeliveryByTicket, déjà utilisé ailleurs pour ce
+        // même usage) — s'il la trouve là-bas, il restaure lui-même la
+        // ligne BD locale au passage, donc plus besoin de reconstruire
+        // un fantôme. Best-effort : si le token échoue (hors ligne),
+        // continue quand même vers la reconstruction — mieux vaut un
+        // vrai filet imparfait que pas de filet du tout quand
+        // Dataverse est injoignable.
+        final boolean[] trouveDansDataverse = { false };
+        try {
+            java.util.concurrent.CountDownLatch latchFroid = new java.util.concurrent.CountDownLatch(1);
+            com.pa.lcrdemo.auth.MsalTokenProvider msalFroid =
+                new com.pa.lcrdemo.auth.MsalTokenProvider(requireContext());
+            msalFroid.acquireTokenSilentFromWorker(new com.pa.lcrdemo.auth.MsalTokenProvider.TokenCallback() {
+                @Override public void onSuccess(String token) {
+                    try {
+                        trouveDansDataverse[0] = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullDeliveryByTicket(
+                            requireContext().getApplicationContext(), token, serialFromArgs, node, ticketFroidFinal);
+                    } catch (Exception ignoredPull) {
+                    } finally {
+                        latchFroid.countDown();
+                    }
+                }
+                @Override public void onError(Exception e) {
+                    latchFroid.countDown();
+                }
+            });
+            latchFroid.await(8, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (Exception ignoredFroidToken) {}
+        if (trouveDansDataverse[0]) {
+            LogBus.api(node, "[RECONSTRUCTION-FROID] ticket=" + ticketFroidFinal
+                + " — trouvé sur Dataverse (trace locale perdue, pas une vraie orpheline) — reconstruction sautée");
+            return;
+        }
+
         LogBus.api(node, "[RECONSTRUCTION-FROID] ticket=" + ticketFroidFinal
             + " — CONNECTED/IDLE + preset atteint (delCode=0x" + Integer.toHexString(dcFroid)
             + "), AUCUNE trace locale (ni BD, ni backup) — livraison probablement démarrée et"
