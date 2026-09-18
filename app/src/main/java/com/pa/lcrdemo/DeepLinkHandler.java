@@ -2528,202 +2528,98 @@ public class DeepLinkHandler {
                                     break;
                                 }
                             }
-                            // ✅ CORRIGÉ (17 sept 2026, demande Paul — "si
-                            // on n'imprime pas le ticket de livraison, la
-                            // il est resté jusqu'à la fin à 237, j'ai été
-                            // obligé de faire status pour voir 238, le
-                            // fichier json dans le running_flowing était
-                            // 237") — trouvé : cette re-lecture existait
-                            // déjà, mais SEULEMENT dans la branche d'échec
-                            // de Continue (voir ticketChanged plus bas) —
-                            // jamais dans le cas normal (succès). Le
-                            // sale_number lu à l'armement (juste après
-                            // ARMED, ligne ~1497) est celui de la livraison
-                            // PRÉCÉDENTE — le registre ne l'avance qu'au
-                            // vrai démarrage du flux (ce Continue/RUN
-                            // ci-dessus), pas à l'armement. Relit
-                            // maintenant après un Continue réussi et
-                            // corrige la BD locale + le JSON déjà écrits à
-                            // l'armement si le numéro a changé — jamais
-                            // bloquant pour la suite de la livraison.
+                            // ✅ REMIS (18 sept 2026, demande Paul — "il
+                            // faut avoir la bonne lecture avant le
+                            // running flowing... corriger le ui et
+                            // json") — le battement seul (RegisterTabFragment)
+                            // ne suffisait pas : il ne fait que REFLÉTER un
+                            // changement déjà survenu, jamais le PROVOQUER —
+                            // sans lecture active ici, rien ne garantit que
+                            // dernierSaleNoConnu bouge avant que le flux ne
+                            // démarre visuellement. Relit maintenant
+                            // activement, plusieurs fois si besoin, JUSTE
+                            // après Continue — donc AVANT que RUNNING_FLOWING
+                            // ne soit vraiment en cours, jamais pendant.
+                            // S'arrête dès que deux lectures consécutives
+                            // sont identiques (valeur stabilisée), pas
+                            // seulement dès qu'elle diffère de l'armement —
+                            // pour éviter de s'arrêter sur une valeur qui
+                            // continuerait de bouger. Écrit BD + JSON ici;
+                            // l'UI suit automatiquement via le battement
+                            // existant (dernierSaleNoConnu, mis à jour par
+                            // cette même lecture), en général en quelques
+                            // secondes.
                             if (continueOk) {
                                 try {
-                                    // ✅ AJOUTÉ (17 sept 2026, demande Paul
-                                    // — "est-ce que tu tiens compte aussi
-                                    // de mettre à jour si c'est le
-                                    // ticket_number qu'on utilise? et que
-                                    // l'on doit imprimer le ticket") —
-                                    // trouvé : sans ce garde, la correction
-                                    // s'appliquait AUSSI quand l'impression
-                                    // est obligatoire — mauvais, puisque
-                                    // dans ce cas ticketArm reste
-                                    // délibérément vide à l'armement (voir
-                                    // ligne ~1492) : le VRAI ticket_number
-                                    // n'existe qu'après impression, à la
-                                    // fin de la livraison, pas ici. Cette
-                                    // correction post-Continue ne
-                                    // s'applique qu'au cas sale_number-
-                                    // comme-ticket (impression non
-                                    // obligatoire) — jamais quand un vrai
-                                    // ticket imprimé est attendu.
+                                    com.pa.lcr.lcp.DeliveryController dcApresContinue =
+                                        com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                            .getController(transportKey, node);
                                     boolean impressionObligatoireApresContinue = true;
-                                    com.pa.lcr.lcp.DeliveryController dcApresContinue = null;
-                                    try {
-                                        dcApresContinue =
-                                            com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                                                .getController(transportKey, node);
-                                        if (dcApresContinue != null) {
-                                            impressionObligatoireApresContinue = !dcApresContinue.api_isTicketRequiredNeverPrint();
-                                        }
-                                    } catch (Exception ignoredReqApresContinue) {}
-                                    if (impressionObligatoireApresContinue) {
-                                        android.util.Log.i(TAG, "job/continue: impression obligatoire — correction sale_number sautée, le vrai ticket viendra à la fin de la livraison");
-                                    } else {
-                                    // ✅ CORRIGÉ (17 sept 2026, demande Paul
-                                    // — "je veux que tu respectes ce que
-                                    // dit le registre et ne pas inventer
-                                    // quoi que ce soit") — trouvé : cette
-                                    // relecture utilisait
-                                    // snapApresContinue.data.optString("ticket_no")
-                                    // — le champ BRUT, non validé, du
-                                    // snapshot général (le même champ qui a
-                                    // produit "301" dans un cas observé
-                                    // plus tôt ce soir, une valeur qui ne
-                                    // représentait PAS le sale_number de
-                                    // cette livraison). Utilise maintenant
-                                    // api_readTicketNo23Frais() — le seul
-                                    // point d'entrée qui applique la vraie
-                                    // règle documentée du fabricant
-                                    // (#22 SaleNumber fiable dès le début,
-                                    // #23 TicketNumber seulement après
-                                    // impression, avec repli), journalisée
-                                    // via [TICKET-SOURCE] pour rester
-                                    // traçable — jamais le champ brut
-                                    // directement.
-                                    // ✅ CORRIGÉ (18 sept 2026, demande
-                                    // Paul — "il me semble que le battement
-                                    // ne doit pas avoir lieu pendant le
-                                    // running_flowing... si j'ai 249 dans
-                                    // le ui, pourquoi c'est pas dans le
-                                    // json") — trouvé mieux qu'une boucle
-                                    // de reprises avec ses propres lectures
-                                    // LCP : dernierSaleNoConnu (champ
-                                    // public de DeliveryController) est
-                                    // déjà tenu à jour EN CONTINU par une
-                                    // autre boucle existante, indépendante
-                                    // de ce correctif — c'est exactement
-                                    // ce qui garde l'UI toujours juste
-                                    // (confirmé : l'UI montrait déjà 249
-                                    // pendant que ce correctif, avec ses
-                                    // propres lectures, restait bloqué à
-                                    // 248). Relit maintenant cette même
-                                    // valeur déjà fiable, au lieu de
-                                    // refaire des lectures LCP séparées —
-                                    // aucune communication matérielle
-                                    // additionnelle, juste une lecture de
-                                    // champ.
-                                    // ✅ CORRIGÉ (18 sept 2026, demande Paul
-                                    // — "revalide moi ton dernier
-                                    // correctif") — trouvé un vrai trou
-                                    // dans ma propre simplification
-                                    // précédente : sans AUCUNE lecture
-                                    // réelle, rien ne garantissait que
-                                    // dernierSaleNoConnu bouge dans cette
-                                    // fenêtre — j'avais supprimé le
-                                    // mécanisme qui faisait réellement
-                                    // avancer la valeur. La vraie règle du
-                                    // 28 août interdit les lectures
-                                    // RÉPÉTÉES pendant que le flux COULE
-                                    // (contention avec le tick 100ms) —
-                                    // elle ne visait pas une seule
-                                    // correction ponctuelle juste après
-                                    // Continue, avant que le flux ne soit
-                                    // vraiment engagé. Fait maintenant UNE
-                                    // seule vraie lecture (bornée, jusqu'à
-                                    // 3 tentatives max, 500ms d'écart) —
-                                    // le même compromis que l'armement
-                                    // lui-même fait déjà une fois — puis
-                                    // s'arrête dès que la valeur a changé.
-                                    String ticketApresContinue = "";
-                                    for (int essaiTicket = 0; essaiTicket < 3; essaiTicket++) {
-                                        if (dcApresContinue != null) {
+                                    if (dcApresContinue != null) {
+                                        try { impressionObligatoireApresContinue = !dcApresContinue.api_isTicketRequiredNeverPrint(); } catch (Exception ignoredReq) {}
+                                    }
+                                    if (!impressionObligatoireApresContinue && dcApresContinue != null) {
+                                        String precedente = "";
+                                        String ticketStabilise = "";
+                                        for (int essaiStab = 0; essaiStab < 6; essaiStab++) {
                                             try { dcApresContinue.forceRefreshTicketEtSaleNoPourJob(jobId); } catch (Exception ignoredRefresh) {}
-                                            String v = dcApresContinue.dernierSaleNoConnu;
-                                            ticketApresContinue = v != null ? v : "";
-                                        }
-                                        if (!ticketApresContinue.isEmpty() && !ticketApresContinue.equals(ticketNoAtStart)) {
-                                            break; // bascule confirmée — pas besoin de réessayer davantage
-                                        }
-                                        if (essaiTicket < 2) { try { Thread.sleep(500); } catch (Exception ignored) {} }
-                                    }
-                                    if (!ticketApresContinue.isEmpty()
-                                            && !ticketApresContinue.equals(ticketNoAtStart)) {
-                                        android.util.Log.i(TAG, "job/continue: sale_number corrigé après démarrage réel du flux — "
-                                            + ticketNoAtStart + "→" + ticketApresContinue);
-                                        lastKnownTicketNo.put(ticketCacheKey(serialId, woNum), ticketApresContinue);
-                                        final String fTicketCorrige = ticketApresContinue;
-                                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbCorrige =
-                                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
-                                        try {
-                                            android.content.ContentValues cvCorrige = new android.content.ContentValues();
-                                            cvCorrige.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, jobId);
-                                            cvCorrige.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, woNum);
-                                            cvCorrige.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketCorrige);
-                                            cvCorrige.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO, fTicketCorrige);
-                                            dbCorrige.upsertByJobId(cvCorrige);
-                                        } finally {
-                                            try { dbCorrige.close(); } catch (Exception ignored) {}
-                                        }
-                                        // ✅ CORRIGÉ (18 sept 2026, demande
-                                        // Paul — "assure-toi que le fichier
-                                        // json du début de la livraison
-                                        // porte le bon ticket_number
-                                        // (sales_number)") — trouvé : ce
-                                        // JSON correctif ne contenait QUE
-                                        // status/job_id/note — jamais
-                                        // ticket_no/sale_no à la racine du
-                                        // fichier, donc le fichier de
-                                        // départ (nommé par jobId, pas
-                                        // encore par le vrai ticket)
-                                        // gardait toujours l'ancien
-                                        // numéro. Relit maintenant le
-                                        // fichier existant (pour préserver
-                                        // produit/preset déjà écrits à
-                                        // l'armement), corrige seulement
-                                        // ticket_no/sale_no, et réécrit —
-                                        // même fichier (même jobId),
-                                        // jamais un nouveau.
-                                        try {
-                                            com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch existantArm =
-                                                com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(
-                                                    activity.getApplicationContext(), jobId);
-                                            org.json.JSONObject payloadCorrige;
-                                            if (existantArm != null && existantArm.json != null) {
-                                                payloadCorrige = existantArm.json;
-                                            } else {
-                                                payloadCorrige = new org.json.JSONObject();
-                                                payloadCorrige.put("job_id", jobId);
-                                                payloadCorrige.put("wo_num", woNum != null ? woNum : "");
-                                                payloadCorrige.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
-                                                payloadCorrige.put("serial_id", serialId != null ? serialId : "");
-                                                payloadCorrige.put("lcrnode", node);
-                                                payloadCorrige.put("btmac", mac != null ? mac : "");
-                                                payloadCorrige.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
-                                                payloadCorrige.put("net_l", 0);
-                                                payloadCorrige.put("gross_l", 0);
-                                                payloadCorrige.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}");
+                                            String lecture = dcApresContinue.api_readTicketNo23Frais();
+                                            if (lecture == null) lecture = "";
+                                            if (!lecture.isEmpty() && lecture.equals(precedente)) {
+                                                ticketStabilise = lecture;
+                                                break; // deux lectures consécutives identiques — vraiment stabilisé
                                             }
-                                            payloadCorrige.put("ticket_no", fTicketCorrige);
-                                            payloadCorrige.put("sale_no", fTicketCorrige);
-                                            payloadCorrige.put("backup_ts", System.currentTimeMillis());
-                                            payloadCorrige.put("sync_status", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
-                                            com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
-                                                activity.getApplicationContext(), woNum, jobId, payloadCorrige);
-                                        } catch (Exception ignoredJsonCorrige) {}
+                                            precedente = lecture;
+                                            if (essaiStab < 5) { try { Thread.sleep(400); } catch (Exception ignored) {} }
+                                        }
+                                        if (!ticketStabilise.isEmpty() && !ticketStabilise.equals(ticketNoAtStart)) {
+                                            android.util.Log.i(TAG, "job/continue: sale_number stabilisé avant running_flowing — "
+                                                + ticketNoAtStart + "→" + ticketStabilise);
+                                            lastKnownTicketNo.put(ticketCacheKey(serialId, woNum), ticketStabilise);
+                                            final String fTicketStab = ticketStabilise;
+                                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbStab =
+                                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                                            try {
+                                                android.content.ContentValues cvStab = new android.content.ContentValues();
+                                                cvStab.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, jobId);
+                                                cvStab.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, woNum);
+                                                cvStab.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketStab);
+                                                cvStab.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO, fTicketStab);
+                                                dbStab.upsertByJobId(cvStab);
+                                            } finally {
+                                                try { dbStab.close(); } catch (Exception ignored) {}
+                                            }
+                                            try {
+                                                com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch existantStab =
+                                                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(
+                                                        activity.getApplicationContext(), jobId);
+                                                org.json.JSONObject payloadStab;
+                                                if (existantStab != null && existantStab.json != null) {
+                                                    payloadStab = existantStab.json;
+                                                } else {
+                                                    payloadStab = new org.json.JSONObject();
+                                                    payloadStab.put("job_id", jobId);
+                                                    payloadStab.put("wo_num", woNum != null ? woNum : "");
+                                                    payloadStab.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
+                                                    payloadStab.put("serial_id", serialId != null ? serialId : "");
+                                                    payloadStab.put("lcrnode", node);
+                                                    payloadStab.put("btmac", mac != null ? mac : "");
+                                                    payloadStab.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
+                                                    payloadStab.put("net_l", 0);
+                                                    payloadStab.put("gross_l", 0);
+                                                    payloadStab.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}");
+                                                }
+                                                payloadStab.put("ticket_no", fTicketStab);
+                                                payloadStab.put("sale_no", fTicketStab);
+                                                payloadStab.put("backup_ts", System.currentTimeMillis());
+                                                payloadStab.put("sync_status", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                                                com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
+                                                    activity.getApplicationContext(), woNum, jobId, payloadStab);
+                                            } catch (Exception ignoredJsonStab) {}
+                                        }
                                     }
-                                    }
-                                } catch (Exception eCorrige) {
-                                    android.util.Log.w(TAG, "job/continue: correction sale_number post-Continue ERR (non-bloquant): " + eCorrige.getMessage());
+                                } catch (Exception eStabOuter) {
+                                    android.util.Log.w(TAG, "job/continue: stabilisation sale_number ERR (non-bloquant): " + eStabOuter.getMessage());
                                 }
                             }
                             if (!continueOk) {
