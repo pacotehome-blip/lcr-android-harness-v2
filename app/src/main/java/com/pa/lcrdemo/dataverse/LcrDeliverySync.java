@@ -289,6 +289,18 @@ public class LcrDeliverySync {
         String dataverseId = existing.optString("filgo_registrecompteurid", null);
         String versionActuelle = existing.optString("versionnumber", null);
 
+        // ✅ AJOUTÉ (18 sept 2026, demande Paul) — complète la fiche
+        // locale avec les champs administratifs déjà présents côté
+        // Dataverse, seulement là où la fiche locale ne les a pas
+        // encore. Toujours fait, peu importe si le PATCH plus bas est
+        // sauté (modification concurrente) — cet enrichissement est en
+        // LECTURE seule côté Dataverse, aucun risque de conflit.
+        try {
+            store.enrichirDepuisDataverseSiManquant(row.serialId, existing);
+        } catch (Exception eEnrichir) {
+            Log.w(TAG, "enrichirDepuisDataverseSiManquant ERR (non-bloquant): " + eEnrichir.getMessage());
+        }
+
         // Étape 2 — comparer au versionnumber qu'on avait en cache depuis
         // la dernière synchro. Null en cache = fiche jamais synchronisée
         // par cette app avant (ex. créée directement par Jacques dans
@@ -318,8 +330,18 @@ public class LcrDeliverySync {
                                                             String accessToken) throws Exception {
         String filter = java.net.URLEncoder.encode(
             "filgo_numerodeserie eq '" + serialId.replace("'", "''") + "'", "UTF-8");
+        // ✅ ÉLARGI (18 sept 2026, demande Paul — "si Dataverse a plus
+        // d'info on met à jour la table locale avec les champs qui
+        // manquent") — ramène maintenant aussi les champs administratifs
+        // (calibration, scellé, coefficient, identifiant LC3, nom) que
+        // l'app n'écrit jamais elle-même mais qui sont utiles à afficher
+        // localement. Utilisé par enrichirDepuisDataverseSiManquant()
+        // ci-dessous — jamais pour écraser un champ déjà connu de l'app.
         String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_REGISTRE
-            + "?$select=filgo_registrecompteurid,versionnumber&$top=1&$filter=" + filter;
+            + "?$select=filgo_registrecompteurid,versionnumber,filgo_registrecompteur1,"
+            + "filgo_coefficientbrutnet,filgo_datedecalibration,filgo_datedescellement,"
+            + "filgo_numerodescelle,filgo_identifiantunitelc3"
+            + "&$top=1&$filter=" + filter;
         URL url = new URL(urlStr);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         try {

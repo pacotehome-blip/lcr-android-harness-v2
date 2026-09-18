@@ -225,4 +225,52 @@ public class RegistreStore {
         cv.put(COL_SYNC_STATUS, SYNC_SYNCED);
         db.update(TABLE, cv, COL_SERIAL + "=?", new String[]{ serialId });
     }
+
+    /**
+     * ✅ AJOUTÉ (18 sept 2026, demande Paul — "si Dataverse a plus
+     * d'info on met à jour la table locale avec les champs qui
+     * manquent, est-ce que ça a du sens?") — complète les champs
+     * administratifs (nom, coefficient, calibration, scellé,
+     * identifiant LC3) depuis Dataverse, SEULEMENT là où la fiche
+     * locale ne les a pas déjà — jamais un champ déjà rempli, peu
+     * importe sa valeur. Direction Dataverse→local uniquement : jamais
+     * repoussé vers Dataverse (voir upsertDepuisValidation, qui
+     * n'écrit jamais ces colonnes). Ne change jamais sync_status —
+     * cet enrichissement est indépendant du cycle push/PENDING.
+     */
+    public void enrichirDepuisDataverseSiManquant(String serialId, org.json.JSONObject dataverseRow) {
+        if (serialId == null || serialId.trim().isEmpty() || dataverseRow == null) return;
+        Row existing = getBySerial(serialId);
+        if (existing == null) return;
+
+        ContentValues cv = new ContentValues();
+        if (isVide(existing.nom) && dataverseRow.has("filgo_registrecompteur1")) {
+            cv.put(COL_NOM, dataverseRow.optString("filgo_registrecompteur1", ""));
+        }
+        if (existing.coeffBrutNet == null && dataverseRow.has("filgo_coefficientbrutnet")
+                && !dataverseRow.isNull("filgo_coefficientbrutnet")) {
+            cv.put(COL_COEFF_BRUT_NET, dataverseRow.optDouble("filgo_coefficientbrutnet"));
+        }
+        if (isVide(existing.dateCalibration) && dataverseRow.has("filgo_datedecalibration")) {
+            cv.put(COL_DATE_CALIBRATION, dataverseRow.optString("filgo_datedecalibration", ""));
+        }
+        if (isVide(existing.dateDescellement) && dataverseRow.has("filgo_datedescellement")) {
+            cv.put(COL_DATE_DESCELLEMENT, dataverseRow.optString("filgo_datedescellement", ""));
+        }
+        if (isVide(existing.numeroScelle) && dataverseRow.has("filgo_numerodescelle")) {
+            cv.put(COL_NUMERO_SCELLE, dataverseRow.optString("filgo_numerodescelle", ""));
+        }
+        if (isVide(existing.identifiantLc3) && dataverseRow.has("filgo_identifiantunitelc3")) {
+            cv.put(COL_IDENTIFIANT_LC3, dataverseRow.optString("filgo_identifiantunitelc3", ""));
+        }
+        if (cv.size() == 0) return; // rien à compléter
+
+        SQLiteDatabase db = helper.getWritableDatabase();
+        db.update(TABLE, cv, COL_SERIAL + "=?", new String[]{ serialId });
+        Log.i(TAG, "enrichirDepuisDataverseSiManquant: serial=" + serialId + " — " + cv.size() + " champ(s) complété(s)");
+    }
+
+    private static boolean isVide(String s) {
+        return s == null || s.trim().isEmpty();
+    }
 }
