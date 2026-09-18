@@ -2600,29 +2600,61 @@ public class DeepLinkHandler {
                                     // via [TICKET-SOURCE] pour rester
                                     // traçable — jamais le champ brut
                                     // directement.
-                                    String ticketApresContinue = dcApresContinue != null
-                                        ? dcApresContinue.api_readTicketNo23Frais() : "";
-                                    // ✅ AJOUTÉ (18 sept 2026, demande Paul
-                                    // — "il faut vraiment avoir à
-                                    // running_flowing le bon numéro, on ne
-                                    // peut pas reconstruire un ticket sur
-                                    // des erreurs") — la correction BD
-                                    // ci-dessous ne suffisait pas : le job
-                                    // EN MÉMOIRE dans DeliveryController
-                                    // (apiJobs, séparé de la BD) gardait
-                                    // sa toute première valeur capturée
-                                    // (à l'armement, avant Continue) pour
-                                    // TOUTE la durée de la livraison — donc
-                                    // chaque sondage pendant RUNNING_FLOWING
-                                    // continuait de retourner l'ancien
-                                    // numéro, peu importe la correction BD.
-                                    // Force maintenant ce job précis à se
-                                    // relire réellement, pour que le
-                                    // snapshot lui-même soit bon dès
-                                    // maintenant — pas seulement la BD
-                                    // corrigée après coup.
-                                    if (dcApresContinue != null) {
-                                        try { dcApresContinue.forceRefreshTicketEtSaleNoPourJob(jobId); } catch (Exception ignoredRefresh) {}
+                                    // ✅ CORRIGÉ (18 sept 2026, demande
+                                    // Paul — "il me semble que le battement
+                                    // ne doit pas avoir lieu pendant le
+                                    // running_flowing... si j'ai 249 dans
+                                    // le ui, pourquoi c'est pas dans le
+                                    // json") — trouvé mieux qu'une boucle
+                                    // de reprises avec ses propres lectures
+                                    // LCP : dernierSaleNoConnu (champ
+                                    // public de DeliveryController) est
+                                    // déjà tenu à jour EN CONTINU par une
+                                    // autre boucle existante, indépendante
+                                    // de ce correctif — c'est exactement
+                                    // ce qui garde l'UI toujours juste
+                                    // (confirmé : l'UI montrait déjà 249
+                                    // pendant que ce correctif, avec ses
+                                    // propres lectures, restait bloqué à
+                                    // 248). Relit maintenant cette même
+                                    // valeur déjà fiable, au lieu de
+                                    // refaire des lectures LCP séparées —
+                                    // aucune communication matérielle
+                                    // additionnelle, juste une lecture de
+                                    // champ.
+                                    // ✅ CORRIGÉ (18 sept 2026, demande Paul
+                                    // — "revalide moi ton dernier
+                                    // correctif") — trouvé un vrai trou
+                                    // dans ma propre simplification
+                                    // précédente : sans AUCUNE lecture
+                                    // réelle, rien ne garantissait que
+                                    // dernierSaleNoConnu bouge dans cette
+                                    // fenêtre — j'avais supprimé le
+                                    // mécanisme qui faisait réellement
+                                    // avancer la valeur. La vraie règle du
+                                    // 28 août interdit les lectures
+                                    // RÉPÉTÉES pendant que le flux COULE
+                                    // (contention avec le tick 100ms) —
+                                    // elle ne visait pas une seule
+                                    // correction ponctuelle juste après
+                                    // Continue, avant que le flux ne soit
+                                    // vraiment engagé. Fait maintenant UNE
+                                    // seule vraie lecture (bornée, jusqu'à
+                                    // 3 tentatives max, 500ms d'écart) —
+                                    // le même compromis que l'armement
+                                    // lui-même fait déjà une fois — puis
+                                    // s'arrête dès que la valeur a changé.
+                                    String ticketApresContinue = "";
+                                    for (int essaiTicket = 0; essaiTicket < 3; essaiTicket++) {
+                                        if (dcApresContinue != null) {
+                                            try { dcApresContinue.forceRefreshTicketEtSaleNoPourJob(jobId); } catch (Exception ignoredRefresh) {}
+                                            String v = dcApresContinue.dernierSaleNoConnu;
+                                            ticketApresContinue = v != null ? v : "";
+                                        }
+                                        if (!ticketApresContinue.isEmpty() && !ticketApresContinue.equals(ticketNoAtStart)) {
+                                            break; // bascule confirmée — pas besoin de réessayer davantage
+                                        }
+                                        if (essaiTicket < 2) { try { Thread.sleep(500); } catch (Exception ignored) {} }
                                     }
                                     if (!ticketApresContinue.isEmpty()
                                             && !ticketApresContinue.equals(ticketNoAtStart)) {
