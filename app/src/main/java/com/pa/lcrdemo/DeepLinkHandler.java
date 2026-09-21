@@ -1024,6 +1024,43 @@ public class DeepLinkHandler {
 
             if (existing != null && existing.type != null && !"ANNULATION".equals(existing.type)) {
                 boolean livraisonComplete = (fPresetD <= 0 || existing.netL >= fPresetD);
+                // ✅ AJOUTÉ (21 sept 2026, demande Paul — "si je suis en
+                // running_flowing sur la tablette, je ne devrais même pas
+                // voir l'avertissement que le bon est déjà complété car
+                // je suis en livraison... il devrait directement aller au
+                // statut de la livraison") — trouvé : ce dialogue ne
+                // comparait QUE la BD locale (dernier net vs preset),
+                // jamais l'état réel du registre. Si une livraison est
+                // GENUINEMENT en cours (RUNNING_FLOWING/RUNNING_PAUSED)
+                // sur ce registre précis, le dialogue n'a aucun sens —
+                // le bon n'est pas "déjà complété", il est en train
+                // d'être livré. Vérifie l'état réel avant de considérer
+                // le dialogue.
+                if (livraisonComplete) {
+                    try {
+                        com.pa.lcr.lcp.DeliveryController dcVerifEnCours =
+                            com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                        if (dcVerifEnCours != null) {
+                            com.pa.lcr.lcp.DeliveryState etatVerifEnCours = dcVerifEnCours.getState();
+                            if (etatVerifEnCours == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                                    || etatVerifEnCours == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
+                                // ✅ Pas juste sauter le dialogue — une
+                                // livraison coule VRAIMENT, un nouvel
+                                // armement serait en conflit. On ouvre
+                                // directement le tab existant (son statut
+                                // réel s'affiche déjà) et on s'arrête là —
+                                // jamais de nouvel armement par-dessus.
+                                android.util.Log.i(TAG, "lancerLivraison: bon " + woNum
+                                    + " déjà complété selon la BD, MAIS livraison réellement en cours (état=" + etatVerifEnCours
+                                    + ") — ouverture directe du statut, aucun nouvel armement");
+                                activity.upsertRegisterTabFromScan(transportKey, node, 255, serialId, true);
+                                return;
+                            }
+                        }
+                    } catch (Exception eVerifEnCours) {
+                        android.util.Log.w(TAG, "lancerLivraison: vérif état réel avant dialogue ERR (non-bloquant): " + eVerifEnCours.getMessage());
+                    }
+                }
                 if (livraisonComplete) {
                     android.util.Log.w(TAG, "lancerLivraison: bon " + woNum
                         + " déjà complété (ticket #" + existing.ticketNo
