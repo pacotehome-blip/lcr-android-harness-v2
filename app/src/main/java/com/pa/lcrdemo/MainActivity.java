@@ -752,6 +752,46 @@ public class MainActivity extends AppCompatActivity {
             android.util.Log.w("NetworkSync", "registerNetworkCallback ERR (non-bloquant): " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "MainActivity.registerNetworkCallback", e); } catch (Exception ignored) {}
         }
 
+        // ✅ AJOUTÉ (21 sept 2026, demande Paul — "il faut prendre le
+        // fichier json running_flowing ou le json de fin de livraison...
+        // les apporter dans la table pending afin de les avoir dans
+        // Dataverse au prochain sync") — jusqu'ici, restoreAllAsync()
+        // (déjà existante, testée) n'était déclenchée que manuellement
+        // via Support. Déclenche maintenant automatiquement au
+        // démarrage SEULEMENT si la table locale est vraiment vide
+        // (BD vierge, réinstall, ou vidée pour un test) — jamais sinon,
+        // pour ne jamais interférer avec une table déjà en usage normal.
+        // Importe TOUT (respecte le vrai sync_status du JSON — voir
+        // restoreAllAsync) — une ligne déjà SYNCED n'est jamais
+        // repoussée à Dataverse (LcrDeliverySync ne pousse que PENDING),
+        // et même une ligne PENDING est protégée contre les doublons par
+        // findExistingDataverseId (filgo_name) avant chaque POST.
+        new Thread(() -> {
+            try {
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb lcrDbCheckVide =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(getApplicationContext());
+                int totalActuel;
+                try {
+                    totalActuel = lcrDbCheckVide.getTotalCount();
+                } finally {
+                    try { lcrDbCheckVide.close(); } catch (Exception ignored) {}
+                }
+                if (totalActuel == 0) {
+                    android.util.Log.i("RestoreAuto", "table locale vide — restauration automatique depuis les backups JSON");
+                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.restoreAllAsync(getApplicationContext(),
+                        (restored, skipped, failed, messages) -> {
+                            android.util.Log.i("RestoreAuto", "terminé — " + restored + " restaurée(s), "
+                                + skipped + " déjà présente(s)/ignorée(s), " + failed + " erreur(s)");
+                            if (restored > 0) {
+                                com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(getApplicationContext());
+                            }
+                        });
+                }
+            } catch (Exception eRestoreAuto) {
+                android.util.Log.w("RestoreAuto", "vérification table vide ERR (non-bloquant): " + eRestoreAuto.getMessage());
+            }
+        }, "RestoreAutoStartup").start();
+
         // ✅ (demande Paul 31 juillet 2026 : "tout persister") — LogBus était jusqu'ici un
         // buffer 100% en mémoire, jamais persisté, invisible pour le RCA après coup. Ce
         // listener écrit chaque événement (UI/API/IO_TX/IO_RX) dans log_bus_event de façon
@@ -7084,6 +7124,18 @@ private boolean ensureBtConnectPermission() {
             if (candidatKey.startsWith("BT:")) {
                 btAddr = candidatKey.substring(3);
                 transportPrefere = com.pa.lcr.lcp.storage.RegistreStore.TRANSPORT_BT;
+                // ✅ CORRIGÉ (18 sept 2026, demande Paul — "manque le nom
+                // du bt") — trouvé : btNom n'était jamais rempli pour le
+                // cas BT (seulement pour USB). Récupère maintenant le vrai
+                // nom d'appareil Bluetooth déjà connu de MediaTransportManager
+                // (BluetoothDevice.getName(), ex. "SD1000V2.0.8.8.8772A1-TEST")
+                // — jamais une nouvelle communication, juste une valeur déjà
+                // en cache depuis la connexion.
+                try {
+                    String vraiNomBt = com.pa.lcr.lcp.transport.MediaTransportManager.get(this)
+                        .getBtDeviceNameForMac(btAddr);
+                    if (vraiNomBt != null && !vraiNomBt.trim().isEmpty()) btNom = vraiNomBt.trim();
+                } catch (Exception ignoredNomBt) {}
             } else if (candidatKey.startsWith("TCP:")) {
                 String[] parts = candidatKey.substring(4).split(":");
                 ipAddr = parts.length > 0 ? parts[0] : null;

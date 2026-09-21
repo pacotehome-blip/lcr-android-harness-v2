@@ -403,7 +403,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 COL_WO_NUM + "=? AND (" + COL_JOB_ID + " IS NULL OR " + COL_JOB_ID + "!=?)",
                 new String[]{woNum, excludeJobId},
                 null, null,
-                COL_TRANSACTION_NO + " DESC", "1")) {
+                COL_ID + " DESC", "1" /* ✅ CORRIGÉ 18 sept 2026 - meme bug que getLatestForWo(), transaction_no jamais ecrit localement */)) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) {
             Log.e(TAG, "getLatestForWoExcludingJobId ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getLatestForWoExcludingJobId", e); } catch (Exception ignored) {}
@@ -451,7 +451,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 TABLE_DELIVERY, null,
                 COL_TICKET_NO + "=?", new String[]{ticketNo},
                 null, null,
-                COL_TRANSACTION_NO + " DESC", "1")) {
+                COL_ID + " DESC", "1" /* ✅ CORRIGÉ 18 sept 2026 - meme bug que getLatestForWo(), transaction_no jamais ecrit localement */)) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) { Log.e(TAG, "getByTicketNo ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getByTicketNo", e); } catch (Exception ignored) {} }
         return null;
@@ -543,6 +543,22 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     /**
+     * ✅ AJOUTÉ (21 sept 2026, demande Paul) — nombre total de lignes,
+     * peu importe le statut — pour détecter une table vraiment vide
+     * (BD vierge/réinstall/vidée pour un test) avant de déclencher
+     * automatiquement restoreAllAsync() au démarrage.
+     */
+    public int getTotalCount() {
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT COUNT(*) FROM " + TABLE_DELIVERY, null)) {
+            if (c.moveToFirst()) return c.getInt(0);
+        } catch (Exception e) {
+            Log.e(TAG, "getTotalCount ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getTotalCount", e); } catch (Exception ignored) {}
+        }
+        return 0;
+    }
+
+    /**
      * Retourne le nombre de transactions PENDING (indicateur UI).
      */
     public int getPendingCount() {
@@ -581,11 +597,25 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
      * Retourne la dernière transaction pour un WO donné.
      */
     public DeliveryRow getLatestForWo(String woNum) {
+        // ✅ CORRIGÉ (18 sept 2026, demande Paul — "row.ticketNo=245"
+        // restait figé dans le log tout au long d'une livraison qui
+        // était pourtant rendue à 246 puis 247) — trouvé : le tri se
+        // faisait par transaction_no, un champ QUI N'EST JAMAIS ÉCRIT
+        // localement à l'armement (seulement lu depuis Dataverse une
+        // fois synchronisé, filgo_transaction_no). Une nouvelle ligne
+        // locale reste à la valeur par défaut du schéma (DEFAULT 1),
+        // alors qu'une ancienne ligne déjà synchronisée porte une vraie
+        // valeur Dataverse — donc "ORDER BY transaction_no DESC" plaçait
+        // TOUJOURS l'ancienne ligne synchronisée en premier, peu importe
+        // combien de nouvelles livraisons suivaient. COL_ID
+        // (AUTOINCREMENT, purement local, jamais dépendant de Dataverse)
+        // reflète le vrai ordre d'insertion — utilisé maintenant à la
+        // place.
         try (Cursor c = getReadableDatabase().query(
                 TABLE_DELIVERY, null,
                 COL_WO_NUM + "=?", new String[]{woNum},
                 null, null,
-                COL_TRANSACTION_NO + " DESC", "1")) {
+                COL_ID + " DESC", "1")) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) {
             Log.e(TAG, "getLatestForWo ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getLatestForWo", e); } catch (Exception ignored) {}
@@ -846,7 +876,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 TABLE_DELIVERY, null,
                 null, null,
                 null, null,
-                COL_TRANSACTION_NO + " DESC", "1")) {
+                COL_ID + " DESC", "1" /* ✅ CORRIGÉ 18 sept 2026 - meme bug que getLatestForWo(), transaction_no jamais ecrit localement */)) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) {
             Log.e(TAG, "getLastDelivery ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getLastDelivery", e); } catch (Exception ignored) {}
@@ -868,7 +898,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
                 TABLE_DELIVERY, null,
                 COL_SERIAL_ID + "=?", new String[]{serialId.trim()},
                 null, null,
-                COL_TRANSACTION_NO + " DESC", "1")) {
+                COL_ID + " DESC", "1" /* ✅ CORRIGÉ 18 sept 2026 - meme bug que getLatestForWo(), transaction_no jamais ecrit localement */)) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) {
             Log.e(TAG, "getLastDeliveryForSerial ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getLastDeliveryForSerial", e); } catch (Exception ignored) {}

@@ -480,6 +480,21 @@ public class LocalDeliveryBackup {
                             continue; // déjà présent localement — ne jamais écraser
                         }
 
+                        // ✅ CORRIGÉ (21 sept 2026, demande Paul — "dans
+                        // le réel si c'est synced on ne l'envoie pas à
+                        // Dataverse donc importe tout on laissons le
+                        // processus de sync faire sa job") — importe
+                        // TOUT (historique local complet, utile pour
+                        // BTN-RETOUR-WO/CUMUL-WO/etc.), avec le VRAI
+                        // sync_status du JSON — jamais forcé à PENDING
+                        // sans raison. Une ligne SYNCED reste SYNCED
+                        // (jamais repoussée par LcrDeliverySync, qui ne
+                        // pousse que sync_status=PENDING) ; une ligne
+                        // PENDING reste PENDING (protégée par
+                        // findExistingDataverseId — filgo_name — avant
+                        // chaque POST, même en cas de doublon).
+                        String syncStatusJson = j.optString("sync_status", LcrDeliveryStatusDb.SYNC_PENDING);
+
                         ContentValues cv = new ContentValues();
                         cv.put(LcrDeliveryStatusDb.COL_WO_NUM, woNum);
                         cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID, j.optString("wo_id_guid", ""));
@@ -492,16 +507,13 @@ public class LocalDeliveryBackup {
                         cv.put(LcrDeliveryStatusDb.COL_TYPE, LcrDeliveryStatusDb.TYPE_ORIGINAL);
                         cv.put(LcrDeliveryStatusDb.COL_SOURCE, "RESTORE_BACKUP");
                         cv.put(LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
-                        // ✅ PENDING — pas SYNCED : on ne sait pas si Dataverse l'a déjà reçue avant la
-                        // perte locale ; le prochain push se chargera de vérifier/écrire, plutôt que
-                        // de supposer que c'est déjà fait.
-                        cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, LcrDeliveryStatusDb.SYNC_PENDING);
+                        cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, syncStatusJson);
                         cv.put(LcrDeliveryStatusDb.COL_PAYLOAD_JSON, j.optString("payload_complet", ""));
 
                         long newId = lcrDb.insertDelivery(cv);
                         restored++;
-                        messages.add("Restauré : ticket=" + ticketNo + " wo=" + woNum + " (id=" + newId + ")");
-                        Log.i(TAG, "restoreAllAsync: ticket=" + ticketNo + " restauré en PENDING (id=" + newId + ")");
+                        messages.add("Restauré (" + syncStatusJson + ") : ticket=" + ticketNo + " wo=" + woNum + " (id=" + newId + ")");
+                        Log.i(TAG, "restoreAllAsync: ticket=" + ticketNo + " restauré (" + syncStatusJson + ") id=" + newId);
                     } catch (Exception e) {
                         failed++;
                         messages.add("Erreur sur un fichier : " + e.getMessage());
