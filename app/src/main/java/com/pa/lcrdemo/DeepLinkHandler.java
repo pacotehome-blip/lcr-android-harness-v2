@@ -183,9 +183,9 @@ public class DeepLinkHandler {
                                     || etatGate == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED;
                                 if (!ticketPendingGate && !deliveryActiveGate && !enFluxGate) {
                                     verrouPerime = true;
-                                    android.util.Log.w(TAG, "handleDeepLink: verrou PENDING pour wo="
-                                        + adGate.woNum + " prouvé périmé par le registre (aucun ticket pending, "
-                                        + "aucune livraison active, état=" + etatGate + ") — nettoyé, nouveau deep link autorisé");
+                                    com.pa.lcr.lcp.log.LogBus.api(adGate.node, "[PENDING-VERROU] wo=" + adGate.woNum
+                                        + " prouvé périmé par le registre (aucun ticket pending, "
+                                        + "aucune livraison active, état=" + etatGate + ") — nettoyé, nouveau deep link wo=" + woNum + " autorisé");
                                     adsGate.clear();
                                 }
                             }
@@ -194,12 +194,82 @@ public class DeepLinkHandler {
                         android.util.Log.w(TAG, "handleDeepLink: vérif registre pour verrou PENDING ERR (non-bloquant, refus maintenu): " + eVerifGate.getMessage());
                     }
                     if (!verrouPerime) {
-                        android.util.Log.w(TAG, "handleDeepLink: REFUS — livraison PENDING déjà en attente pour wo="
-                            + adGate.woNum + " (demande actuelle wo=" + woNum + ") — doit être réglée avant quoi que ce soit");
-                        retournerFieldService(woNum, woIdGuid, "erreur_livraison_pending_en_attente",
-                            buildErrorJson("LIVRAISON_PENDING_EN_ATTENTE",
-                                "Une livraison pour le WO " + adGate.woNum + " est déjà en attente — réglez-la avant d'en démarrer une nouvelle."));
-                        return;
+                        // ✅ CORRIGÉ (18 sept 2026, demande Paul — "j'ai
+                        // besoin des interactions dans support... on
+                        // donne #série qui n'existe pas sur la citerne
+                        // ou camion, on veut le savoir") — ces messages
+                        // n'allaient avant que dans logcat (invisible
+                        // dans l'app) — jamais dans LogBus/Support.
+                        // Remplacés par LogBus.api() pour être visibles.
+                        com.pa.lcr.lcp.log.LogBus.api(adGate.node, "[PENDING-BLOQUANT] livraison en attente pour wo="
+                            + adGate.woNum + " (demande actuelle wo=" + woNum + ") — ouverture directe du tab bloquant"
+                            + " au lieu d'un refus muet, pour que le chauffeur puisse la terminer");
+                        // ✅ CORRIGÉ (18 sept 2026, demande Paul — "cela ne
+                        // doit en aucun cas l'empêcher d'entrer dans l'apk,
+                        // il entre et on affiche ce qui arrive... je veux
+                        // être capable de terminer celui qui bloque") —
+                        // avant, ce refus faisait finish() immédiatement,
+                        // renvoyant le chauffeur vers FieldService SANS
+                        // jamais lui montrer quoi que ce soit — aucun moyen
+                        // d'agir. Ouvre maintenant directement le tab du
+                        // registre bloquant (même #série+node que la
+                        // livraison PENDING) — le chauffeur voit l'état
+                        // réel et peut la terminer par le chemin normal
+                        // (bouton existant). onDeliveryEnded() efface déjà
+                        // ActiveDeliveryStore à la vraie fin (ligne
+                        // ~3133) — rien à ajouter pour ça. Le chauffeur
+                        // revient ensuite par le chemin normal (FieldService
+                        // → Lancer livraison) pour le nouveau WO.
+                        try {
+                            String macPourOuverture = (adGate.mac != null && !adGate.mac.trim().isEmpty())
+                                ? adGate.mac.trim() : null;
+                            if (macPourOuverture == null && adGate.serialId != null && !adGate.serialId.trim().isEmpty()) {
+                                for (String[] reg : com.pa.lcr.lcp.RegisterSessionManager.get(activity).listKnownRegisters()) {
+                                    if (reg.length >= 3 && String.valueOf(adGate.node).equals(reg[0])
+                                            && adGate.serialId.trim().equals(reg[1]) && !reg[2].isEmpty()) {
+                                        macPourOuverture = reg[2];
+                                        break;
+                                    }
+                                }
+                            }
+                            if (macPourOuverture != null) {
+                                activity.upsertRegisterTabFromScan(macPourOuverture, adGate.node, 255,
+                                    adGate.serialId, true);
+                                activity.toast("⚠️ Livraison en attente pour WO " + adGate.woNum
+                                    + " — terminez-la avant de démarrer une nouvelle livraison.");
+                                return;
+                            } else {
+                                // ✅ CORRIGÉ (18 sept 2026, même demande —
+                                // "non tu le laisses arriver sur le tab par
+                                // défaut avec aucune valeur") — trouvé :
+                                // ma première version forçait Configure
+                                // (showPage(2)) — pas ce que Paul voulait.
+                                // Laisse simplement l'app arriver sur son
+                                // écran par défaut (MAIN), sans rien
+                                // présélectionner — le chauffeur reste
+                                // libre d'aller lui-même valider/scanner
+                                // via Configure s'il le juge nécessaire.
+                                // Jamais de finish() dans ce cas non plus.
+                                android.util.Log.w(TAG, "handleDeepLink: aucun transport connu pour le registre bloquant (serial="
+                                    + adGate.serialId + " node=" + adGate.node + ") — entrée dans l'app, écran par défaut");
+                                com.pa.lcr.lcp.log.LogBus.api(adGate.node, "[PENDING-BLOQUANT] #série=" + adGate.serialId
+                                    + " node=" + adGate.node + " — connexion impossible ou registre non trouvé"
+                                    + " (aucun transport connu pour cette combinaison #série+node) — wo bloquant=" + adGate.woNum);
+                                activity.toast("⚠️ Livraison en attente pour WO " + adGate.woNum
+                                    + " (#série " + adGate.serialId + ") — connexion impossible ou registre non trouvé. "
+                                    + "Terminez cette livraison avant d'en démarrer une nouvelle.");
+                                activity.showPage(0); // écran par défaut (MAIN)
+                                return;
+                            }
+                        } catch (Exception eOuverture) {
+                            android.util.Log.w(TAG, "handleDeepLink: ouverture tab bloquant ERR (non-bloquant): " + eOuverture.getMessage());
+                            com.pa.lcr.lcp.log.LogBus.api(adGate.node, "[PENDING-BLOQUANT] ERR ouverture tab bloquant — "
+                                + eOuverture.getMessage());
+                            activity.toast("⚠️ Livraison en attente pour WO " + adGate.woNum
+                                + " — connexion impossible ou registre non trouvé. Terminez-la avant d'en démarrer une nouvelle.");
+                            activity.showPage(0); // écran par défaut (MAIN)
+                            return;
+                        }
                     }
                 }
             } catch (Exception eGate) {
@@ -2622,18 +2692,48 @@ public class DeepLinkHandler {
                                         try { impressionObligatoireApresContinue = !dcApresContinue.api_isTicketRequiredNeverPrint(); } catch (Exception ignoredReq) {}
                                     }
                                     if (!impressionObligatoireApresContinue && dcApresContinue != null) {
+                                        // ✅ CORRIGÉ (21 sept 2026, demande
+                                        // Paul — "retarde le temps de
+                                        // recevoir le nouveau ticket_number
+                                        // de l'affichage du running_flowing"
+                                        // — confirmé par log réel où le
+                                        // registre gardait 260 sur une
+                                        // NOUVELLE livraison au lieu de
+                                        // basculer à 261) — trouvé un vrai
+                                        // bug dans cette boucle, pas
+                                        // seulement une fenêtre trop
+                                        // courte : "deux lectures
+                                        // consécutives identiques = stable"
+                                        // sortait immédiatement (après ~2
+                                        // essais) dès que le registre
+                                        // répondait encore ticketNoAtStart
+                                        // deux fois de suite — confondant
+                                        // "pas encore changé" avec
+                                        // "confirmé". Ne considère
+                                        // maintenant stabilisé QUE si la
+                                        // valeur a RÉELLEMENT changé par
+                                        // rapport à ticketNoAtStart (deux
+                                        // fois de suite, pour éviter un
+                                        // faux positif transitoire) —
+                                        // continue de réessayer tant que ce
+                                        // n'est pas le cas, jusqu'à 20
+                                        // essais (~10s), un délai
+                                        // volontairement accepté par Paul
+                                        // pour garantir le bon numéro avant
+                                        // que running_flowing ne s'affiche.
                                         String precedente = "";
                                         String ticketStabilise = "";
-                                        for (int essaiStab = 0; essaiStab < 6; essaiStab++) {
+                                        for (int essaiStab = 0; essaiStab < 20; essaiStab++) {
                                             try { dcApresContinue.forceRefreshTicketEtSaleNoPourJob(jobId); } catch (Exception ignoredRefresh) {}
                                             String lecture = dcApresContinue.api_readTicketNo23Frais();
                                             if (lecture == null) lecture = "";
-                                            if (!lecture.isEmpty() && lecture.equals(precedente)) {
+                                            boolean vraimentChange = !lecture.isEmpty() && !lecture.equals(ticketNoAtStart);
+                                            if (vraimentChange && lecture.equals(precedente)) {
                                                 ticketStabilise = lecture;
-                                                break; // deux lectures consécutives identiques — vraiment stabilisé
+                                                break; // vraiment changé ET confirmé deux fois de suite
                                             }
-                                            precedente = lecture;
-                                            if (essaiStab < 5) { try { Thread.sleep(400); } catch (Exception ignored) {} }
+                                            precedente = vraimentChange ? lecture : "";
+                                            if (essaiStab < 19) { try { Thread.sleep(500); } catch (Exception ignored) {} }
                                         }
                                         if (!ticketStabilise.isEmpty() && !ticketStabilise.equals(ticketNoAtStart)) {
                                             android.util.Log.i(TAG, "job/continue: sale_number stabilisé avant running_flowing — "
