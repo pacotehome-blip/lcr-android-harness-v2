@@ -77,6 +77,22 @@ public final class RegisterSessionManager {
     // Aucun code existant ne dépendait de l'ordre d'insertion de ces maps.
     private final Map<Integer, String> expectedSerialByNode = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<String, String> pinnedTransportByRegKey = new java.util.concurrent.ConcurrentHashMap<>();
+    // ✅ AJOUTÉ (21 sept 2026, demande Paul — "on relance la boucle de
+    // suivi") — clé=transportKey (k), valeur=jobId à relancer. Déposé
+    // au moment du remplacement de contrôleur pendant une livraison
+    // active (voir plus bas), consommé par RegisterTabFragment dès que
+    // la reconnexion est confirmée.
+    private final Map<String, String> relanceSuiviEnAttente = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Retourne (et retire) le jobId à relancer pour ce transport précis,
+     * s'il y en a un — null sinon. Un seul appelant consomme la
+     * demande, jamais relancée une deuxième fois pour le même
+     * remplacement.
+     */
+    public String consommerRelanceSuivi(String transportKey) {
+        return relanceSuiviEnAttente.remove(transportKey);
+    }
     // transportKey → serialId connu
     private final java.util.concurrent.ConcurrentHashMap<String, String> knownLc3TransportKeys =
         new java.util.concurrent.ConcurrentHashMap<>();
@@ -850,6 +866,21 @@ public final class RegisterSessionManager {
             if (ancienEtatPourTransfert == DeliveryState.RUNNING_FLOWING || ancienEtatPourTransfert == DeliveryState.RUNNING_PAUSED) {
                 LogBus.api(node, "[SESSION] état transféré au nouveau contrôleur après remplacement: "
                         + ancienEtatPourTransfert + " — livraison toujours active, pas de faux \"aucune livraison en cours\"");
+                // ✅ AJOUTÉ (21 sept 2026, demande Paul — "on relance la
+                // boucle de suivi") — l'état et le jobId sont transférés
+                // au nouveau contrôleur, mais la VRAIE boucle de suivi
+                // (pollJobUntilDone, dans DeepLinkHandler — couche UI,
+                // inaccessible d'ici) ne l'est jamais — confirmé par log
+                // réel où onDeliveryEnded() n'était plus jamais appelé
+                // après un remplacement, même si la livraison se
+                // terminait réellement sur le registre ("continuité de
+                // livraison rompue"). Dépose ici une demande de relance,
+                // consommée par RegisterTabFragment dès que la
+                // reconnexion est confirmée — c'est la seule couche qui
+                // a accès à DeepLinkHandler.
+                if (ancienJobIdPourTransfert != null && !ancienJobIdPourTransfert.isEmpty()) {
+                    relanceSuiviEnAttente.put(k, ancienJobIdPourTransfert);
+                }
             }
         }
         // ✅ AJOUTÉ (27 août 2026, demande Paul — "le registre montre 11,5

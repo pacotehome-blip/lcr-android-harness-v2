@@ -1276,6 +1276,20 @@ public class RegisterTabFragment extends Fragment {
                 LogBus.api(node, "[RECUP-RUNNING] aucune ligne filet de sécurité trouvée — rien à mettre à jour");
                 return;
             }
+            // ✅ AJOUTÉ (21 sept 2026, demande Paul — "pourquoi je n'ai
+            // pas le bouton bleu pour retourner au bon de livraison WO")
+            // — trouvé, confirmé par log réel : currentWoNum n'était
+            // JAMAIS réécrit ici, même quand la reprise réussissait (BD
+            // ou JSON) — getRunningFlowingSafetyNet() exige d'ailleurs
+            // currentWoNum EN ENTRÉE, alors que c'est précisément ce qui
+            // manque. BTN-RETOUR-WO exige currentWoNum non vide pour
+            // même essayer de s'afficher — sans cette ligne, le bouton
+            // reste caché pour le reste de la session, même après une
+            // reprise par ailleurs réussie.
+            if (safetyNet.woNum != null && !safetyNet.woNum.isEmpty()) {
+                currentWoNum = safetyNet.woNum;
+                LogBus.api(node, "[RECUP-RUNNING] currentWoNum rempli depuis la reprise — wo=" + currentWoNum);
+            }
             // ✅ RECONSTRUIT (2 sept 2026, en revoyant tout le processus
             // de livraison comme demandé) — trouvé une vraie incohérence
             // dans ma première correction : la vieille ligne
@@ -4862,6 +4876,33 @@ public class RegisterTabFragment extends Fragment {
         }
         if (cbTxRx != null) controller.setTxRxLoggingEnabled(cbTxRx.isChecked());
         if (cbLogTs != null) controller.setLogTimestampsEnabled(cbLogTs.isChecked());
+        // ✅ AJOUTÉ (21 sept 2026, demande Paul — "on relance la boucle
+        // de suivi") — RegisterSessionManager dépose une demande de
+        // relance quand un remplacement de contrôleur survient pendant
+        // une livraison active (voir consommerRelanceSuivi) — ici, dès
+        // que la (re)connexion de ce tab est confirmée, on consomme
+        // cette demande et on relance le vrai suivi (pollJobUntilDone)
+        // sur le NOUVEAU contrôleur, pour que onDeliveryEnded() soit à
+        // nouveau appelé à la vraie fin — même mécanisme déjà utilisé
+        // pour la reprise après crash (tenterFinalisationLivraisonOrpheline).
+        try {
+            if (tabTransportKey != null && !tabTransportKey.trim().isEmpty()) {
+                String jobIdARelancer = sm.consommerRelanceSuivi(tabTransportKey.trim());
+                if (jobIdARelancer != null && !jobIdARelancer.isEmpty()
+                        && getActivity() instanceof MainActivity) {
+                    MainActivity mainRelance = (MainActivity) getActivity();
+                    if (mainRelance.getDeepLinkHandler() != null
+                            && !mainRelance.getDeepLinkHandler().isPollActif(jobIdARelancer)) {
+                        LogBus.api(node, "[RELANCE-SUIVI] contrôleur remplacé pendant livraison active — "
+                            + "relance du suivi sur le nouveau contrôleur, jobId=" + jobIdARelancer);
+                        mainRelance.getDeepLinkHandler().pollJobUntilDonePublic(
+                            jobIdARelancer, node, currentWoNum, currentWoIdGuid, serialFromArgs, tabTransportKey.trim());
+                    }
+                }
+            }
+        } catch (Exception eRelanceSuivi) {
+            android.util.Log.w("RegisterTabFragment", "relance suivi (remplacement contrôleur) ERR (non-bloquant): " + eRelanceSuivi.getMessage());
+        }
         syncUiFromController();
         validateHeaderAsync();
         ui.postDelayed(() -> runStatusBLikeButton("AUTO_AFTER_TAB_CREATE"), 250);
