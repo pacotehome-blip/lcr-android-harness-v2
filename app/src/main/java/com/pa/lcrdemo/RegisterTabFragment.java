@@ -1202,6 +1202,14 @@ public class RegisterTabFragment extends Fragment {
                     safetyNet.btmac = j.optString("btmac", "");
                     org.json.JSONObject payloadInterne = null;
                     try { payloadInterne = new org.json.JSONObject(j.optString("payload_complet", "{}")); } catch (Exception ignored) {}
+                    // ✅ AJOUTÉ (21 sept 2026, demande Paul — "corrige le
+                    // mais tiens compte de ce qui est présent dans le
+                    // code pour pas réinventer") — variables locales à
+                    // cette fonction, pas ajoutées à DeliveryRow (classe
+                    // partagée, liée à la BD) pour rester minimal.
+                    String produitDescriptionJson = "";
+                    String produitCodeJson = "";
+                    int produitTypeJson = -1;
                     if (payloadInterne != null) {
                         // ✅ CORRIGÉ (28 août 2026, demande Paul — "c'est pas
                         // suffisant élargi") — trouvé : le VRAI registre
@@ -1220,6 +1228,17 @@ public class RegisterTabFragment extends Fragment {
                             payloadInterne, 0, "active_product", "product_number");
                         safetyNet.presetL = com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.optFirstDouble(
                             payloadInterne, 0.0, "preset_requested", "preset_net_l");
+                        // Ces trois champs sont déjà présents dans
+                        // payload_complet (confirmé dans tous les
+                        // fichiers JSON de ce soir) — repli utilisé plus
+                        // bas SEULEMENT si RegisterProductStore (le cache
+                        // local) ne connaît pas encore ce produit
+                        // (ligneTrouvee == null, ex. BD vierge) — jamais
+                        // prioritaire sur la recherche locale déjà
+                        // existante.
+                        produitDescriptionJson = payloadInterne.optString("active_product_description", "");
+                        produitCodeJson = payloadInterne.optString("active_product_code", "");
+                        produitTypeJson = payloadInterne.optInt("active_product_type", -1);
                     }
                     LogBus.api(node, "[RECUP-RUNNING] filet de sécurité retrouvé dans le JSON (BD locale vide) — jobId=" + safetyNet.jobId);
                     // Réinsère en BD locale immédiatement, pour que les
@@ -1349,10 +1368,30 @@ public class RegisterTabFragment extends Fragment {
             final com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneFinale = ligneTrouvee;
             final int produitFraisFinal = produitFrais;
             final double presetFraisFinal = presetFrais;
+            final String produitDescriptionJsonFinal = produitDescriptionJson;
+            final String produitCodeJsonFinal = produitCodeJson;
+            final int produitTypeJsonFinal = produitTypeJson;
             ui.post(() -> {
                 try {
                     if (spnProduct != null) {
-                        String label = (ligneFinale != null) ? ligneFinale.toSpinnerLabel() : String.valueOf(produitFraisFinal);
+                        String label;
+                        if (ligneFinale != null) {
+                            label = ligneFinale.toSpinnerLabel();
+                        } else if (!produitDescriptionJsonFinal.isEmpty() || !produitCodeJsonFinal.isEmpty()) {
+                            // ✅ AJOUTÉ (21 sept 2026, demande Paul) —
+                            // RegisterProductStore ne connaît pas ce
+                            // produit (BD vierge) — repli sur ce qui est
+                            // déjà dans le JSON, même format que le repli
+                            // existant ailleurs dans ce fichier (desc +
+                            // code + type), au lieu du chiffre brut.
+                            StringBuilder sbLabel = new StringBuilder(String.valueOf(produitFraisFinal));
+                            if (!produitDescriptionJsonFinal.isEmpty()) sbLabel.append(" - ").append(produitDescriptionJsonFinal);
+                            if (!produitCodeJsonFinal.isEmpty()) sbLabel.append(" (").append(produitCodeJsonFinal).append(")");
+                            if (produitTypeJsonFinal >= 0) sbLabel.append(" [").append(com.pa.lcr.lcp.LcpLink.decodeProductType(produitTypeJsonFinal)).append("]");
+                            label = sbLabel.toString();
+                        } else {
+                            label = String.valueOf(produitFraisFinal);
+                        }
                         spnProduct.setText(label, false);
                     }
                     if (edtPreset != null && presetFraisFinal > 0) {
@@ -1373,7 +1412,7 @@ public class RegisterTabFragment extends Fragment {
                     // que si une vraie description existe — le chiffre brut
                     // reste affiché temporairement, sans jamais bloquer le
                     // vrai scan qui doit encore suivre.
-                    if (ligneFinale != null) {
+                    if (ligneFinale != null || !produitDescriptionJsonFinal.isEmpty() || !produitCodeJsonFinal.isEmpty()) {
                         produitDejaResoluPourCetteSession = true;
                     } else {
                         LogBus.api(node, "[PRODUIT-CACHE] récupération — affiché chiffre brut (pas encore de description), "
@@ -1383,11 +1422,18 @@ public class RegisterTabFragment extends Fragment {
                     android.util.Log.w("RegisterTabFragment", "Application produit/preset à l'écran (récupération) ERR: " + e.getMessage());
                 }
             });
+            // ✅ AJOUTÉ (21 sept 2026, demande Paul) — même repli qu'à
+            // l'écran : si RegisterProductStore n'a rien donné, utilise
+            // ce qui est déjà dans le JSON plutôt que d'écrire des
+            // champs vides en BD.
+            String produitDescriptionPourBd = !produitDescription.isEmpty() ? produitDescription : produitDescriptionJson;
+            String produitCodePourBd = !produitCode.isEmpty() ? produitCode : produitCodeJson;
+            int produitTypePourBd = produitType >= 0 ? produitType : produitTypeJson;
             android.content.ContentValues cvRec =
                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
                     safetyNet.jobId, safetyNet.woNum, safetyNet.woIdGuid, ticketFrais, ticketFrais,
                     netFrais, grossFrais, safetyNet.serialId, safetyNet.lcrnode, safetyNet.btmac,
-                    produitFrais, produitDescription, produitCode, produitType, presetFrais,
+                    produitFrais, produitDescriptionPourBd, produitCodePourBd, produitTypePourBd, presetFrais,
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                     "RUNNING_FLOWING",
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
@@ -2498,6 +2544,32 @@ public class RegisterTabFragment extends Fragment {
                     showInitGuide("Livraison démarrée...");
                     fadeOutInitGuide();
                 }
+                // ✅ AJOUTÉ (18 sept 2026, demande Paul — "aucune lecture
+                // pendant running_flowing... trouve le bon moment pour
+                // l'appliquer" — confirmé par un test réel où le registre
+                // a basculé SaleNumber une DEUXIÈME fois en plein milieu
+                // du flux, jamais attrapé sans un clic Status manuel,
+                // puisque aucune lecture ne se fait pendant le flux, par
+                // design voulu) — symétrique de venaitDeDemarrer
+                // ci-dessus : détecte la SORTIE de RUNNING_FLOWING/
+                // RUNNING_PAUSED (pas "pendant" le flux — après la
+                // transition, une seule fois). C'est le seul moment
+                // légitime pour une vraie lecture #22/#23 sans jamais
+                // contrevenir à la règle du 28 août — le flux est déjà
+                // terminé à cet instant précis, plus de tick 100ms à
+                // protéger.
+                boolean venaitDeTerminer = liveText != null && !liveText.contains("RUNNING_FLOWING")
+                        && !liveText.contains("RUNNING_PAUSED")
+                        && lastLiveText != null
+                        && (lastLiveText.contains("RUNNING_FLOWING") || lastLiveText.contains("RUNNING_PAUSED"));
+                if (venaitDeTerminer && controller != null) {
+                    try {
+                        String jobIdTermine = controller.getLastActiveJobId();
+                        if (jobIdTermine != null && !jobIdTermine.isEmpty()) {
+                            controller.forceRefreshTicketEtSaleNoPourJob(jobIdTermine);
+                        }
+                    } catch (Exception ignoredTermine) {}
+                }
                 // ✅ CORRIGÉ (28 août 2026, demande Paul — "on ne doit pas
                 // toucher la partie actions tant que le flow n'est pas
                 // confirmé pause, ceci cause de flash UI pour rien") —
@@ -2597,7 +2669,14 @@ public class RegisterTabFragment extends Fragment {
                             etatActuelHeartbeat == com.pa.lcr.lcp.DeliveryState.PRESTART
                             || etatActuelHeartbeat == com.pa.lcr.lcp.DeliveryState.STARTING
                             || etatActuelHeartbeat == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
-                            || etatActuelHeartbeat == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED;
+                            || etatActuelHeartbeat == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED
+                            // ✅ AJOUTÉ (18 sept 2026, même demande) —
+                            // venaitDeTerminer (calculé plus haut) couvre
+                            // exactement l'instant où le flux vient de finir
+                            // — l'état est déjà CONNECTED à ce point précis,
+                            // mais c'est justement LA correction qu'on
+                            // cherche à attraper, pas une écriture périmée.
+                            || venaitDeTerminer;
                         if (livraisonActiveHeartbeat) {
                         try {
                             String jobIdActuel = controller.getLastActiveJobId();
