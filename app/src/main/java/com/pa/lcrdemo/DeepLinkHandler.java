@@ -2552,7 +2552,16 @@ public class DeepLinkHandler {
                                    boolean freshStart) {
         // ✅ Anti-double poll — si ce jobId est déjà en cours de poll, ignorer
         if (!activePolls.add(jobId)) {
+            // ✅ CORRIGÉ (22 sept 2026, demande Paul — ticket 263,
+            // apr-5004515, terminé par FILET-CONNECTED au lieu du vrai
+            // suivi, aucune preuve possible dans Support pour savoir
+            // pourquoi) — ce garde-fou n'écrivait qu'en logcat, jamais
+            // dans Support. Si pollJobUntilDone est un jour rejeté ici
+            // pour ce même job, la prochaine fois qu'un cas similaire se
+            // produit, Support aura la preuve au lieu de rien.
             android.util.Log.w(TAG, "pollJobUntilDone: déjà actif pour jobId=" + jobId + " — ignoré");
+            try { com.pa.lcr.lcp.log.LogBus.api(node, "[POLL-REJETÉ] pollJobUntilDone déjà actif pour jobId="
+                + jobId + " — nouvel appel ignoré, wo=" + woNum); } catch (Exception ignoredLogPoll) {}
             return;
         }
 
@@ -3343,6 +3352,36 @@ public class DeepLinkHandler {
                     endUtc     = result.optString("end_utc",     "");
                     durationS  = result.optDouble("duration_s",  0);
                     produitNo  = result.optInt("product_number", 0);
+                }
+                // ✅ AJOUTÉ (21 sept 2026, demande Paul — "je te confirme
+                // que c'est ce qui arrive. on ne veut pas ça. et
+                // personne n'a demandé de fonctionner autrement") —
+                // trouvé : si "result" est absent d'extraJson à ce
+                // moment précis (variable selon le chemin exact de
+                // détection de fin parmi les 4 possibles), ticketNo
+                // reste vide, et backupDelivery() retombe alors
+                // silencieusement sur un nom de fichier horodaté au
+                // lieu du vrai ticket — jamais demandé, jamais voulu.
+                // Relit maintenant en direct sur le registre (même
+                // mécanisme fiable établi toute la soirée) si ticketNo
+                // est encore vide à ce stade — jamais de repli
+                // horodaté silencieux.
+                if (ticketNo.isEmpty()) {
+                    try {
+                        com.pa.lcr.lcp.DeliveryController dcFinVide =
+                            com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                .getController(macParam, nodeParam);
+                        if (dcFinVide != null) {
+                            String ticketFinVide = dcFinVide.api_readTicketNo23Frais();
+                            if (ticketFinVide != null && !ticketFinVide.trim().isEmpty()) {
+                                ticketNo = ticketFinVide.trim();
+                                saleNo = ticketNo;
+                                android.util.Log.w(TAG, "onDeliveryEnded: ticket_no absent de \"result\" — relu en direct sur le registre: " + ticketNo);
+                            }
+                        }
+                    } catch (Exception eTicketFinVide) {
+                        android.util.Log.w(TAG, "onDeliveryEnded: relecture ticket_no (result absent) ERR (non-bloquant): " + eTicketFinVide.getMessage());
+                    }
                 }
                 if (produitNo > 0) {
                     try {
