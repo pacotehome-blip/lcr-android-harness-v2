@@ -2740,8 +2740,32 @@ public class RegisterTabFragment extends Fragment {
                                         payloadHeartbeat.put("sale_no", fTicketActuel);
                                         payloadHeartbeat.put("backup_ts", System.currentTimeMillis());
                                         payloadHeartbeat.put("sync_status", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
+                                        // ✅ CORRIGÉ (21 sept 2026, demande
+                                        // Paul — "le même job_id associé à
+                                        // deux wo_num différents") — trouvé,
+                                        // confirmé par log réel : le
+                                        // CONTENU du JSON réutilisé restait
+                                        // correct (wo_num jamais réécrit sur
+                                        // le repli), mais le NOM DU
+                                        // FICHIER utilisait fWoNumActuel —
+                                        // relu à CHAQUE battement depuis
+                                        // currentWoNum, un champ PARTAGÉ du
+                                        // Fragment qui peut dériver si un
+                                        // AUTRE deep link change de contexte
+                                        // pendant que ce battement continue
+                                        // de tourner pour CE job précis. Le
+                                        // nom du fichier utilise maintenant
+                                        // le wo_num déjà dans le JSON
+                                        // (stable, celui d'origine de CE
+                                        // job) plutôt que la valeur
+                                        // possiblement périmée du champ
+                                        // partagé — jamais de deuxième
+                                        // fichier sous un autre wo_num pour
+                                        // le même job_id.
+                                        String woNumPourNomFichier = payloadHeartbeat.optString("wo_num", "");
+                                        if (woNumPourNomFichier.isEmpty()) woNumPourNomFichier = fWoNumActuel;
                                         com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
-                                            requireContext().getApplicationContext(), fWoNumActuel, fJobIdActuel, payloadHeartbeat);
+                                            requireContext().getApplicationContext(), woNumPourNomFichier, fJobIdActuel, payloadHeartbeat);
                                     } catch (Exception ignoredHeartbeatWrite) {}
                                 });
                             }
