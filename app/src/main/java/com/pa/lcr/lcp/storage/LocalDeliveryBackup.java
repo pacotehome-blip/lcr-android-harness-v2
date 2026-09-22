@@ -468,13 +468,36 @@ public class LocalDeliveryBackup {
                         JSONObject j = new JSONObject(new String(raw, StandardCharsets.UTF_8));
                         String ticketNo = j.optString("ticket_no", "");
                         String woNum = j.optString("wo_num", "");
-                        if (ticketNo.isEmpty() || woNum.isEmpty()) {
+                        String jobIdRestore = j.optString("job_id", "");
+                        // ✅ CORRIGÉ (21 sept 2026, demande Paul —
+                        // "#delivery-uid est créé à partir de wo +
+                        // ticket_number, lu du champ 23 si impression
+                        // obligatoire, sinon champ 22") — trouvé : en
+                        // impression obligatoire, ticket_no reste
+                        // délibérément vide tout le flux, jusqu'à
+                        // l'impression réussie. Exiger ticket_no non vide
+                        // ici rejetait complètement la reprise d'une
+                        // livraison de ce type interrompue avant
+                        // l'impression — alors que jobId, lui, est
+                        // toujours connu dès l'armement. jobId est
+                        // maintenant la condition d'admission ; ticket_no
+                        // reste utile mais n'est plus une condition
+                        // bloquante.
+                        if (jobIdRestore.isEmpty() || woNum.isEmpty()) {
                             failed++;
-                            messages.add("Fichier ignoré — ticket_no ou wo_num vide");
+                            messages.add("Fichier ignoré — job_id ou wo_num vide");
                             continue;
                         }
 
-                        LcrDeliveryStatusDb.DeliveryRow existing = lcrDb.getByTicketNo(ticketNo);
+                        // ✅ CORRIGÉ (même demande) — le repli anti-doublon
+                        // s'ancrait sur ticket_no, qui peut être partagé
+                        // par erreur entre deux livraisons différentes
+                        // (confirmé ce soir : même sale_number "260"
+                        // collé sur deux jobId distincts avant la
+                        // correction de la stabilisation). jobId est
+                        // l'identité réelle et unique de la livraison —
+                        // getByJobId() déjà existant, réutilisé ici.
+                        LcrDeliveryStatusDb.DeliveryRow existing = lcrDb.getByJobId(jobIdRestore);
                         if (existing != null) {
                             skipped++;
                             continue; // déjà présent localement — ne jamais écraser
