@@ -202,6 +202,25 @@ public class DeliverySyncWorker extends Worker {
             hadFailure = true;
         }
 
+        // ✅ AJOUTÉ (21 sept 2026, demande Paul — point ouvert depuis le
+        // tout début de la session de ce soir, jamais corrigé) — ce
+        // Worker périodique (15 min) ne poussait que les LIVRAISONS
+        // (pushPending), jamais le REGISTRE (pushPendingRegistres) —
+        // seuls les 3 chemins explicites (deep link, New C, reprise)
+        // via syncAll() poussaient le registre, jamais ce cycle de fond.
+        // Une fiche registre restée PENDING (ex. #série corrigé
+        // manuellement dans Dataverse, ou firmware capturé après le
+        // premier push — voir la ligne 16466294/SR260v2.30 discutée
+        // plus tôt) ne se rattrapait donc jamais toute seule sans un de
+        // ces 3 déclencheurs explicites. Même token déjà acquis pour ce
+        // cycle, même style que pushPending juste au-dessus.
+        try {
+            com.pa.lcrdemo.dataverse.LcrDeliverySync.pushPendingRegistres(ctx, token);
+        } catch (Exception e) {
+            Log.e(TAG, "pushPendingRegistres (retry périodique) ERR: " + e.getMessage());
+            hadFailure = true;
+        }
+
         return (hadFailure || timeBudgetExceeded) ? Result.retry() : Result.success();
     }
 }
