@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit;
 public final class MediaTransportManager {
 
     // ✅ CENTRALISÉ (9 sept 2026, demande Paul — solutions pour la partie
-    // USB) — trouvé, avec Paul : 19200 était codé en dur SÉPARÉMENT dans
+    //    ici USB) — trouvé, avec Paul : 19200 était codé en dur SÉPARÉMENT dans
     // MainActivity.java (OpenSelectedUsb) et UsbReceiver.java
     // (handlePermission), sans source commune — dette technique notée
     // le 10 août 2026 mais jamais réglée. Risque réel : un futur

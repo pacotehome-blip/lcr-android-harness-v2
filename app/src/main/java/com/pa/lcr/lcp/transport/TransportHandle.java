@@ -13,6 +13,17 @@ public final class TransportHandle {
 
     private volatile TransportIo io = null;
     private volatile long generationId = 0;
+    // ✅ AJOUTÉ (18 sept 2026, demande Paul — "manque le nom du bt") —
+    // conserve le vrai nom de l'appareil Bluetooth (BluetoothDevice.getName(),
+    // ex. "SD1000V2.0.8.8.8772A1-TEST"), déjà lu par registerBtSpp() mais
+    // jamais exposé jusqu'ici — utile pour remplir filgo_nombluetooth dans
+    // Dataverse au lieu de le laisser vide.
+    private volatile String btDeviceName = null;
+
+    public String getBtDeviceName() { return btDeviceName; }
+    public synchronized void setBtDeviceName(String name) {
+        if (name != null && !name.trim().isEmpty()) this.btDeviceName = name.trim();
+    }
 
     public TransportHandle(String key) {
         this.key = key;
