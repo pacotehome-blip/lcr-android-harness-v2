@@ -1155,6 +1155,17 @@ public class RegisterTabFragment extends Fragment {
 
     private void tenterRecuperationRunningFlowing() {
         try {
+            // ✅ CORRIGÉ (22 sept 2026, demande Paul — CI a révélé une
+            // vraie erreur de PORTÉE (scope), pas juste un déséquilibre
+            // d'accolades: déclarées ici, au niveau du try{} englobant
+            // toute la fonction, pour rester visibles à la fois pour
+            // l'assignation (dans le bloc if(matchJson!=null) plus bas)
+            // et pour l'utilisation bien plus loin (ligne ~1385,
+            // ~1443) — la déclaration précédente était imbriquée dans
+            // ce même bloc if et sortait de portée dès sa fermeture.
+            String produitDescriptionJson = "";
+            String produitCodeJson = "";
+            int produitTypeJson = -1;
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbRec =
                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow safetyNet;
@@ -1202,14 +1213,6 @@ public class RegisterTabFragment extends Fragment {
                     safetyNet.btmac = j.optString("btmac", "");
                     org.json.JSONObject payloadInterne = null;
                     try { payloadInterne = new org.json.JSONObject(j.optString("payload_complet", "{}")); } catch (Exception ignored) {}
-                    // ✅ AJOUTÉ (21 sept 2026, demande Paul — "corrige le
-                    // mais tiens compte de ce qui est présent dans le
-                    // code pour pas réinventer") — variables locales à
-                    // cette fonction, pas ajoutées à DeliveryRow (classe
-                    // partagée, liée à la BD) pour rester minimal.
-                    String produitDescriptionJson = "";
-                    String produitCodeJson = "";
-                    int produitTypeJson = -1;
                     if (payloadInterne != null) {
                         // ✅ CORRIGÉ (28 août 2026, demande Paul — "c'est pas
                         // suffisant élargi") — trouvé : le VRAI registre
