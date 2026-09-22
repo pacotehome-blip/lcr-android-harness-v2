@@ -156,6 +156,15 @@ public final class MediaTransportManager {
         return "BT:" + mac.toUpperCase(Locale.ROOT);
     }
 
+    // ✅ AJOUTÉ (18 sept 2026, demande Paul — "manque le nom du bt") —
+    // permet de retrouver le vrai nom d'appareil Bluetooth déjà connu
+    // pour ce mac (rempli par onBtConnected ci-dessous), pour remplir
+    // filgo_nombluetooth dans Dataverse au lieu de le laisser vide.
+    public String getBtDeviceNameForMac(String mac) {
+        TransportHandle h = handles.get(btKey(mac));
+        return h != null ? h.getBtDeviceName() : null;
+    }
+
     public synchronized void onBtConnected(
             BluetoothDevice dev,
             BluetoothSocket socket,
@@ -174,6 +183,8 @@ public final class MediaTransportManager {
 
         long nextGen = h.getGenerationId() + 1;
         String name = (dev != null && dev.getName() != null) ? dev.getName() : "(no-name)";
+        // ✅ AJOUTÉ (18 sept 2026, demande Paul — "manque le nom du bt")
+        h.setBtDeviceName(dev != null ? dev.getName() : null);
         String desc = (description != null)
                 ? description
                 : ("BT SPP " + name + " " + (mac != null ? mac : ""));
