@@ -1600,6 +1600,13 @@ public class DeepLinkHandler {
 
             if (r.code == 1) {
                 String jobId = (r.data != null) ? r.data.optString("jobId", null) : null;
+                // ✅ AJOUTÉ (22 sept 2026, demande Paul — trace du début
+                // à la fin du processus de livraison, visible dans
+                // Support ET le tab (LogBus alimente les deux). Purement
+                // additif — aucune lecture supplémentaire, aucun
+                // changement à la logique de décision existante.
+                try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] armement démarré — wo="
+                    + woNum + " jobId=" + jobId); } catch (Exception ignoredTraceArm) {}
                 logEvent(fSerialId, woNum, DeliveryLogStore.LEVEL_INFO,
                     "ONESHOT_START", "ARMED jobId=" + jobId, null);
                 // ✅ (ajouté 3 août 2026, demande Paul : "RUNNING_FLOWING pas supposé
@@ -3105,6 +3112,23 @@ public class DeepLinkHandler {
                                 logEvent(serialId, woNum, DeliveryLogStore.LEVEL_INFO,
                                     "STATE_CHANGE", "state=" + state, null);
                             }
+                            // ✅ AJOUTÉ (22 sept 2026, demande Paul) — AVANT
+                            // "lastState = state" juste en dessous, pour
+                            // comparer contre la vraie valeur précédente,
+                            // pas celle qu'on vient de lire. Réutilise
+                            // "state"/"lastState", déjà suivis par la
+                            // boucle — aucune lecture supplémentaire,
+                            // jamais répété pendant que le flux continue
+                            // (state==lastState ne rentre jamais dans ce
+                            // bloc englobant).
+                            if (("RUNNING_FLOWING".equals(state) || "RUNNING_PAUSED".equals(state)) && !hasSeenFlowing) {
+                                try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] RUNNING_FLOWING lancé — jobId=" + jobId); } catch (Exception ignoredTraceFlow) {}
+                            }
+                            if ("RUNNING_PAUSED".equals(state) && "RUNNING_FLOWING".equals(lastState)) {
+                                try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] pause détectée — jobId=" + jobId); } catch (Exception ignoredTracePause) {}
+                            } else if ("RUNNING_FLOWING".equals(state) && "RUNNING_PAUSED".equals(lastState)) {
+                                try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] reprise après pause — jobId=" + jobId); } catch (Exception ignoredTraceResume) {}
+                            }
                             lastState = state;
                         }
 
@@ -3118,6 +3142,7 @@ public class DeepLinkHandler {
                             deliveryDone[0] = true;
                             String extraJson = (r.data != null) ? r.data.toString() : "{}";
                             android.util.Log.i(TAG, "Livraison DONE — " + extraJson);
+                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (DONE) — jobId=" + jobId); } catch (Exception ignoredTraceEnd1) {}
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
                             onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             return;
@@ -3130,6 +3155,7 @@ public class DeepLinkHandler {
                             deliveryDone[0] = true;
                             String extraJson = r.data.toString();
                             android.util.Log.w(TAG, "Livraison PRINT_TIMEOUT — Dataverse quand même — " + extraJson);
+                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (PRINT_TIMEOUT) — jobId=" + jobId); } catch (Exception ignoredTraceEnd2) {}
                             logDeliveryEnd(serialId, woNum, jobId, "DONE_PRINT_TIMEOUT", extraJson, null);
                             onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             return;
@@ -3142,6 +3168,7 @@ public class DeepLinkHandler {
                             String extraJson = (r.data != null) ? r.data.toString() : "{}";
                             android.util.Log.i(TAG,
                                 "Livraison terminée (CONNECTED post-terminate) — " + extraJson);
+                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (post-terminate) — jobId=" + jobId); } catch (Exception ignoredTraceEnd3) {}
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
                             onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             return;
@@ -3156,6 +3183,7 @@ public class DeepLinkHandler {
                             String extraJson = (r.data != null) ? r.data.toString() : "{}";
                             android.util.Log.i(TAG,
                                 "Livraison terminée (CONNECTED preset atteint) — " + extraJson);
+                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (preset atteint) — jobId=" + jobId); } catch (Exception ignoredTraceEnd4) {}
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
                             onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             // ✅ AJOUTÉ (28 août 2026, demande Paul — "il
