@@ -2733,6 +2733,55 @@ public class RegisterTabFragment extends Fragment {
                                         if (existantHeartbeat != null && existantHeartbeat.json != null) {
                                             payloadHeartbeat = existantHeartbeat.json;
                                         } else {
+                                            // ✅ CORRIGÉ (23 sept 2026, demande
+                                            // Paul — "je veux le payload
+                                            // complet produit, type produit,
+                                            // code produit, preset, etc." —
+                                            // confirmé par log réel, ticket
+                                            // 270/apr-5004524 : ce repli
+                                            // reconstruisait un JSON minimal
+                                            // de zéro (juste status+job_id)
+                                            // quand le fichier d'armement
+                                            // enrichi n'était pas retrouvé à
+                                            // temps par ce battement —
+                                            // écrasant tout ce que
+                                            // buildArmementPayloadExtra()
+                                            // avait déjà écrit. Va chercher
+                                            // maintenant les vraies valeurs
+                                            // déjà en BD locale (écrites
+                                            // correctement à l'armement,
+                                            // via construireLivraisonComplete)
+                                            // plutôt que de les laisser
+                                            // vides.
+                                            // ✅ CORRIGÉ (23 sept 2026) — desc/code/type
+                                            // ne sont jamais des colonnes BD séparées,
+                                            // seulement à l'intérieur de payload_json
+                                            // (confirmé dans construirePayloadInterne) —
+                                            // les lire depuis là, pas des champs qui
+                                            // n'existent pas sur DeliveryRow.
+                                            String descHeartbeat = "", codeHeartbeat = "";
+                                            int typeHeartbeat = -1;
+                                            double presetHeartbeat = 0;
+                                            int produitNoHeartbeat = 0;
+                                            try {
+                                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbLireProduit =
+                                                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                                                try {
+                                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowExistant =
+                                                        dbLireProduit.getByJobId(fJobIdActuel);
+                                                    if (rowExistant != null && rowExistant.payloadJson != null
+                                                            && !rowExistant.payloadJson.isEmpty()) {
+                                                        org.json.JSONObject pj = new org.json.JSONObject(rowExistant.payloadJson);
+                                                        descHeartbeat = pj.optString("active_product_description", "");
+                                                        codeHeartbeat = pj.optString("active_product_code", "");
+                                                        typeHeartbeat = pj.optInt("active_product_type", -1);
+                                                        presetHeartbeat = pj.optDouble("preset_requested", 0);
+                                                        produitNoHeartbeat = pj.optInt("active_product", 0);
+                                                    }
+                                                } finally {
+                                                    try { dbLireProduit.close(); } catch (Exception ignored) {}
+                                                }
+                                            } catch (Exception ignoredLireProduit) {}
                                             payloadHeartbeat = new org.json.JSONObject();
                                             payloadHeartbeat.put("job_id", fJobIdActuel);
                                             payloadHeartbeat.put("wo_num", fWoNumActuel != null ? fWoNumActuel : "");
@@ -2743,7 +2792,15 @@ public class RegisterTabFragment extends Fragment {
                                             payloadHeartbeat.put("type", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL);
                                             payloadHeartbeat.put("net_l", 0);
                                             payloadHeartbeat.put("gross_l", 0);
-                                            payloadHeartbeat.put("payload_complet", "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + fJobIdActuel + "\"}");
+                                            org.json.JSONObject payloadCompletHeartbeat = new org.json.JSONObject();
+                                            payloadCompletHeartbeat.put("status", "RUNNING_FLOWING");
+                                            payloadCompletHeartbeat.put("job_id", fJobIdActuel);
+                                            payloadCompletHeartbeat.put("active_product", produitNoHeartbeat);
+                                            if (!descHeartbeat.isEmpty()) payloadCompletHeartbeat.put("active_product_description", descHeartbeat);
+                                            if (!codeHeartbeat.isEmpty()) payloadCompletHeartbeat.put("active_product_code", codeHeartbeat);
+                                            if (typeHeartbeat >= 0) payloadCompletHeartbeat.put("active_product_type", typeHeartbeat);
+                                            payloadCompletHeartbeat.put("preset_requested", presetHeartbeat);
+                                            payloadHeartbeat.put("payload_complet", payloadCompletHeartbeat.toString());
                                         }
                                         payloadHeartbeat.put("ticket_no", fTicketActuel);
                                         payloadHeartbeat.put("sale_no", fTicketActuel);
