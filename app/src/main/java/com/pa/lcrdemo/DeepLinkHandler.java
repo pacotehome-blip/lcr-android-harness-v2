@@ -1742,7 +1742,7 @@ public class DeepLinkHandler {
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                                 "RUNNING_FLOWING",
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                                buildArmementPayloadExtra(tabArmRef, jobId, fProduct, fPresetD, node));
+                                buildArmementPayloadExtra(tabArmRef, jobId, fProduct, fPresetD, node, descArm, codeArm, typeArm));
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "ARMEMENT");
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbArm =
                             new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
@@ -4458,8 +4458,32 @@ public class DeepLinkHandler {
     // confirmation supplémentaire exigée du chauffeur ("du lousse") — la
     // livraison se poursuit normalement, seule la trace change.
     private String buildArmementPayloadExtra(RegisterTabFragment tabArmRef, String jobId,
-                                              int fProduct, double fPresetD, int node) {
-        String base = "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}";
+                                              int fProduct, double fPresetD, int node,
+                                              String descArmPourJson, String codeArmPourJson, int typeArmPourJson) {
+        // ✅ CORRIGÉ (23 sept 2026, demande Paul — "je veux le payload
+        // complet produit, type produit, code produit, preset, etc.
+        // dans le payload") — trouvé : ce builder retournait un JSON
+        // minimal ({status, job_id} seulement) dans le cas normal
+        // (aucun mismatch chauffeur), alors que les vraies valeurs
+        // (desc/code/type) sont déjà résolues et disponibles au point
+        // d'appel, déjà écrites correctement dans les colonnes
+        // structurées de la BD — seul le JSON texte payload_complet ne
+        // les reprenait jamais. Base enrichie maintenant avec ces
+        // champs, dans tous les cas, pas seulement le cas mismatch.
+        String base;
+        try {
+            JSONObject baseObj = new JSONObject();
+            baseObj.put("status", "RUNNING_FLOWING");
+            baseObj.put("job_id", jobId);
+            baseObj.put("active_product", fProduct);
+            if (descArmPourJson != null && !descArmPourJson.isEmpty()) baseObj.put("active_product_description", descArmPourJson);
+            if (codeArmPourJson != null && !codeArmPourJson.isEmpty()) baseObj.put("active_product_code", codeArmPourJson);
+            if (typeArmPourJson >= 0) baseObj.put("active_product_type", typeArmPourJson);
+            baseObj.put("preset_requested", fPresetD);
+            base = baseObj.toString();
+        } catch (Exception eBase) {
+            base = "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}";
+        }
         if (tabArmRef == null) return base;
         try {
             String produitDeepLink = tabArmRef.getCurrentProduitDeepLink();
