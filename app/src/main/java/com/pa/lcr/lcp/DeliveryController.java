@@ -1743,7 +1743,16 @@ FullStatus fs = readFullStatus("status/full");
                 // distingue maintenant clairement d'une vraie anomalie.
                 if (prevDevStatusKnown >= 0 && prevDevStatusKnown != fs.devStatus) {
                     LcpLink.DeviceStatusDecoded prevDecoded = LcpLink.decodeDeviceStatus(prevDevStatusKnown);
-                    com.pa.lcr.lcp.log.LogBus.api((link != null) ? (link.getHostAddr() & 0xFF) : -1,
+                    // ✅ CORRIGÉ (23 sept 2026, demande Paul — "je me
+                    // demande où tu le prends car c'est un seul
+                    // registre") — link.getHostAddr() est l'adresse de
+                    // l'HÔTE (la tablette) sur le bus LCP, pas le node
+                    // du registre — confondait les deux, affichant un
+                    // node fantôme (255/0xFF, jamais configuré) au lieu
+                    // du vrai node. resolveLcpNode(), déjà utilisé
+                    // ailleurs dans ce fichier (TICKET-SOURCE), donne le
+                    // vrai node.
+                    com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(),
                         String.format("[DEV-STATUS-CHANGE] %s → %s (état contrôleur=%s)",
                             prevDecoded, devDecoded, state != null ? state.name() : "?"));
                 }
@@ -3151,6 +3160,20 @@ softResync("retry/" + step);
         if (job == null) return;
         try { job.ticketNo = readTicketNo23Uncached(); } catch (Exception ignored) {}
         try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
+        // ✅ AJOUTÉ (18 sept 2026, demande Paul — "encore ici 241 sur le
+        // running_flowing... la fin de livraison est bonne") — trouvé un
+        // TROISIÈME champ figé, distinct de ticketNo/saleNo (déjà
+        // corrigés ci-dessus) : job.deliveryUid, construit UNE SEULE FOIS
+        // à l'armement (numero_livraison + "-" + ticketNo, avec l'ancien
+        // ticketNo périmé — ligne ~4226/4342) et jamais recalculé
+        // ensuite, contrairement à ticketNo/saleNo. Reconstruit ici avec
+        // la valeur de ticketNo tout juste rafraîchie, pour que ce
+        // troisième champ reste cohérent avec les deux autres dans tout
+        // snapshot ultérieur.
+        if (job.numeroLivraison != null && !job.numeroLivraison.trim().isEmpty()
+                && job.ticketNo != null && !job.ticketNo.trim().isEmpty()) {
+            job.deliveryUid = job.numeroLivraison + "-" + job.ticketNo;
+        }
     }
 
     private String readTicketNo23() throws Exception {
@@ -5211,7 +5234,11 @@ if (deliveryActive && !job.baselineCaptured) {
             // (pas à chaque poll, pour éviter le bruit).
             if (!java.util.Objects.equals(pauseReason, job.lastLoggedPauseReason)) {
                 job.lastLoggedPauseReason = pauseReason;
-                com.pa.lcr.lcp.log.LogBus.api((link != null) ? (link.getHostAddr() & 0xFF) : -1,
+                // ✅ CORRIGÉ (23 sept 2026, même demande) — même bug que
+                // DEV-STATUS-CHANGE plus haut dans ce fichier :
+                // link.getHostAddr() est l'adresse de l'hôte, pas le
+                // node du registre. resolveLcpNode() donne le vrai node.
+                com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(),
                     "[PAUSE-REASON] " + (pauseReason == null ? "(aucune — flux actif)" : pauseReason)
                         + " — ticket=" + job.ticketNo + " jobId=" + job.id);
             }
