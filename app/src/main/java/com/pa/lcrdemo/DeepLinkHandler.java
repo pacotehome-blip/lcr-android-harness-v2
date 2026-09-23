@@ -794,6 +794,35 @@ public class DeepLinkHandler {
             Fragment fEarly = activity.getSupportFragmentManager().findFragmentByTag("regtab_" + tabKeyEarly);
             if (fEarly instanceof RegisterTabFragment) tabArmEarlyRef = (RegisterTabFragment) fEarly;
         } catch (Exception ignoredEarly) {}
+        // ✅ AJOUTÉ (23 sept 2026, demande Paul — "le processus est
+        // linéaire, pas supposé avoir des processus simultanés") —
+        // confirmé par log réel (268→269, apr-5004515→apr-5004512) :
+        // le cycle d'initialisation du tab précédent (runInitSequence,
+        // les 7 étapes) pouvait encore finir de mettre à jour l'écran
+        // pendant qu'un nouvel armement démarrait déjà — activePolls
+        // (vérifié plus haut) ne couvre que les vraies livraisons
+        // actives, jamais ce cycle d'init lui-même. Contrairement au
+        // garde armementEnCoursParCetteSession juste en dessous
+        // (refus propre), celui-ci ATTEND plutôt que de refuser —
+        // demande explicite de Paul : "on indique veuillez patienter...
+        // ensuite on passe la demande", pas un rejet. La vérification
+        // PENDING/RUNNING_FLOWING (une vraie livraison active) est déjà
+        // faite plus haut (activePolls, ligne ~701) — ce garde-ci ne
+        // concerne jamais une vraie livraison, seulement le ménage
+        // interne du tab.
+        if (tabArmEarlyRef != null && tabArmEarlyRef.initSequenceRunning.get()) {
+            android.util.Log.i(TAG, "lancerLivraison: cycle d'initialisation du tab encore en cours — attente avant de procéder");
+            com.pa.lcr.lcp.log.LogBus.api(node, "[ARMEMENT] cycle d'initialisation du tab précédent encore en cours — attente");
+            activity.runOnUiThread(() -> activity.toast("⏳ Veuillez patienter — un processus est en cours de finalisation"));
+            for (int attenteInit = 0; attenteInit < 30 && tabArmEarlyRef.initSequenceRunning.get(); attenteInit++) {
+                try { Thread.sleep(300); } catch (Exception ignoredAttenteInit) {}
+            }
+            if (tabArmEarlyRef.initSequenceRunning.get()) {
+                com.pa.lcr.lcp.log.LogBus.api(node, "[ARMEMENT] cycle d'initialisation toujours en cours après 9s — on procède quand même");
+            } else {
+                com.pa.lcr.lcp.log.LogBus.api(node, "[ARMEMENT] cycle d'initialisation terminé — la demande procède");
+            }
+        }
         if (tabArmEarlyRef != null) {
             if (tabArmEarlyRef.armementEnCoursParCetteSession) {
                 String sourceEnCours = tabArmEarlyRef.armementEnCoursSource != null
@@ -1008,6 +1037,11 @@ public class DeepLinkHandler {
         final double fPresetD = preset;
         final String fMac = mac != null ? mac : "";
 
+        // ✅ AJOUTÉ (23 sept 2026, demande Paul) — si "Bon déjà complété"
+        // est confirmé par le chauffeur, "Preset déjà atteint" (plus bas,
+        // vérification distincte sur le registre) ne doit pas redemander
+        // la même chose une deuxième fois pour le même fait.
+        boolean bonDejaCompleteConfirme = false;
         // ✅ Même vérification que le bouton C dans RegisterTabFragment (onClick btnC) :
         // comparer au DERNIER enregistrement du WO (getLatestForWo), pas une somme —
         // si ce dernier net >= preset (ou preset non fourni), demander confirmation
@@ -1065,6 +1099,14 @@ public class DeepLinkHandler {
                     android.util.Log.w(TAG, "lancerLivraison: bon " + woNum
                         + " déjà complété (ticket #" + existing.ticketNo
                         + ", " + existing.netL + "L net, preset=" + fPresetD + "L) — confirmation requise");
+                    // ✅ AJOUTÉ (23 sept 2026, demande Paul — "est-ce que tu
+                    // vois ces demandes dans logtab et support") — trouvé :
+                    // ce dialogue n'écrivait que dans logcat, invisible
+                    // dans Support/le tab, contrairement à "Preset déjà
+                    // atteint" (déjà visible via [PRESET-CHECK]).
+                    try { com.pa.lcr.lcp.log.LogBus.api(node, "[BON-COMPLETE] wo=" + woNum
+                        + " déjà complété (ticket #" + existing.ticketNo
+                        + ", " + existing.netL + "L net, preset=" + fPresetD + "L) — confirmation requise"); } catch (Exception ignoredTraceBonComplete) {}
 
                     final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
                     final boolean[] continuer = {false};
@@ -1111,6 +1153,7 @@ public class DeepLinkHandler {
                         return;
                     }
                     android.util.Log.i(TAG, "lancerLivraison: chauffeur confirme — nouvelle livraison sur bon déjà complété");
+                    bonDejaCompleteConfirme = true;
                 }
             }
         } catch (Exception e) {
@@ -1216,7 +1259,13 @@ public class DeepLinkHandler {
                     com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] deep link — résidu disparu tout seul après "
                         + tentativesPresetDeepLink + " réessai(s), armement continue sans dialogue");
                 }
-                if (presetDejaAtteintDeepLink) {
+                // ✅ AJOUTÉ (23 sept 2026, demande Paul) — si "Bon déjà
+                // complété" vient déjà d'être confirmé par le chauffeur
+                // pour ce même wo, ne pas redemander la même chose via
+                // "Preset déjà atteint" — même fait, deux sources.
+                if (presetDejaAtteintDeepLink && bonDejaCompleteConfirme) {
+                    com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] deep link — sauté, déjà confirmé via Bon déjà complété — wo=" + woNum);
+                } else if (presetDejaAtteintDeepLink) {
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDbDeepLink =
                         new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingDeepLink;
