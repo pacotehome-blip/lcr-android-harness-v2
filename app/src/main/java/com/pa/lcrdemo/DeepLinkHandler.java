@@ -2605,6 +2605,16 @@ public class DeepLinkHandler {
                 boolean hasSeenFlowing = false;
                 boolean terminateSent  = false;
                 String  lastState      = "";
+                // ✅ AJOUTÉ (22 sept 2026, demande Paul — Couche 1,
+                // empêcher le suivi de se perdre sur un seul
+                // state=null transitoire) — confirmé suspect pour le
+                // ticket 263/apr-5004515 : "state=null" faisait sortir
+                // la boucle IMMÉDIATEMENT et pour toujours, sans jamais
+                // réessayer. Exige maintenant plusieurs lectures null
+                // CONSÉCUTIVES avant d'abandonner — une seule lecture
+                // transitoire (reconnexion, tick manqué) ne suffit plus
+                // à perdre le suivi pour de bon.
+                int consecutiveNullState = 0;
 
                 // ✅ Lire ticket# au démarrage pour détecter changement ultérieur
                 String ticketNoAtStartTmp = "";
@@ -2745,51 +2755,35 @@ public class DeepLinkHandler {
                                         try { impressionObligatoireApresContinue = !dcApresContinue.api_isTicketRequiredNeverPrint(); } catch (Exception ignoredReq) {}
                                     }
                                     if (!impressionObligatoireApresContinue && dcApresContinue != null) {
-                                        // ✅ CORRIGÉ (21 sept 2026, demande
-                                        // Paul — "retarde le temps de
-                                        // recevoir le nouveau ticket_number
-                                        // de l'affichage du running_flowing"
-                                        // — confirmé par log réel où le
-                                        // registre gardait 260 sur une
-                                        // NOUVELLE livraison au lieu de
-                                        // basculer à 261) — trouvé un vrai
-                                        // bug dans cette boucle, pas
-                                        // seulement une fenêtre trop
-                                        // courte : "deux lectures
-                                        // consécutives identiques = stable"
-                                        // sortait immédiatement (après ~2
-                                        // essais) dès que le registre
-                                        // répondait encore ticketNoAtStart
-                                        // deux fois de suite — confondant
-                                        // "pas encore changé" avec
-                                        // "confirmé". Ne considère
-                                        // maintenant stabilisé QUE si la
-                                        // valeur a RÉELLEMENT changé par
-                                        // rapport à ticketNoAtStart (deux
-                                        // fois de suite, pour éviter un
-                                        // faux positif transitoire) —
-                                        // continue de réessayer tant que ce
-                                        // n'est pas le cas, jusqu'à 20
-                                        // essais (~10s), un délai
-                                        // volontairement accepté par Paul
-                                        // pour garantir le bon numéro avant
-                                        // que running_flowing ne s'affiche.
-                                        String precedente = "";
+                                        // ✅ CORRIGÉ (23 sept 2026, demande
+                                        // Paul — confirmé par log réel
+                                        // (ticket 263→264, apr-5004515) :
+                                        // le registre ne fait avancer
+                                        // sale_number qu'à la VRAIE FIN de
+                                        // la livraison, jamais avant —
+                                        // attendre après Continue
+                                        // n'apporte donc rien, la boucle
+                                        // de stabilisation de 10s
+                                        // attendait pour rien puis
+                                        // affichait quand même l'ancien
+                                        // numéro. Remplacée par une seule
+                                        // lecture propre, juste avant
+                                        // RUNNING_FLOWING — capture la
+                                        // meilleure valeur connue à ce
+                                        // moment (pas forcément la
+                                        // finale), avec une trace claire
+                                        // dans Support/le tab.
                                         String ticketStabilise = "";
-                                        for (int essaiStab = 0; essaiStab < 20; essaiStab++) {
-                                            try { dcApresContinue.forceRefreshTicketEtSaleNoPourJob(jobId); } catch (Exception ignoredRefresh) {}
-                                            String lecture = dcApresContinue.api_readTicketNo23Frais();
-                                            if (lecture == null) lecture = "";
-                                            boolean vraimentChange = !lecture.isEmpty() && !lecture.equals(ticketNoAtStart);
-                                            if (vraimentChange && lecture.equals(precedente)) {
-                                                ticketStabilise = lecture;
-                                                break; // vraiment changé ET confirmé deux fois de suite
-                                            }
-                                            precedente = vraimentChange ? lecture : "";
-                                            if (essaiStab < 19) { try { Thread.sleep(500); } catch (Exception ignored) {} }
-                                        }
-                                        if (!ticketStabilise.isEmpty() && !ticketStabilise.equals(ticketNoAtStart)) {
-                                            android.util.Log.i(TAG, "job/continue: sale_number stabilisé avant running_flowing — "
+                                        try {
+                                            dcApresContinue.forceRefreshTicketEtSaleNoPourJob(jobId);
+                                            String lectureUnique = dcApresContinue.api_readTicketNo23Frais();
+                                            if (lectureUnique != null) ticketStabilise = lectureUnique;
+                                        } catch (Exception ignoredRefresh) {}
+                                        try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] lecture avant RUNNING_FLOWING — jobId="
+                                            + jobId + " valeur=" + ticketStabilise
+                                            + (ticketStabilise.equals(ticketNoAtStart) ? " (identique à l'armement)" : " (changée depuis l'armement)")); } catch (Exception ignoredTraceAvant) {}
+                                        if (!ticketStabilise.isEmpty()) {
+                                            android.util.Log.i(TAG, "job/continue: lecture avant running_flowing — "
                                                 + ticketNoAtStart + "→" + ticketStabilise);
                                             lastKnownTicketNo.put(ticketCacheKey(serialId, woNum), ticketStabilise);
                                             final String fTicketStab = ticketStabilise;
@@ -3071,11 +3065,34 @@ public class DeepLinkHandler {
                             android.util.Log.i(TAG, "pollJob: state=" + state);
                         }
 
-                        // ✅ state=null = job disparu du controller — sortir immédiatement
+                        // ✅ CORRIGÉ (22 sept 2026, demande Paul — Couche
+                        // 1) — state=null pouvait être transitoire (une
+                        // reconnexion, un tick manqué), pas forcément
+                        // "job disparu pour de bon". N'abandonne
+                        // maintenant qu'après 5 lectures null
+                        // CONSÉCUTIVES (~5s, léger dans la fenêtre de
+                        // 10 minutes) — remis à zéro dès qu'un vrai state
+                        // revient. Visible dans Support dès la première
+                        // fois, pas seulement à l'abandon final.
                         if (state == null || state.isEmpty()) {
-                            android.util.Log.w(TAG, "pollJob: state=null — job disparu, arrêt poll");
-                            return;
+                            consecutiveNullState++;
+                            if (consecutiveNullState == 1) {
+                                try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] state=null — jobId="
+                                    + jobId + " (1er, surveillance avant abandon)"); } catch (Exception ignoredTraceNull) {}
+                            }
+                            if (consecutiveNullState >= 5) {
+                                android.util.Log.w(TAG, "pollJob: state=null 5x consécutives — job disparu, arrêt poll");
+                                try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] state=null persistant (5x) — jobId="
+                                    + jobId + " — abandon du suivi"); } catch (Exception ignoredTraceNullAbandon) {}
+                                return;
+                            }
+                            continue;
                         }
+                        if (consecutiveNullState > 0) {
+                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] state revenu après "
+                                + consecutiveNullState + " lecture(s) null — jobId=" + jobId); } catch (Exception ignoredTraceNullRecover) {}
+                        }
+                        consecutiveNullState = 0;
 
                         // ✅ AJOUTÉ (27 août 2026, demande Paul — "je veux
                         // avoir en bd chaque livraison qui a toi le
@@ -3140,9 +3157,26 @@ public class DeepLinkHandler {
                         if ("DONE".equals(state) || "TERMINATED".equals(state)) {
                             if (deliveryDone[0]) return;
                             deliveryDone[0] = true;
+                            // ✅ AJOUTÉ (23 sept 2026, demande Paul —
+                            // "déclencheur juste avant running_flowing et
+                            // à la fin qui valide l'information") — force
+                            // une relecture fraîche ici, à la vraie
+                            // transition de fin, plutôt que de se fier au
+                            // tick d'il y a jusqu'à 1s (la fréquence de
+                            // cette boucle).
+                            try {
+                                com.pa.lcr.lcp.DeliveryController dcFinForce =
+                                    com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                                if (dcFinForce != null) {
+                                    dcFinForce.forceRefreshTicketEtSaleNoPourJob(jobId);
+                                    com.pa.lcr.lcp.ApiResult rFinForce =
+                                        new MultiRegisterApiFacadeImpl(activity).api_deliveryJobGet(jobId);
+                                    if (rFinForce != null && rFinForce.data != null) r = rFinForce;
+                                }
+                            } catch (Exception ignoredForceFin1) {}
                             String extraJson = (r.data != null) ? r.data.toString() : "{}";
                             android.util.Log.i(TAG, "Livraison DONE — " + extraJson);
-                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (DONE) — jobId=" + jobId); } catch (Exception ignoredTraceEnd1) {}
+                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (DONE), validée — jobId=" + jobId); } catch (Exception ignoredTraceEnd1) {}
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
                             onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             return;
@@ -3153,9 +3187,19 @@ public class DeepLinkHandler {
                                 && "PRINT_TIMEOUT".equals(r.data.optString("err", ""))) {
                             if (deliveryDone[0]) return;
                             deliveryDone[0] = true;
-                            String extraJson = r.data.toString();
+                            try {
+                                com.pa.lcr.lcp.DeliveryController dcFinForce2 =
+                                    com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                                if (dcFinForce2 != null) {
+                                    dcFinForce2.forceRefreshTicketEtSaleNoPourJob(jobId);
+                                    com.pa.lcr.lcp.ApiResult rFinForce2 =
+                                        new MultiRegisterApiFacadeImpl(activity).api_deliveryJobGet(jobId);
+                                    if (rFinForce2 != null && rFinForce2.data != null) r = rFinForce2;
+                                }
+                            } catch (Exception ignoredForceFin2) {}
+                            String extraJson = r.data != null ? r.data.toString() : "{}";
                             android.util.Log.w(TAG, "Livraison PRINT_TIMEOUT — Dataverse quand même — " + extraJson);
-                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (PRINT_TIMEOUT) — jobId=" + jobId); } catch (Exception ignoredTraceEnd2) {}
+                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (PRINT_TIMEOUT), validée — jobId=" + jobId); } catch (Exception ignoredTraceEnd2) {}
                             logDeliveryEnd(serialId, woNum, jobId, "DONE_PRINT_TIMEOUT", extraJson, null);
                             onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             return;
@@ -3165,10 +3209,20 @@ public class DeepLinkHandler {
                         if ("CONNECTED".equals(state) && terminateSent) {
                             if (deliveryDone[0]) return;
                             deliveryDone[0] = true;
+                            try {
+                                com.pa.lcr.lcp.DeliveryController dcFinForce3 =
+                                    com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                                if (dcFinForce3 != null) {
+                                    dcFinForce3.forceRefreshTicketEtSaleNoPourJob(jobId);
+                                    com.pa.lcr.lcp.ApiResult rFinForce3 =
+                                        new MultiRegisterApiFacadeImpl(activity).api_deliveryJobGet(jobId);
+                                    if (rFinForce3 != null && rFinForce3.data != null) r = rFinForce3;
+                                }
+                            } catch (Exception ignoredForceFin3) {}
                             String extraJson = (r.data != null) ? r.data.toString() : "{}";
                             android.util.Log.i(TAG,
                                 "Livraison terminée (CONNECTED post-terminate) — " + extraJson);
-                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (post-terminate) — jobId=" + jobId); } catch (Exception ignoredTraceEnd3) {}
+                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (post-terminate), validée — jobId=" + jobId); } catch (Exception ignoredTraceEnd3) {}
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
                             onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             return;
@@ -3180,10 +3234,20 @@ public class DeepLinkHandler {
                         if ("CONNECTED".equals(state) && hasSeenFlowing && !terminateSent) {
                             if (deliveryDone[0]) return;
                             deliveryDone[0] = true;
+                            try {
+                                com.pa.lcr.lcp.DeliveryController dcFinForce4 =
+                                    com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                                if (dcFinForce4 != null) {
+                                    dcFinForce4.forceRefreshTicketEtSaleNoPourJob(jobId);
+                                    com.pa.lcr.lcp.ApiResult rFinForce4 =
+                                        new MultiRegisterApiFacadeImpl(activity).api_deliveryJobGet(jobId);
+                                    if (rFinForce4 != null && rFinForce4.data != null) r = rFinForce4;
+                                }
+                            } catch (Exception ignoredForceFin4) {}
                             String extraJson = (r.data != null) ? r.data.toString() : "{}";
                             android.util.Log.i(TAG,
                                 "Livraison terminée (CONNECTED preset atteint) — " + extraJson);
-                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (preset atteint) — jobId=" + jobId); } catch (Exception ignoredTraceEnd4) {}
+                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] terminée (preset atteint), validée — jobId=" + jobId); } catch (Exception ignoredTraceEnd4) {}
                             logDeliveryEnd(serialId, woNum, jobId, "DONE", extraJson, null);
                             onDeliveryEnded(woNum, woIdGuid, extraJson, node, serialId, mac);
                             // ✅ AJOUTÉ (28 août 2026, demande Paul — "il
