@@ -2750,6 +2750,26 @@ public class DeepLinkHandler {
                                     com.pa.lcr.lcp.DeliveryController dcApresContinue =
                                         com.pa.lcr.lcp.RegisterSessionManager.get(activity)
                                             .getController(transportKey, node);
+                                    // ✅ AJOUTÉ (23 sept 2026, demande Paul
+                                    // — la trace "lecture avant
+                                    // RUNNING_FLOWING" absente sur le
+                                    // ticket 265/apr-5004515 sans aucune
+                                    // erreur visible) — si dcApresContinue
+                                    // est null ici (recherche de
+                                    // contrôleur défaillante juste après
+                                    // un Continue qui vient de réussir),
+                                    // TOUT ce bloc — y compris le
+                                    // déclencheur 1 — était sauté
+                                    // silencieusement, impressionObligatoireApresContinue
+                                    // restant à son défaut (true) même sur
+                                    // un registre qui n'exige pas
+                                    // d'impression. Trace explicite ici
+                                    // pour confirmer ou infirmer cette
+                                    // hypothèse au prochain test.
+                                    if (dcApresContinue == null) {
+                                        try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] contrôleur introuvable juste après Continue — jobId="
+                                            + jobId + " — déclencheur 1 sauté (impression traitée comme obligatoire par défaut)"); } catch (Exception ignoredTraceNullDc) {}
+                                    }
                                     boolean impressionObligatoireApresContinue = true;
                                     if (dcApresContinue != null) {
                                         try { impressionObligatoireApresContinue = !dcApresContinue.api_isTicketRequiredNeverPrint(); } catch (Exception ignoredReq) {}
