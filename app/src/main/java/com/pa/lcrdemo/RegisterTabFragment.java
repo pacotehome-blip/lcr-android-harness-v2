@@ -2360,6 +2360,39 @@ public class RegisterTabFragment extends Fragment {
                             extraFilet.put("result", resultFilet);
                             extraFilet.put("jobId", safetyNetFin.jobId);
                             extraFilet.put("preset_requested", safetyNetFin.presetL);
+                            // ✅ AJOUTÉ (23 sept 2026, demande Paul — confirmé
+                            // par log réel, ticket 274/apr-5004527: la
+                            // détection normale (pollJobUntilDone) et
+                            // FILET-CONNECTED ont fini par finaliser TOUS
+                            // LES DEUX pour le même job — la détection
+                            // normale en premier (avec le vrai résultat
+                            // enrichi), puis FILET-CONNECTED juste après,
+                            // écrasant avec son propre format minimal. Le
+                            // délai de stabilisation de 400ms ci-dessus
+                            // (9 sept) crée exactement cette fenêtre de
+                            // course. Revérifie l'état actuel juste avant
+                            // d'écrire — si déjà SYNCED entretemps, la
+                            // détection normale a gagné, on ne fait rien.
+                            boolean dejaFinaliseAilleurs = false;
+                            try {
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbVerifFinal =
+                                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                                try {
+                                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowVerifFinal =
+                                        dbVerifFinal.getByJobId(safetyNetFin.jobId);
+                                    if (rowVerifFinal != null
+                                            && com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING.equals(rowVerifFinal.syncStatus) == false) {
+                                        dejaFinaliseAilleurs = true;
+                                    }
+                                } finally {
+                                    try { dbVerifFinal.close(); } catch (Exception ignored) {}
+                                }
+                            } catch (Exception ignoredVerifFinal) {}
+                            if (dejaFinaliseAilleurs) {
+                                LogBus.api(node, "[FILET-CONNECTED] déjà finalisée par la détection normale entretemps — jobId="
+                                    + safetyNetFin.jobId + " — rien à faire");
+                                return;
+                            }
                             MainActivity mainFilet = (MainActivity) getActivity();
                             if (mainFilet != null) {
                                 mainFilet.onDeliveryEnded(currentWoNum, currentWoIdGuid, extraFilet.toString(),
@@ -3690,6 +3723,7 @@ public class RegisterTabFragment extends Fragment {
                 runInitSequence();
             }
         }
+        boolean woNumVientDeChanger = woNum != null && !woNum.isEmpty() && !woNum.equals(currentWoNum);
         if (woNum != null && !woNum.isEmpty()) {
             currentWoNum = woNum;
             // ✅ Ce WO vient directement du deep link — priorité sur toute recherche
@@ -3697,6 +3731,20 @@ public class RegisterTabFragment extends Fragment {
             // encore rapporter le ticket de la livraison PRÉCÉDENTE un court instant).
             woNumFromDirectSource = true;
             lastTicketDetected = ""; // permettre une future recherche si ce WO change de source
+        }
+        // ✅ AJOUTÉ (23 sept 2026, demande Paul — capture d'écran :
+        // panneau "WO complété" affichait encore le total cumulatif de
+        // l'ANCIEN WO (apr-5004526, 3 livraisons) sur le tab du NOUVEAU
+        // WO (apr-5004527)) — trouvé : rafraichirCumulWo() lit
+        // currentWoNum au moment de l'appel, mais rien ne la
+        // redéclenchait explicitement ici, juste après que ce même
+        // champ vienne de changer pour un nouveau deep link — l'anti-
+        // rebond partagé (2s, triggerWoDetectionThrottled) pouvait
+        // bloquer le prochain appel naturel pendant que l'affichage
+        // restait figé sur l'ancien WO. Déclenchement explicite ici,
+        // hors anti-rebond, précisément quand le WO vient de changer.
+        if (woNumVientDeChanger) {
+            ui.post(() -> rafraichirCumulWo());
         }
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         if (produit != null && !produit.isEmpty()) currentProduit = produit;
