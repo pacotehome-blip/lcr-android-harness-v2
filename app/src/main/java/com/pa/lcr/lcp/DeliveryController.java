@@ -5042,10 +5042,16 @@ job.presetNetL_requested = presetNetL;
             return ApiResult.ok(job.lastOkMsg != null ? job.lastOkMsg : "Job: 1 - RUNNING", data);
         }
 
-        // ensure ticket/sale always present (best-effort)
-        if (job.ticketNo == null || job.ticketNo.trim().isEmpty()) {
-            try { job.ticketNo = readTicketNo23Uncached(); } catch (Exception ignored) {}
-        }
+        // ✅ CORRIGÉ (23 sept 2026, demande Paul — "301" figé sur
+        // job.ticketNo, jamais rafraîchi après sa toute première
+        // valeur non vide, contaminant PAUSE-REASON/le payload externe
+        // sur toutes les livraisons suivantes du même job) — "seulement
+        // si vide" gardait indéfiniment une vieille valeur non vide.
+        // Sécuritaire de toujours relire ici : ce bloc entier
+        // (ligne 5042) ne s'exécute jamais pendant RUNNING_FLOWING
+        // (retour anticipé juste avant pour cet état) — aucune
+        // violation de la règle "aucune lecture pendant le flux".
+        try { job.ticketNo = readTicketNo23Uncached(); } catch (Exception ignored) {}
         if (job.saleNo == null || job.saleNo.trim().isEmpty()) {
             try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
         }
