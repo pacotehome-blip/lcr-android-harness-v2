@@ -882,7 +882,13 @@ public class RegisterTabFragment extends Fragment {
     // catégorie de doublon que ceux réglés ailleurs aujourd'hui — un simple
     // flag empêche une deuxième exécution de partir tant que la première
     // n'est pas terminée.
-    private final java.util.concurrent.atomic.AtomicBoolean initSequenceRunning =
+    // ✅ CORRIGÉ (23 sept 2026, demande Paul) — visibilité élargie de
+    // private à public : DeepLinkHandler.lancerLivraison() a besoin de
+    // lire cet état pour garantir la linéarité stricte (attendre la fin
+    // réelle du cycle d'init précédent avant de procéder), même
+    // principe déjà établi pour armementEnCoursParCetteSession
+    // juste au-dessus.
+    public final java.util.concurrent.atomic.AtomicBoolean initSequenceRunning =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
     // ✅ AJOUTÉ (26 août 2026, demande Paul) — vérification centralisée,
@@ -4192,6 +4198,27 @@ public class RegisterTabFragment extends Fragment {
                                     if (!presetTxtUi.isEmpty()) presetValBg = Double.parseDouble(presetTxtUi);
                                 } catch (Exception ignored) {}
                                 boolean livraisonComplete = (presetValBg <= 0 || existingBg.netL >= presetValBg);
+                                // ✅ CORRIGÉ (23 sept 2026, demande Paul —
+                                // "regarde donc encore dans le code je suis
+                                // certain que oui") — trouvé : cette
+                                // deuxième implémentation (New C, distincte
+                                // de celle déjà corrigée dans
+                                // DeepLinkHandler.lancerLivraison()) ne
+                                // vérifiait jamais l'état réel du registre
+                                // — pouvait afficher "Bon déjà complété"
+                                // même pendant une vraie livraison en cours
+                                // (RUNNING_FLOWING/RUNNING_PAUSED). Même
+                                // vérification appliquée ici : si le
+                                // registre confirme une livraison
+                                // réellement active, le dialogue ne doit
+                                // jamais s'afficher.
+                                if (livraisonComplete && controller != null) {
+                                    com.pa.lcr.lcp.DeliveryState etatVerifNewC = controller.getState();
+                                    if (etatVerifNewC == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING
+                                            || etatVerifNewC == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
+                                        livraisonComplete = false;
+                                    }
+                                }
                                 showDialog = livraisonComplete && !bypassDeliveryDialog;
                             }
                         }
