@@ -1598,10 +1598,13 @@ catch (Exception ignored) {}
                             // DEV-STATUS-CHANGE), confirmé visible aux
                             // deux endroits.
                             try {
+                                // ✅ CORRIGÉ (build CI) — job n'est pas un
+                                // champ accessible depuis setState() (il
+                                // l'était dans la fonction où ce patron a
+                                // été copié) — retiré, non essentiel ici.
                                 com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(),
                                     "[REPRISE-AUTO] net augmenté (" + pauseTickBaselineNet + "→" + netActuel
-                                    + "L) et flowActive confirmé pendant RUNNING_PAUSED sans clic Continuer — jobId="
-                                    + (job != null ? job.id : "?"));
+                                    + "L) et flowActive confirmé pendant RUNNING_PAUSED sans clic Continuer");
                             } catch (Exception ignoredTraceReprise) {}
                             if (listener != null) {
                                 listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
