@@ -1653,6 +1653,28 @@ try {
 
 FullStatus fs = readFullStatus("status/full");
 
+                // ✅ AJOUTÉ (23 sept 2026, demande Paul — "si je ne fais
+                // pas le bouton continue mais que le flow coule, il faut
+                // que l'on comprenne comme si on a fait continuer... le
+                // livreur a besoin de suivre dans le cas de la reprise")
+                // — trouvé la vraie cause : le tick rapide (200ms) et le
+                // superviseur sont tous les deux COMPLÈTEMENT ARRÊTÉS dès
+                // l'entrée en RUNNING_PAUSED (voir setState) — plus rien
+                // ne sondait le registre pour remarquer une reprise
+                // physique du flux sans clic. Ce keep-alive (~5s),
+                // séparé, continue lui de tourner pendant la pause — s'il
+                // détecte flowActive pendant qu'on est encore RUNNING_PAUSED,
+                // traite ça exactement comme un vrai Continue : redéclenche
+                // setState(RUNNING_FLOWING), qui relance automatiquement le
+                // tick rapide et le superviseur (déjà câblé ainsi pour
+                // cette transition). Délai de détection ~5s (cadence de ce
+                // keep-alive), pas instantané, mais l'écran ne reste plus
+                // jamais figé indéfiniment sur "en pause".
+                if (state == DeliveryState.RUNNING_PAUSED && fs.flowActive) {
+                    emitLog("[REPRISE-AUTO] flux détecté actif pendant RUNNING_PAUSED sans clic Continuer — traité comme une reprise");
+                    setState(DeliveryState.RUNNING_FLOWING);
+                }
+
                 // ✅ Delivery Status bit 0x0040 : "delivery terminated due to too many
                 // pulser reversals" (retour d'air) — signal OFFICIEL du protocole LCR-II,
                 // détecté ici en priorité (avant tout simple test de signe négatif).
