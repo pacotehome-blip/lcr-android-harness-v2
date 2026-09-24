@@ -1672,6 +1672,18 @@ FullStatus fs = readFullStatus("status/full");
                 // jamais figé indéfiniment sur "en pause".
                 if (state == DeliveryState.RUNNING_PAUSED && fs.flowActive) {
                     emitLog("[REPRISE-AUTO] flux détecté actif pendant RUNNING_PAUSED sans clic Continuer — traité comme une reprise");
+                    // ✅ CORRIGÉ (23 sept 2026, même demande — "le ui ne
+                    // s'adapte pas avec le contexte que le running_flowing
+                    // coule") — setState() seul notifie onStateChanged()
+                    // (qui corrige déjà les boutons via l'état réel), mais
+                    // jamais onLiveStatus() — c'est ce texte précis qui
+                    // alimente l'affichage "LIVE:" visible à l'écran,
+                    // resté figé sur l'ancien texte de pause sans cet
+                    // appel. Même texte que le chemin de détection normal
+                    // (voir plus bas dans ce fichier, "FLOW ON").
+                    if (listener != null) {
+                        listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
+                    }
                     setState(DeliveryState.RUNNING_FLOWING);
                 }
 
