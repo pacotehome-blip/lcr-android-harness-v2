@@ -514,6 +514,26 @@ private void reproEvent(String level, String type, String message, JSONObject da
             supervisionFuture = null;
         }
     }
+    // ✅ AJOUTÉ (23 sept 2026, demande Paul — "une validation à la même
+    // fréquence que le live tick pendant le paused, nous verrons
+    // rapidement que nous sommes revenus au live tick") — exécuteur
+    // COMPLÈTEMENT SÉPARÉ, dédié uniquement à RUNNING_PAUSED, jamais
+    // partagé avec liveTickScheduler/supervisionScheduler — même leçon
+    // que le 26 août (un exécuteur partagé entre deux jobs périodiques
+    // crée du lag mesurable pour l'un ou l'autre). Ne tourne jamais en
+    // même temps que liveTickFuture — les deux s'excluent
+    // structurellement selon l'état (voir setState()), donc aucun
+    // risque d'affecter le vrai live tick.
+    private volatile java.util.concurrent.ScheduledExecutorService pauseTickScheduler =
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+    private volatile java.util.concurrent.ScheduledFuture<?> pauseTickFuture = null;
+    private volatile double pauseTickBaselineNet = -1;
+    private void ensurePauseTickSchedulerAlive() {
+        if (pauseTickScheduler.isShutdown() || pauseTickScheduler.isTerminated()) {
+            pauseTickScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+            pauseTickFuture = null;
+        }
+    }
     private Listener listener;
 
     /** ✅ AJOUTÉ (12 août 2026) — recrée le planificateur s'il a été fermé
@@ -1347,10 +1367,14 @@ try {
         try {
             if (liveTickFuture != null) { liveTickFuture.cancel(false); liveTickFuture = null; }
             if (supervisionFuture != null) { supervisionFuture.cancel(false); supervisionFuture = null; }
+            if (pauseTickFuture != null) { pauseTickFuture.cancel(false); pauseTickFuture = null; }
             liveTickScheduler.shutdownNow();
             // ✅ AJOUTÉ (26 août 2026) — arrête aussi le nouvel exécuteur
             // séparé du superviseur, pour éviter une fuite de thread.
             supervisionScheduler.shutdownNow();
+            // ✅ AJOUTÉ (23 sept 2026) — même chose pour l'exécuteur dédié
+            // à RUNNING_PAUSED.
+            pauseTickScheduler.shutdownNow();
         } catch (Exception ignored) {}
 
 // ✅ REPRO: close session best-effort
@@ -1532,6 +1556,63 @@ catch (Exception ignored) {}
             }
         }
 
+        // ✅ AJOUTÉ (23 sept 2026, demande Paul — validation dédiée
+        // pendant RUNNING_PAUSED, même fréquence que le live tick, pour
+        // détecter une reprise réelle sans clic Continuer). Même
+        // principe que le bloc RUNNING_FLOWING ci-dessus : placé AVANT
+        // le retour anticipé "state == s", pour ne jamais dépendre de
+        // ça pour décider si cette boucle doit démarrer (même leçon que
+        // le 12 août pour liveTickFuture).
+        if (s == DeliveryState.RUNNING_PAUSED) {
+            ensurePauseTickSchedulerAlive();
+            if (pauseTickFuture == null || pauseTickFuture.isDone()) {
+                pauseTickBaselineNet = -1; // capturé au premier tick, voir ci-dessous
+                pauseTickFuture = pauseTickScheduler.scheduleWithFixedDelay(
+                    () -> {
+                        try {
+                            if (isStopped() || state != DeliveryState.RUNNING_PAUSED) return;
+                            double[] ng = readNetGrossFromHardware();
+                            if (ng == null || ng.length < 2) return;
+                            double netActuel = ng[0]; // {netL, grossL} — confirmé dans readNetGrossFromHardware()
+                            if (netActuel < 0) return; // -1.0 = échec de lecture (sentinelle), jamais une vraie base
+                            if (pauseTickBaselineNet < 0) {
+                                pauseTickBaselineNet = netActuel;
+                                return; // première lecture — juste établir la base
+                            }
+                            if (netActuel <= pauseTickBaselineNet) return; // rien n'a bougé
+                            int[] ds = lcpDeliveryStatus();
+                            boolean flowActiveMaintenant = (ds[1] & DC_FLOW_ACTIVE) != 0;
+                            if (!flowActiveMaintenant) return;
+                            // ✅ net/gross a réellement augmenté ET le registre
+                            // confirme flowActive — reprise réelle, confirmée
+                            // par deux sources indépendantes, pas une seule.
+                            // ✅ CORRIGÉ (23 sept 2026, demande Paul — "je
+                            // veux un log tab et support quand cela
+                            // arrive") — trouvé : emitLog() n'appelle que
+                            // listener.onLog(), qui ne fait QUE
+                            // scheduleLogRefresh() côté Fragment, jamais
+                            // LogBus.api() — invisible dans Support ET
+                            // dans l'onglet log. Remplacé par LogBus.api()
+                            // directement, même mécanisme déjà utilisé
+                            // ailleurs dans ce fichier (PAUSE-REASON,
+                            // DEV-STATUS-CHANGE), confirmé visible aux
+                            // deux endroits.
+                            try {
+                                com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(),
+                                    "[REPRISE-AUTO] net augmenté (" + pauseTickBaselineNet + "→" + netActuel
+                                    + "L) et flowActive confirmé pendant RUNNING_PAUSED sans clic Continuer — jobId="
+                                    + (job != null ? job.id : "?"));
+                            } catch (Exception ignoredTraceReprise) {}
+                            if (listener != null) {
+                                listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
+                            }
+                            setState(DeliveryState.RUNNING_FLOWING);
+                        } catch (Exception ignored) {}
+                    },
+                    0, liveTickIntervalMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
+        }
+
         if (state == s) return;
         DeliveryState prevState = state;
         state = s;
@@ -1550,6 +1631,14 @@ catch (Exception ignored) {}
                 supervisionFuture.cancel(false);
                 supervisionFuture = null;
             }
+        }
+        // ✅ AJOUTÉ (23 sept 2026, demande Paul) — arrêt symétrique de la
+        // boucle dédiée à RUNNING_PAUSED, dès qu'on la quitte (retour au
+        // flux, ou fin de livraison) — jamais active en même temps que
+        // liveTickFuture, par construction.
+        if (s != DeliveryState.RUNNING_PAUSED && pauseTickFuture != null) {
+            pauseTickFuture.cancel(false);
+            pauseTickFuture = null;
         }
  // Auto close delivery on end-of-delivery transitions
  if ((prevState == DeliveryState.RUNNING_FLOWING || prevState == DeliveryState.RUNNING_PAUSED)
@@ -1652,40 +1741,6 @@ try {
 }
 
 FullStatus fs = readFullStatus("status/full");
-
-                // ✅ AJOUTÉ (23 sept 2026, demande Paul — "si je ne fais
-                // pas le bouton continue mais que le flow coule, il faut
-                // que l'on comprenne comme si on a fait continuer... le
-                // livreur a besoin de suivre dans le cas de la reprise")
-                // — trouvé la vraie cause : le tick rapide (200ms) et le
-                // superviseur sont tous les deux COMPLÈTEMENT ARRÊTÉS dès
-                // l'entrée en RUNNING_PAUSED (voir setState) — plus rien
-                // ne sondait le registre pour remarquer une reprise
-                // physique du flux sans clic. Ce keep-alive (~5s),
-                // séparé, continue lui de tourner pendant la pause — s'il
-                // détecte flowActive pendant qu'on est encore RUNNING_PAUSED,
-                // traite ça exactement comme un vrai Continue : redéclenche
-                // setState(RUNNING_FLOWING), qui relance automatiquement le
-                // tick rapide et le superviseur (déjà câblé ainsi pour
-                // cette transition). Délai de détection ~5s (cadence de ce
-                // keep-alive), pas instantané, mais l'écran ne reste plus
-                // jamais figé indéfiniment sur "en pause".
-                if (state == DeliveryState.RUNNING_PAUSED && fs.flowActive) {
-                    emitLog("[REPRISE-AUTO] flux détecté actif pendant RUNNING_PAUSED sans clic Continuer — traité comme une reprise");
-                    // ✅ CORRIGÉ (23 sept 2026, même demande — "le ui ne
-                    // s'adapte pas avec le contexte que le running_flowing
-                    // coule") — setState() seul notifie onStateChanged()
-                    // (qui corrige déjà les boutons via l'état réel), mais
-                    // jamais onLiveStatus() — c'est ce texte précis qui
-                    // alimente l'affichage "LIVE:" visible à l'écran,
-                    // resté figé sur l'ancien texte de pause sans cet
-                    // appel. Même texte que le chemin de détection normal
-                    // (voir plus bas dans ce fichier, "FLOW ON").
-                    if (listener != null) {
-                        listener.onLiveStatus("LIVE: RUNNING_FLOWING (FLOW ON)");
-                    }
-                    setState(DeliveryState.RUNNING_FLOWING);
-                }
 
                 // ✅ Delivery Status bit 0x0040 : "delivery terminated due to too many
                 // pulser reversals" (retour d'air) — signal OFFICIEL du protocole LCR-II,
