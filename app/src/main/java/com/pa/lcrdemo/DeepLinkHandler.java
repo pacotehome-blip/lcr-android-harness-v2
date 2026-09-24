@@ -3214,6 +3214,25 @@ public class DeepLinkHandler {
                                 try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] pause détectée — jobId=" + jobId); } catch (Exception ignoredTracePause) {}
                             } else if ("RUNNING_FLOWING".equals(state) && "RUNNING_PAUSED".equals(lastState)) {
                                 try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] reprise après pause — jobId=" + jobId); } catch (Exception ignoredTraceResume) {}
+                                // ✅ AJOUTÉ (24 sept 2026, demande Paul —
+                                // "essaie de trouver l'erreur" — confirmé
+                                // sur le ticket 284/apr-5004531 :
+                                // delivery_uid/sale_no externes du fichier
+                                // final restaient collés sur l'ancien
+                                // ticket (283, celui d'avant la pause)
+                                // même si le vrai "result" était correct.
+                                // Trouvé : forceRefreshTicketEtSaleNoPourJob()
+                                // n'est jamais appelée pour une reprise
+                                // automatique (REPRISE-AUTO, ce soir) —
+                                // seulement pour le clic Continuer normal.
+                                // Reproduit ici le même appel, au même
+                                // point de détection que la trace
+                                // ci-dessus.
+                                try {
+                                    com.pa.lcr.lcp.DeliveryController dcReprise =
+                                        com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                                    if (dcReprise != null) dcReprise.forceRefreshTicketEtSaleNoPourJob(jobId);
+                                } catch (Exception ignoredForceReprise) {}
                             }
                             lastState = state;
                         }
