@@ -3293,7 +3293,21 @@ softResync("retry/" + step);
         // seul champ, et retombe directement sur le même repli si #23 est
         // encore à 0).
         String cached = cachedTicketNo23;
-        if (cached != null && !dernierTicketEstSaleNumberFallback) {
+        // ✅ CORRIGÉ (24 sept 2026, demande Paul — confirmé par log réel
+        // avec horodatages, readTicketNo23Uncached() (vraie lecture
+        // matérielle) se répétait environ chaque seconde pendant TOUTE
+        // la durée de RUNNING_FLOWING, en concurrence directe avec le
+        // vrai tick 200ms — violation de la règle du 28 août "zéro
+        // lecture pendant RUNNING_FLOWING") — trouvé la vraie cause :
+        // le correctif du 27 août (garder sale_number frais en repli)
+        // désactivait le cache en PERMANENCE pour tout registre où le
+        // repli sale_number est systématique (#23 toujours à 0,
+        // impression non obligatoire — exactement ce registre). Le
+        // cache est maintenant TOUJOURS utilisé pendant RUNNING_FLOWING,
+        // peu importe le repli — la revalidation fraîche du 27 août ne
+        // s'applique plus que HORS du flux actif, où elle ne peut plus
+        // jamais entrer en contention avec le tick.
+        if (cached != null && (state == DeliveryState.RUNNING_FLOWING || !dernierTicketEstSaleNumberFallback)) {
             return cached;
         }
         String result = readTicketNo23Uncached();
