@@ -3212,7 +3212,23 @@ softResync("retry/" + step);
     // l'exception, pour ne jamais bloquer l'appelant.
     public String api_readTicketNo23Frais() {
         try {
-            return readTicketNo23();
+            // ✅ CORRIGÉ (25 sept 2026, demande Paul — "j'ai aussi perdu
+            // le bon ticket_number/sale_number" — confirmé par log réel :
+            // le déclencheur 1 a lu "286" (valeur périmée de l'armement)
+            // alors que le battement générique, au même instant, montrait
+            // déjà correctement "287") — trouvé le conflit exact : cette
+            // fonction, malgré son nom ("Frais"), appelait readTicketNo23()
+            // — la version mise en cache PENDANT RUNNING_FLOWING (mon
+            // propre correctif plus tôt ce soir, pour arrêter les lectures
+            // répétées de pollJobUntilDone). Si l'état vient tout juste de
+            // basculer à RUNNING_FLOWING au moment de cet appel (le
+            // déclencheur 1 s'exécute précisément à cette transition), le
+            // cache retournait la valeur périmée au lieu d'une vraie
+            // lecture — contraire au but même de cette fonction. Appelle
+            // maintenant directement la version non mise en cache — un
+            // appel isolé, unique, pas le sondage répété que le cache visait
+            // à éliminer.
+            return readTicketNo23Uncached();
         } catch (Exception e) {
             // ✅ AJOUTÉ (28 août 2026) — log la vraie cause au lieu de
             // l'avaler silencieusement — nécessaire pour diagnostiquer
