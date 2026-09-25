@@ -2817,6 +2817,31 @@ public class RegisterTabFragment extends Fragment {
                                             int typeHeartbeat = -1;
                                             double presetHeartbeat = 0;
                                             int produitNoHeartbeat = 0;
+                                            // ✅ CORRIGÉ (25 sept 2026, demande Paul —
+                                            // "pourquoi le battement n'a pas la même
+                                            // info?? on a juste à lui donner") —
+                                            // trouvé, plus simple que prévu : ce
+                                            // battement tourne DANS RegisterTabFragment
+                                            // — exactement là où initValidatedProductRow
+                                            // vit déjà, rempli au moment de la
+                                            // validation (COMPARAISON_TICKET/PRODUIT),
+                                            // et encore valide pendant tout le
+                                            // RUNNING_FLOWING de cette même livraison.
+                                            // Aucune recherche externe nécessaire — lu
+                                            // directement, sur this, avant même
+                                            // d'essayer la BD (repli conservé pour un
+                                            // cas de redémarrage de l'app où ce champ
+                                            // ne serait pas encore rempli).
+                                            if (initValidatedProductRow != null) {
+                                                descHeartbeat = initValidatedProductRow.description != null ? initValidatedProductRow.description : "";
+                                                codeHeartbeat = initValidatedProductRow.productCode != null ? initValidatedProductRow.productCode : "";
+                                                typeHeartbeat = initValidatedProductRow.productType;
+                                                produitNoHeartbeat = initValidatedProductIdx != null ? initValidatedProductIdx + 1 : 0;
+                                            }
+                                            if (initValidatedPresetL != null) {
+                                                presetHeartbeat = initValidatedPresetL;
+                                            }
+                                            if (descHeartbeat.isEmpty()) {
                                             try {
                                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbLireProduit =
                                                     new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
@@ -2836,6 +2861,7 @@ public class RegisterTabFragment extends Fragment {
                                                     try { dbLireProduit.close(); } catch (Exception ignored) {}
                                                 }
                                             } catch (Exception ignoredLireProduit) {}
+                                            }
                                             payloadHeartbeat = new org.json.JSONObject();
                                             payloadHeartbeat.put("job_id", fJobIdActuel);
                                             payloadHeartbeat.put("wo_num", fWoNumActuel != null ? fWoNumActuel : "");
