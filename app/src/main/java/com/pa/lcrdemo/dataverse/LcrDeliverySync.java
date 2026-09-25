@@ -949,9 +949,22 @@ public class LcrDeliverySync {
             String filter = "filgo_wo_num eq '" + odataEscape(woNum) + "'"
                 + (serialId != null && !serialId.trim().isEmpty()
                     ? " and filgo_serial_id eq '" + odataEscape(serialId) + "'" : "");
+            // ✅ CORRIGÉ (25 sept 2026, demande Paul — "le total d'un WO
+            // devrait être cumulatif" — trouvé, confirmé par la BD locale
+            // réelle après reconstruction : les livraisons étaient
+            // insérées dans l'ordre 289,285,282,284,283,286,287,288 —
+            // complètement désordonné — parce que filgo_transaction_no
+            // vaut 1 pour TOUTES ces lignes (chacune une visite séparée,
+            // pas des tentatives multiples sur une même visite), donc ce
+            // tri ne produit aucun ordre chronologique réel — Dataverse
+            // retourne les égalités dans un ordre arbitraire. Résultat :
+            // computeCumulativeFields() (qui s'appuie sur "la dernière
+            // ligne insérée = la plus récente") chaînait dans le mauvais
+            // ordre, sautant/doublant des livraisons dans le cumul.
+            // Trié maintenant par filgo_end_utc, la vraie chronologie.
             String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY
                 + "?$filter=" + java.net.URLEncoder.encode(filter, "UTF-8").replace("+", "%20")
-                + "&$orderby=filgo_transaction_no asc"
+                + "&$orderby=filgo_end_utc asc"
                 + "&$top=100"; // une tournée n'a jamais 100 transactions pour un même WO — garde-fou
 
             URL url = new URL(urlStr);
