@@ -2796,6 +2796,17 @@ public class DeepLinkHandler {
                             // secondes.
                             if (continueOk) {
                                 try {
+                                    // ✅ AJOUTÉ (25 sept 2026, demande Paul
+                                    // — "il faut trouver d'où ça vient" —
+                                    // diagnostic pur, avant le vrai appel,
+                                    // pour comparer la clé cherchée aux
+                                    // clés réellement enregistrées à ce
+                                    // moment précis.
+                                    try {
+                                        String diagCompare = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                            .debugCompareKey(transportKey, node);
+                                        com.pa.lcr.lcp.log.LogBus.api(node, "[DIAG-CONTROLEUR] " + diagCompare);
+                                    } catch (Exception ignoredDiag) {}
                                     com.pa.lcr.lcp.DeliveryController dcApresContinue =
                                         com.pa.lcr.lcp.RegisterSessionManager.get(activity)
                                             .getController(transportKey, node);

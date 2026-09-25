@@ -434,6 +434,25 @@ public final class RegisterSessionManager {
         return (s != null) ? s.dc : null;
     }
 
+    // ✅ AJOUTÉ (25 sept 2026, demande Paul — "il faut trouver d'où ça
+    // vient", dcApresContinue == null confirmé plusieurs fois ce soir
+    // sans cause trouvée) — diagnostic pur, aucun changement de
+    // comportement : retourne la clé cherchée et toutes les clés
+    // RÉELLEMENT enregistrées à ce moment précis, pour comparer
+    // directement plutôt que deviner un mismatch.
+    public synchronized String debugCompareKey(String transportKey, int nodeDec) {
+        String cherchee = key(transportKey, nodeDec);
+        StringBuilder sb = new StringBuilder("cherchée=[" + cherchee + "] présentes=[");
+        boolean first = true;
+        for (String k : sessions.keySet()) {
+            if (!first) sb.append(", ");
+            sb.append(k);
+            first = false;
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
     // ✅ (4 août 2026, demande Paul : "on ne doit jamais oublier l'arrivée du
     // deeplink peu importe le transport trouvé" + "valide aussi pour l'API")
     // — vérifie si une livraison est en cours (RUNNING_FLOWING/PAUSED) sur
