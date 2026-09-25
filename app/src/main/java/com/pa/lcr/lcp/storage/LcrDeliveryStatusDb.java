@@ -363,32 +363,56 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     // propre ligne (armement → fin, même job_id), il faut l'exclure de
     // la recherche du "précédent" — sinon une ligne se compterait
     // elle-même comme sa propre livraison précédente, faussant le cumul.
+    // ✅ CORRIGÉ EN PROFONDEUR (25 sept 2026, demande Paul — "je veux la
+    // vérité du cumul peu importe l'ordre que c'est arrivé. plus tard
+    // les dev de FieldService feront l'ordre qu'ils veulent") — l'ancien
+    // calcul INCRÉMENTAL ("dernière ligne existante + ma valeur")
+    // suppose que les livraisons arrivent une à la fois, dans l'ordre —
+    // faux dès que deux processus séparés insèrent à des moments
+    // différents (confirmé par log réel : pullDeliveryByTicket insère
+    // le ticket COURANT seul, AVANT que pullAllDeliveriesForWorkOrder
+    // n'insère le reste de l'historique du même WO — peu importe le tri
+    // de CE DEUXIÈME pull, le premier ticket inséré "voit" une BD encore
+    // vide et devient à tort la base de tout ce qui suit). Plus aucune
+    // dépendance à l'ordre d'arrivée : additionne maintenant TOUTES les
+    // lignes déjà en BD pour ce WO (peu importe quand/dans quel ordre
+    // elles sont arrivées), plus la livraison courante — une vraie
+    // somme, jamais un chaînage.
     private void computeCumulativeFields(ContentValues cv, String woNum, String excludeJobId) {
         if (woNum == null || woNum.isEmpty()) return;
-        DeliveryRow existing = getLatestForWoExcludingJobId(woNum, excludeJobId);
         double newNet   = cv.getAsDouble(COL_NET_L)    != null ? cv.getAsDouble(COL_NET_L)    : 0;
         double newGross = cv.getAsDouble(COL_GROSS_L)  != null ? cv.getAsDouble(COL_GROSS_L)  : 0;
-        if (existing != null) {
-            double presetL  = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : existing.presetL;
-            double totalNet   = existing.totalNetL  + newNet;
-            double totalGross = existing.totalGrossL + newGross;
-            int    count      = existing.deliveryCount + 1;
-            double overage    = totalNet > presetL && presetL > 0 ? totalNet - presetL : 0;
+        double presetL  = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : 0;
 
-            cv.put(COL_PREVIOUS_NET_L,     existing.netL);
-            cv.put(COL_PREVIOUS_GROSS_L,   existing.grossL);
-            cv.put(COL_PREVIOUS_TICKET_NO, existing.ticketNo);
-            cv.put(COL_TOTAL_NET_L,        totalNet);
-            cv.put(COL_TOTAL_GROSS_L,      totalGross);
-            cv.put(COL_DELIVERY_COUNT,     count);
-            cv.put(COL_PRESET_OVERAGE_L,   overage);
-        } else {
-            // Première ligne pour ce WO
-            double presetL  = cv.getAsDouble(COL_PRESET_L) != null ? cv.getAsDouble(COL_PRESET_L) : 0;
-            cv.put(COL_TOTAL_NET_L,      newNet);
-            cv.put(COL_TOTAL_GROSS_L,    newGross);
-            cv.put(COL_DELIVERY_COUNT,   1);
-            cv.put(COL_PRESET_OVERAGE_L, newNet > presetL && presetL > 0 ? newNet - presetL : 0);
+        double totalNet = newNet, totalGross = newGross;
+        int count = 1;
+        DeliveryRow plusRecente = null;
+
+        for (DeliveryRow r : getAllForWo(woNum)) {
+            if (excludeJobId != null && !excludeJobId.isEmpty()
+                    && excludeJobId.equals(r.jobId)) continue;
+            if (TYPE_ANNULATION.equals(r.type)) continue;
+            totalNet   += r.netL;
+            totalGross += r.grossL;
+            count++;
+            if (presetL <= 0 && r.presetL > 0) presetL = r.presetL;
+            if (plusRecente == null
+                    || (r.endUtc != null && !r.endUtc.isEmpty()
+                        && (plusRecente.endUtc == null || plusRecente.endUtc.isEmpty()
+                            || r.endUtc.compareTo(plusRecente.endUtc) > 0))) {
+                plusRecente = r;
+            }
+        }
+
+        double overage = totalNet > presetL && presetL > 0 ? totalNet - presetL : 0;
+        cv.put(COL_TOTAL_NET_L,        totalNet);
+        cv.put(COL_TOTAL_GROSS_L,      totalGross);
+        cv.put(COL_DELIVERY_COUNT,     count);
+        cv.put(COL_PRESET_OVERAGE_L,   overage);
+        if (plusRecente != null) {
+            cv.put(COL_PREVIOUS_NET_L,     plusRecente.netL);
+            cv.put(COL_PREVIOUS_GROSS_L,   plusRecente.grossL);
+            cv.put(COL_PREVIOUS_TICKET_NO, plusRecente.ticketNo);
         }
     }
 
