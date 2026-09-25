@@ -5148,39 +5148,56 @@ job.presetNetL_requested = presetNetL;
             return ApiResult.ok(job.lastOkMsg != null ? job.lastOkMsg : "Job: 1 - RUNNING", data);
         }
 
-        // ✅ CORRIGÉ (23 sept 2026, demande Paul — "301" figé sur
-        // job.ticketNo, jamais rafraîchi après sa toute première
-        // valeur non vide, contaminant PAUSE-REASON/le payload externe
-        // sur toutes les livraisons suivantes du même job) — "seulement
-        // si vide" gardait indéfiniment une vieille valeur non vide.
-        // Sécuritaire de toujours relire ici : ce bloc entier
-        // (ligne 5042) ne s'exécute jamais pendant RUNNING_FLOWING
-        // (retour anticipé juste avant pour cet état) — aucune
-        // violation de la règle "aucune lecture pendant le flux".
-        try { job.ticketNo = readTicketNo23Uncached(); } catch (Exception ignored) {}
-        if (job.saleNo == null || job.saleNo.trim().isEmpty()) {
-            try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
-        }
-        // ✅ AJOUTÉ (24 août 2026, demande Paul) — même pattern, lu une
-        // seule fois par job (jamais relu une fois capturé — même vide,
-        // pour ne pas retenter à chaque sondage un champ qui échoue).
-        if (job.activeProductType == null) {
-            try {
-                byte[] f11 = lcpGetField(11);
-                if (f11 != null && f11.length > 0)
-                    job.activeProductDescription = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
-                            .replace("\0", "").trim();
-            } catch (Exception ignored) {}
-            try {
-                byte[] f1 = lcpGetField(1);
-                if (f1 != null && f1.length > 0)
-                    job.activeProductCode = new String(f1, java.nio.charset.StandardCharsets.US_ASCII)
-                            .replace("\0", "").trim();
-            } catch (Exception ignored) {}
-            try {
-                byte[] f94 = lcpGetField(94);
-                job.activeProductType = (f94 != null && f94.length > 0) ? (f94[0] & 0xFF) : -1;
-            } catch (Exception ignored) { job.activeProductType = -1; }
+        // ✅ CORRIGÉ (24 sept 2026, demande Paul — confirmé par log réel
+        // avec horodatages, ~toutes les 1.3-1.5s pendant TOUTE la durée
+        // de RUNNING_FLOWING) — mon commentaire du 23 sept ci-dessus
+        // était FAUX : ce bloc n'a jamais été protégé contre
+        // RUNNING_FLOWING, seulement contre le rate-limit (throttle
+        // plus haut). Confirmé aussi documenté depuis le 13 août
+        // (commentaire juste au-dessus de api_deliveryJobGet) comme
+        // "la seule source de contention automatique restante" — jamais
+        // réglé jusqu'ici. Remplacé readTicketNo23Uncached() (lecture
+        // matérielle directe, toujours forcée) — puis DEUXIÈME correctif
+        // (24 sept, demande Paul — "ne devrait pas être présent dans le
+        // running_flowing, on a déjà tout depuis l'armement, rien de
+        // nouveau à apprendre avant la fin") : même mise en cache
+        // encore insuffisante, ce bloc entier n'a simplement pas sa
+        // place ici pendant le flux. Aligné maintenant sur le PATRON
+        // DÉJÀ ÉTABLI juste plus bas (28 août, delStatus/delCode/net/
+        // gross via lastTick pendant RUNNING_FLOWING/RUNNING_PAUSED) —
+        // ce bloc ticket/sale/produit n'avait jamais reçu ce même
+        // traitement. Sauté complètement pendant le flux ; s'exécute
+        // normalement hors flux (armement, idle, fin de livraison —
+        // où le vrai rafraîchissement se fait déjà ailleurs, via
+        // forceRefreshTicketEtSaleNoPourJob()). Se retirer proprement :
+        // enlever cette condition ramène ce bloc à son ancien
+        // comportement inconditionnel.
+        if (state != DeliveryState.RUNNING_FLOWING && state != DeliveryState.RUNNING_PAUSED) {
+            try { job.ticketNo = readTicketNo23(); } catch (Exception ignored) {}
+            if (job.saleNo == null || job.saleNo.trim().isEmpty()) {
+                try { job.saleNo = readSaleNo22(); } catch (Exception ignored) {}
+            }
+            // ✅ AJOUTÉ (24 août 2026, demande Paul) — même pattern, lu une
+            // seule fois par job (jamais relu une fois capturé — même vide,
+            // pour ne pas retenter à chaque sondage un champ qui échoue).
+            if (job.activeProductType == null) {
+                try {
+                    byte[] f11 = lcpGetField(11);
+                    if (f11 != null && f11.length > 0)
+                        job.activeProductDescription = new String(f11, java.nio.charset.StandardCharsets.US_ASCII)
+                                .replace("\0", "").trim();
+                } catch (Exception ignored) {}
+                try {
+                    byte[] f1 = lcpGetField(1);
+                    if (f1 != null && f1.length > 0)
+                        job.activeProductCode = new String(f1, java.nio.charset.StandardCharsets.US_ASCII)
+                                .replace("\0", "").trim();
+                } catch (Exception ignored) {}
+                try {
+                    byte[] f94 = lcpGetField(94);
+                    job.activeProductType = (f94 != null && f94.length > 0) ? (f94[0] & 0xFF) : -1;
+                } catch (Exception ignored) { job.activeProductType = -1; }
+            }
         }
 
         try {
