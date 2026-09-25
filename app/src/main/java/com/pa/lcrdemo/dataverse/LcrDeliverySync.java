@@ -1111,6 +1111,18 @@ public class LcrDeliverySync {
         cv.put(LcrDeliveryStatusDb.COL_TICKET_NO,   optStringSafe(d, "filgo_ticket_no", fallbackTicketNo));
         cv.put(LcrDeliveryStatusDb.COL_PRODUIT_NO,  d.optInt("filgo_produit_no", 0));
         cv.put(LcrDeliveryStatusDb.COL_PRESET_L,    d.optDouble("filgo_preset_l", 0.0));
+        // ✅ AJOUTÉ (25 sept 2026, demande Paul — "ça devient un vrai
+        // problème... on a besoin d'avoir la quantité totale net et
+        // gross") — confirmé : net_l/gross_l n'étaient jamais lus
+        // depuis Dataverse dans cette reconstruction, malgré que
+        // filgo_net_l/filgo_gross_l existent bel et bien côté Dataverse
+        // (voir putDbl(j, "filgo_net_l", ...) à la poussée, ligne
+        // ~616-617 plus bas dans ce même fichier) — laissait ces
+        // colonnes à NULL pour tout ticket reconstruit après une BD
+        // locale vierge, faussant tout calcul de cumul (CUMUL-WO) qui
+        // dépend de ces valeurs pour un WO avec plusieurs livraisons.
+        cv.put(LcrDeliveryStatusDb.COL_NET_L,       d.optDouble("filgo_net_l", 0.0));
+        cv.put(LcrDeliveryStatusDb.COL_GROSS_L,     d.optDouble("filgo_gross_l", 0.0));
         cv.put(LcrDeliveryStatusDb.COL_TOURNEE_ID,  optStringSafe(d, "filgo_tournee_id", ""));
         cv.put(LcrDeliveryStatusDb.COL_TRANSACTION_NO, d.optInt("filgo_transaction_no", 1));
         cv.put(LcrDeliveryStatusDb.COL_SOURCE,      "DATAVERSE_PULL");
