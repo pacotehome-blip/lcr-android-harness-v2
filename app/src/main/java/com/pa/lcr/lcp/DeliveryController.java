@@ -1014,6 +1014,17 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
         volatile boolean done = false;
         volatile String state; // PENDING/RUNNING/DONE/ERROR
+        // ✅ AJOUTÉ (25 sept 2026, demande Paul — investigation d'une
+        // vraie course confirmée par log réel : après ANNULER,
+        // "[LIVRAISON] terminée (preset atteint), validée" se
+        // déclenchait quand même pour le MÊME jobId qu'on venait
+        // d'annuler, suivi d'un push Dataverse normal — cancelInProgress
+        // (RegisterTabFragment) ne protège que l'écouteur d'état du
+        // Fragment lui-même, jamais pollJobUntilDone (DeepLinkHandler),
+        // une boucle complètement séparée qui continue de tourner sans
+        // savoir que le chauffeur vient d'annuler). Drapeau partagé,
+        // visible des deux côtés via apiJobs (déjà static).
+        volatile boolean cancelledByOperator = false;
         volatile String err;
         // ✅ (4 août 2026) — dernier pause_reason déjà loggué, pour n'émettre
         // un événement visible que sur CHANGEMENT (le poll tourne toutes les
@@ -3261,6 +3272,25 @@ softResync("retry/" + step);
     // (y compris pendant RUNNING_FLOWING, pas seulement à la toute fin)
     // reflète la vraie valeur, sans jamais reconstruire/corriger après
     // coup.
+    // ✅ AJOUTÉ (25 sept 2026, demande Paul) — appelée dès le début
+    // d'une annulation opérateur (avant forceEndSync), pour que
+    // pollJobUntilDone() (DeepLinkHandler) sache ne jamais déclarer ce
+    // job "terminée avec succès", peu importe l'état du registre par
+    // la suite.
+    public void markJobCancelledByOperator(String jobId) {
+        if (jobId == null || jobId.isEmpty()) return;
+        ApiJob job;
+        synchronized (apiJobs) { job = apiJobs.get(jobId); }
+        if (job != null) job.cancelledByOperator = true;
+    }
+
+    public boolean isJobCancelledByOperator(String jobId) {
+        if (jobId == null || jobId.isEmpty()) return false;
+        ApiJob job;
+        synchronized (apiJobs) { job = apiJobs.get(jobId); }
+        return job != null && job.cancelledByOperator;
+    }
+
     public void forceRefreshTicketEtSaleNoPourJob(String jobId) {
         if (jobId == null || jobId.isEmpty()) return;
         ApiJob job;

@@ -230,14 +230,32 @@ public class RegisterTabFragment extends Fragment {
             // Reprend maintenant automatiquement, dès qu'on revoit ce tab
             // — le vrai CMD_RUN part sans que le chauffeur ait à faire
             // quoi que ce soit.
+            // ✅ CORRIGÉ (25 sept 2026, demande Paul — "je ne dois en
+            // aucun cas démarrer une nouvelle livraison car elle n'a pas
+            // été demandé... il faut que le tab puisse reconnaître que
+            // ce n'est pas un deeplink qui l'appelle") — cette relance
+            // se déclenchait pour TOUT retour dans le tab (y compris un
+            // simple basculement via le sélecteur de tâches Android,
+            // sans aucun nouvel Intent) dès qu'un job restait à
+            // status=STARTED — peu importe depuis quand. Ne relance
+            // maintenant QUE si un vrai deep link vient tout juste
+            // d'arriver (drapeau à usage unique, jamais posé par un
+            // simple onResume()) — sinon, le contexte reste affiché
+            // sans jamais démarrer quoi que ce soit tout seul.
+            boolean cetAppelVientDunDeepLink = venantDunVraiDeepLink;
+            venantDunVraiDeepLink = false; // consommé, usage unique
             if ("STARTED".equals(ad.status) && ad.jobId != null && !ad.jobId.isEmpty()) {
-                MainActivity mainReprise = (MainActivity) getActivity();
-                if (mainReprise != null && mainReprise.getDeepLinkHandler() != null
-                        && !mainReprise.getDeepLinkHandler().isPollActif(ad.jobId)) {
-                    LogBus.api(node, "[REPRISE-AUTO] job coincé détecté (status=STARTED) — relance jobId=" + ad.jobId);
-                    mainReprise.getDeepLinkHandler().reprendreLivraisonEnAttente(
-                        ad.jobId, node, ad.woNum, currentWoIdGuid, serialFromArgs,
-                        ad.mac != null ? ad.mac : "");
+                if (!cetAppelVientDunDeepLink) {
+                    LogBus.api(node, "[REPRISE-AUTO] job coincé (status=STARTED) détecté mais SAUTÉ — ce retour dans le tab ne vient pas d'un deep link (ex. sélecteur de tâches Android), jamais relancé sans demande explicite");
+                } else {
+                    MainActivity mainReprise = (MainActivity) getActivity();
+                    if (mainReprise != null && mainReprise.getDeepLinkHandler() != null
+                            && !mainReprise.getDeepLinkHandler().isPollActif(ad.jobId)) {
+                        LogBus.api(node, "[REPRISE-AUTO] job coincé détecté (status=STARTED) — relance jobId=" + ad.jobId);
+                        mainReprise.getDeepLinkHandler().reprendreLivraisonEnAttente(
+                            ad.jobId, node, ad.woNum, currentWoIdGuid, serialFromArgs,
+                            ad.mac != null ? ad.mac : "");
+                    }
                 }
             }
 
@@ -2026,6 +2044,21 @@ public class RegisterTabFragment extends Fragment {
     }
     private long startingSinceMs = 0L;
     private volatile boolean cancelInProgress = false;
+    // ✅ AJOUTÉ (25 sept 2026, demande Paul — "si j'entre dans l'apk en
+    // basculant par la fonction android, je ne dois en aucun cas
+    // démarrer une nouvelle livraison car elle n'a pas été demandé...
+    // il faut absolument que le tab puisse reconnaître que ce n'est pas
+    // un deeplink qui l'appelle") — drapeau à usage unique, posé
+    // UNIQUEMENT dans prefillFromDeepLink() (le vrai point d'entrée
+    // exclusif du deep link, confirmé par le garde woIdGuid non vide
+    // déjà en place là), consommé (remis à false) par
+    // checkPendingDeliveryForThisRegister() — pas une question de
+    // délai/fraîcheur, une vraie reconnaissance de la source de cet
+    // onResume() précis. Un simple retour par le sélecteur de tâches
+    // Android (aucun nouvel Intent, juste onResume()) ne pose jamais ce
+    // drapeau — la relance automatique d'un job STARTED reste possible
+    // seulement quand un vrai deep link vient tout juste d'arriver.
+    private volatile boolean venantDunVraiDeepLink = false;
 
     // ✅ Contexte WO stable du fragment — peuplé une fois au deep link initial,
     // jamais effacé par les flux concurrents (ActiveDeliveryStore peut être
@@ -3703,6 +3736,12 @@ public class RegisterTabFragment extends Fragment {
         if (woIdGuid != null && !woIdGuid.isEmpty()) {
             lastReinitWoIdGuid = woIdGuid;
             lastReinitAtMs = System.currentTimeMillis();
+            // ✅ AJOUTÉ (25 sept 2026, demande Paul) — ce garde (woIdGuid
+            // non vide) confirme déjà qu'on est dans un vrai appel de
+            // deep link, jamais un test local (New C) — même logique
+            // déjà établie juste au-dessus. Pose le drapeau ici, au
+            // seul endroit qui le garantit.
+            venantDunVraiDeepLink = true;
             // ✅ CORRIGÉ (14 sept 2026, demande Paul — "je me fais
             // basculer sur fieldservice pour quoi ça quand je pars un
             // deeplink" — confirmé par nouveau_7.txt : deux "runInitSequence:
@@ -7015,6 +7054,21 @@ public class RegisterTabFragment extends Fragment {
         DeliveryController c = controller;
         if (c == null) return;
         if (!verifierIoAvantAction("ANNULER")) return;
+        // ✅ AJOUTÉ (25 sept 2026, demande Paul — investigation d'une
+        // vraie course confirmée par log réel : "terminée (preset
+        // atteint), validée" se déclenchait quand même pour le job
+        // qu'on vient d'annuler, poussé vers Dataverse en double par-
+        // dessus la vraie annulation) — marque le job IMMÉDIATEMENT,
+        // avant toute autre chose, pour fermer la fenêtre de course la
+        // plus tôt possible. pollJobUntilDone() (DeepLinkHandler),
+        // complètement séparé de ce Fragment, consultera ce même
+        // drapeau avant de déclarer une fin normale.
+        try {
+            String jobIdPourAnnulation = c.getLastActiveJobId();
+            if (jobIdPourAnnulation != null && !jobIdPourAnnulation.isEmpty()) {
+                c.markJobCancelledByOperator(jobIdPourAnnulation);
+            }
+        } catch (Exception ignoredMarqueAnnul) {}
         if (btnAnnuler != null) {
             btnAnnuler.setEnabled(false);
             btnAnnuler.setText("⏳ Annulation en cours — veuillez patienter");
@@ -7509,6 +7563,21 @@ public class RegisterTabFragment extends Fragment {
 
                 final String ticketNoPourAffichage = ticketNo != null ? ticketNo : "";
                 final String woNumPourAffichage = woNum != null ? woNum : "";
+                // ✅ AJOUTÉ (25 sept 2026, demande Paul — "il faut
+                // rafraîchir tout le tab avec les dernières infos. le
+                // ticket_number(sales_number) puisqu'il s'est rendu au
+                // flowing s'est incrémenté") — trouvé : l'écran
+                // n'affichait que le ticket ANNULÉ lui-même, jamais une
+                // vraie relecture fraîche — alors que #22 (SaleNumber)
+                // s'incrémente déjà AU DÉBUT de la livraison (confirmé
+                // par la doc officielle), donc même annulée, le registre
+                // est déjà rendu au numéro suivant. Lecture fraîche ici
+                // (même mécanisme que api_readTicketNo23Frais() ailleurs,
+                // avec repli sale_number déjà intégré) — ce que l'écran
+                // montre après une annulation doit refléter l'état RÉEL
+                // du registre maintenant, pas l'ancien ticket qu'on vient
+                // d'annuler.
+                try { if (c != null) c.api_readTicketNo23Frais(); } catch (Exception ignoredFraisAnnul) {}
                 ui.post(() -> {
                     if (txtQtyNet   != null) txtQtyNet.setText("NET: 0.0");
                     if (txtQtyGross != null) txtQtyGross.setText("GROSS: 0.0");
@@ -7532,6 +7601,12 @@ public class RegisterTabFragment extends Fragment {
                             : ticketNoPourAffichage;
                         txtDeliveryUid.setText("Delivery UID : " + (uidPourAffichage.isEmpty() ? "—" : uidPourAffichage));
                     }
+                    // ✅ AJOUTÉ (25 sept 2026) — réutilise la fonction déjà
+                    // existante et déjà testée (27 août) pour afficher le
+                    // vrai Sale Number courant du registre, avec son
+                    // soulignement habituel — jamais appelée sur ce
+                    // chemin d'annulation jusqu'ici.
+                    afficherTicketEtSaleNumberAvecSoulignement(ticketNoPourAffichage);
                     // ✅ Réactiver tous les boutons désactivés pendant l'annulation
                     if (btnAnnuler  != null) btnAnnuler.setEnabled(true);
                     if (btnConnect  != null) btnConnect.setEnabled(true);
@@ -7542,6 +7617,12 @@ public class RegisterTabFragment extends Fragment {
                     if (btnFinish   != null) btnFinish.setEnabled(true);
                     if (btnRetourWO != null) btnRetourWO.setEnabled(true);
                     updateButtons(controller != null ? controller.getState() : null);
+                    // ✅ AJOUTÉ (25 sept 2026, demande Paul) — rafraîchit
+                    // aussi le panneau "WO complété" (Total NET/GROSS),
+                    // jamais touché par ce chemin jusqu'ici — même trou
+                    // que celui corrigé plus tôt ce soir pour un
+                    // changement de WO.
+                    rafraichirCumulWo();
                     android.widget.Toast.makeText(getContext(),
                         "Livraison annulée — registre prêt",
                         android.widget.Toast.LENGTH_SHORT).show();

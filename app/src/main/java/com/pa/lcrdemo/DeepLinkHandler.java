@@ -3245,6 +3245,27 @@ public class DeepLinkHandler {
                 for (int i = 0; i < 600; i++) {
                     try { Thread.sleep(1000); } catch (Exception ignored) {}
 
+                    // ✅ AJOUTÉ (25 sept 2026, demande Paul — investigation
+                    // d'une vraie course confirmée par log réel : "terminée
+                    // (preset atteint), validée" se déclenchait quand même
+                    // pour un job venant d'être annulé par le chauffeur,
+                    // poussé vers Dataverse en double par-dessus la vraie
+                    // annulation — cette boucle, complètement séparée du
+                    // Fragment, ne savait jamais qu'une annulation avait
+                    // eu lieu). Arrête proprement le suivi dès que le
+                    // drapeau partagé (ApiJob) confirme l'annulation — ne
+                    // déclare jamais ce job "terminée avec succès" après
+                    // ça, peu importe l'état du registre par la suite.
+                    try {
+                        com.pa.lcr.lcp.DeliveryController dcVerifCancel =
+                            com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                        if (dcVerifCancel != null && dcVerifCancel.isJobCancelledByOperator(jobId)) {
+                            com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] suivi arrêté — jobId="
+                                + jobId + " annulé par le chauffeur, jamais déclaré terminé avec succès");
+                            return;
+                        }
+                    } catch (Exception ignoredVerifCancel) {}
+
                     try {
                         MultiRegisterApiFacadeImpl facade =
                             new MultiRegisterApiFacadeImpl(activity);
