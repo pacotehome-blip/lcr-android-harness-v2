@@ -1033,6 +1033,41 @@ public class DeepLinkHandler {
         }
         try { preset  = Double.parseDouble(presetStr); } catch (Exception ignored) {}
 
+        // ✅ AJOUTÉ (25 sept 2026, demande Paul — "utilise le produit
+        // réellement résolu par l'app (celui de COMPARAISON_TICKET) car
+        // si le produit n'est pas présent dans le registre on rejette
+        // la livraison" — confirmé par log réel : deep link de
+        // continuation sans produit/preset, fProduct/fPresetD restaient
+        // à 0 même si l'app avait déjà correctement résolu produit=1/
+        // preset=20.0L via COMPARAISON_TICKET) — si le deep link n'a
+        // pas fourni de produit valide, retombe sur la valeur déjà
+        // validée par l'app elle-même (initValidatedProductIdx/
+        // initValidatedPresetL) plutôt que de rester à 0/vide. Si ces
+        // deux-là sont aussi absentes, l'armement échouera de toute
+        // façon plus loin (le registre rejette un produit invalide) —
+        // ce repli n'invente rien, il réutilise une résolution déjà
+        // faite et déjà validée contre le registre.
+        // ✅ CORRIGÉ (25 sept 2026, demande Paul — "normalement
+        // FieldService envoie toujours le produit, même WO ou un
+        // nouveau") — ce repli n'est PAS un cas normal de continuation,
+        // c'est une vraie anomalie chaque fois qu'il se déclenche.
+        // Trace visible (Support + tab), pas silencieuse, pour qu'on la
+        // voie et qu'on trouve la vraie cause plutôt que de la masquer.
+        if (product <= 0 && tabArmEarlyRef != null) {
+            try { com.pa.lcr.lcp.log.LogBus.api(node, "[PRODUIT-ANOMALIE] deep link reçu SANS produit (attendu: FieldService l'envoie toujours) — wo="
+                + woNum + " — repli sur la dernière résolution validée par l'app"); } catch (Exception ignoredAnomalie) {}
+            if (tabArmEarlyRef.initValidatedProductIdx != null) {
+                product = tabArmEarlyRef.initValidatedProductIdx + 1; // 0-based → 1-based
+                android.util.Log.i(TAG, "lancerLivraison: produit absent du deep link — repli sur initValidatedProductIdx="
+                    + product);
+            }
+            if (preset <= 0 && tabArmEarlyRef.initValidatedPresetL != null) {
+                preset = tabArmEarlyRef.initValidatedPresetL;
+                android.util.Log.i(TAG, "lancerLivraison: preset absent du deep link — repli sur initValidatedPresetL="
+                    + preset);
+            }
+        }
+
         final int fProduct = product;
         final double fPresetD = preset;
         final String fMac = mac != null ? mac : "";
