@@ -1793,6 +1793,37 @@ public class DeepLinkHandler {
                             typeArm = rowValide.productType;
                             android.util.Log.i(TAG, "Recherche produit (armement) — utilise le Row déjà validé (COMPARAISON_TICKET) — description=\""
                                 + descArm + "\"");
+                        } else if (tabArmEarlyRef != null && tabArmEarlyRef.initValidatedProductIdx != null) {
+                            // ✅ AJOUTÉ (25 sept 2026, demande Paul —
+                            // "option 2" confirmée — initValidatedProductIdx
+                            // se fixe à HUIT endroits différents dans
+                            // RegisterTabFragment, mais initValidatedProductRow
+                            // (le Row complet) n'était posé qu'à UN seul —
+                            // confirmé par log réel : ce test précis est
+                            // passé par un AUTRE de ces huit chemins
+                            // (COMPARAISON_TICKET via backup JSON), laissant
+                            // initValidatedProductRow à null malgré un idx
+                            // valide. Plutôt que de patcher les huit
+                            // endroits un par un, un seul point central ici
+                            // : si l'index est connu mais pas le Row
+                            // complet, une vraie lecture fraîche de la
+                            // table produit (reconstruite à chaque arrivée
+                            // sur le tab, fidèle au registre maintenant),
+                            // peu importe lequel des huit chemins a validé
+                            // cet index.
+                            try {
+                                com.pa.lcr.lcp.storage.RegisterProductStore prodStoreIdxSeul =
+                                    new com.pa.lcr.lcp.storage.RegisterProductStore(activity);
+                                com.pa.lcr.lcp.storage.RegisterProductStore.Row rowParIdx =
+                                    prodStoreIdxSeul.findByNoteIdx(fSerialId, tabArmEarlyRef.initValidatedProductIdx + 1);
+                                if (rowParIdx != null) {
+                                    descArm = rowParIdx.description != null ? rowParIdx.description : "";
+                                    codeArm = rowParIdx.productCode != null ? rowParIdx.productCode : "";
+                                    typeArm = rowParIdx.productType;
+                                    android.util.Log.i(TAG, "Recherche produit (armement) — Row absent, relecture fraîche par index="
+                                        + (tabArmEarlyRef.initValidatedProductIdx + 1) + " → description=\"" + descArm + "\"");
+                                }
+                            } catch (Exception ignoredProdIdxSeul) {}
                         }
                         try {
                             com.pa.lcr.lcp.storage.RegisterProductStore prodStoreArm =
