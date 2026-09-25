@@ -271,6 +271,17 @@ public final class RegisterSessionManager {
     private static String key(String transportKey, int nodeDec) {
         int node = nodeDec;
         String k = (transportKey == null || transportKey.trim().isEmpty()) ? "?" : transportKey.trim();
+        // ✅ CORRIGÉ (25 sept 2026, demande Paul — "il faut trouver d'où
+        // ça vient") — confirmé par [DIAG-CONTROLEUR] ce soir : la clé
+        // cherchée arrivait parfois avec "BT:" doublé
+        // (BT:BT:00:01:95:87:72:A1), jamais enregistrée ainsi — cause
+        // exacte du contrôleur introuvable juste après Continue, plusieurs
+        // fois ce soir. Corrigé ici, au point de normalisation unique
+        // (utilisé par TOUTE recherche/enregistrement de session) — pas
+        // besoin de traquer chaque source possible du doublon.
+        if (k.startsWith("BT:BT:")) {
+            k = k.substring(3);
+        }
         return k + ":" + node;
     }
 
