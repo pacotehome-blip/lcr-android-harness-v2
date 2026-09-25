@@ -398,12 +398,29 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     // trouve pas elle-même comme "précédente".
     private DeliveryRow getLatestForWoExcludingJobId(String woNum, String excludeJobId) {
         if (excludeJobId == null || excludeJobId.isEmpty()) return getLatestForWo(woNum);
+        // ✅ CORRIGÉ (25 sept 2026, demande Paul — "le point important
+        // est le delivery-uid... on cumule les ticket_number en lien
+        // avec le wo" + investigation du cumul faussé) — trouvé la vraie
+        // cause de fond, au-delà du tri du pull Dataverse déjà corrigé :
+        // "la plus récente" se déterminait par COL_ID DESC (ordre
+        // D'INSERTION locale), pas par la vraie date de livraison.
+        // Confirmé par log réel : pullDeliveryByTicket() (recherche d'un
+        // seul ticket, ex. 290) s'exécute AVANT pullAllDeliveriesForWorkOrder()
+        // (le pull en bloc, trié) sur une BD fraîche — insérant ce ticket
+        // isolément (existing=null, traité comme "premier") avant même
+        // que les autres livraisons plus anciennes du même WO n'arrivent,
+        // brisant la chaîne à sa tête peu importe l'ordre du pull en
+        // bloc. Trié maintenant par la vraie chronologie (end_utc), pas
+        // l'ordre d'insertion — une ligne sans end_utc (livraison encore
+        // en cours, armement seul) se retrouve naturellement en dernier,
+        // jamais prise à tort pour "la plus récente terminée".
         try (Cursor c = getReadableDatabase().query(
                 TABLE_DELIVERY, null,
                 COL_WO_NUM + "=? AND (" + COL_JOB_ID + " IS NULL OR " + COL_JOB_ID + "!=?)",
                 new String[]{woNum, excludeJobId},
                 null, null,
-                COL_ID + " DESC", "1" /* ✅ CORRIGÉ 18 sept 2026 - meme bug que getLatestForWo(), transaction_no jamais ecrit localement */)) {
+                "CASE WHEN " + COL_END_UTC + " IS NULL OR " + COL_END_UTC + "='' THEN 0 ELSE 1 END DESC, "
+                    + COL_END_UTC + " DESC, " + COL_ID + " DESC", "1")) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) {
             Log.e(TAG, "getLatestForWoExcludingJobId ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getLatestForWoExcludingJobId", e); } catch (Exception ignored) {}
@@ -609,13 +626,27 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         // TOUJOURS l'ancienne ligne synchronisée en premier, peu importe
         // combien de nouvelles livraisons suivaient. COL_ID
         // (AUTOINCREMENT, purement local, jamais dépendant de Dataverse)
-        // reflète le vrai ordre d'insertion — utilisé maintenant à la
-        // place.
+        // reflète le vrai ordre d'insertion — utilisé à la place de
+        // transaction_no à cette époque.
+        // ✅ CORRIGÉ DE NOUVEAU (25 sept 2026, demande Paul — investigation
+        // du cumul WO faussé) — COL_ID (ordre d'INSERTION locale) reste
+        // vulnérable au même problème de fond que transaction_no visait
+        // à régler : confirmé par log réel, un pull Dataverse à ticket
+        // unique (pullDeliveryByTicket) peut insérer une livraison
+        // récente AVANT qu'un pull en bloc plus tard n'insère des
+        // livraisons chronologiquement plus anciennes du même WO sur une
+        // BD fraîche — corrompant tout ce qui dépend de "la plus
+        // récente" (Bon déjà complété, RETOUR_WO, le cumul), pas
+        // seulement l'armement. Trié maintenant par la vraie
+        // chronologie (end_utc) — une ligne sans end_utc (livraison
+        // encore en cours) ne prend jamais à tort la place de la
+        // dernière livraison réellement terminée.
         try (Cursor c = getReadableDatabase().query(
                 TABLE_DELIVERY, null,
                 COL_WO_NUM + "=?", new String[]{woNum},
                 null, null,
-                COL_ID + " DESC", "1")) {
+                "CASE WHEN " + COL_END_UTC + " IS NULL OR " + COL_END_UTC + "='' THEN 0 ELSE 1 END DESC, "
+                    + COL_END_UTC + " DESC, " + COL_ID + " DESC", "1")) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) {
             Log.e(TAG, "getLatestForWo ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getLatestForWo", e); } catch (Exception ignored) {}
