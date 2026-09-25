@@ -212,6 +212,18 @@ public class WorkOrderUpdater {
 
             JSONObject body = new JSONObject();
             body.put("msdyn_workordersummary", summary.toString());
+            // ✅ AJOUTÉ (25 sept 2026, demande Paul — "le total d'un WO
+            // devrait être cumulatif... devrait être dans les champs
+            // Total Brut Wo L et Total net Wo L") — confirmé par Paul :
+            // filgo_total_gross_l / filgo_total_net_l, les vrais noms
+            // techniques Dataverse. jusqu'ici totalNet/totalGross
+            // n'existaient que DANS le texte de msdyn_workordersummary
+            // (jamais comme champs numériques propres) — écrits
+            // maintenant aussi ici, pour que ces valeurs soient
+            // interrogeables/rapportables directement sur le WO, pas
+            // seulement enfouies dans un texte JSON.
+            body.put("filgo_total_net_l",   totalNet);
+            body.put("filgo_total_gross_l", totalGross);
 
             try {
                 patchWorkOrderBody(accessToken, guid, body, woNum,
