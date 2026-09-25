@@ -1768,11 +1768,40 @@ public class DeepLinkHandler {
                         String descArm = "";
                         String codeArm = "";
                         int typeArm = -1;
+                        // ✅ CORRIGÉ (25 sept 2026, demande Paul — "une
+                        // fois le produit validé avec le produit du
+                        // registre, c'est cette valeur-là qu'on veut,
+                        // celle de la table produit... on reconstruit
+                        // toujours la table produit en arrivant sur le
+                        // tab, car la description peut changer pendant
+                        // la journée... on doit être fidèle à ce que l'on
+                        // a dans le registre") — source PRIMAIRE : le Row
+                        // COMPLET déjà validé par RegisterTabFragment
+                        // (COMPARAISON_TICKET/PRODUIT), au même instant
+                        // que initValidatedProductIdx — jamais une
+                        // deuxième recherche séparée qui pourrait
+                        // diverger de ce qui a vraiment été confirmé
+                        // contre le registre. La recherche par
+                        // index/nom ci-dessous ne reste qu'un filet de
+                        // secours, si cette valeur n'est pas disponible
+                        // (ex. armement sans validation deep link
+                        // préalable, comme New C).
+                        if (tabArmEarlyRef != null && tabArmEarlyRef.initValidatedProductRow != null) {
+                            com.pa.lcr.lcp.storage.RegisterProductStore.Row rowValide = tabArmEarlyRef.initValidatedProductRow;
+                            descArm = rowValide.description != null ? rowValide.description : "";
+                            codeArm = rowValide.productCode != null ? rowValide.productCode : "";
+                            typeArm = rowValide.productType;
+                            android.util.Log.i(TAG, "Recherche produit (armement) — utilise le Row déjà validé (COMPARAISON_TICKET) — description=\""
+                                + descArm + "\"");
+                        }
                         try {
                             com.pa.lcr.lcp.storage.RegisterProductStore prodStoreArm =
                                 new com.pa.lcr.lcp.storage.RegisterProductStore(activity);
                             java.util.List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> lignesArm =
-                                prodStoreArm.getAll(fSerialId, node);
+                                descArm.isEmpty() ? prodStoreArm.getAll(fSerialId, node) : java.util.Collections.emptyList();
+                            if (!descArm.isEmpty()) {
+                                // déjà résolu via le Row validé ci-dessus — rien de plus à faire ici
+                            } else {
                             android.util.Log.i(TAG, "Recherche produit (armement) — serialId=\"" + fSerialId
                                 + "\" node=" + node + " → " + lignesArm.size() + " ligne(s) trouvée(s)");
                             // ✅ AJOUTÉ (28 août 2026, demande Paul — "ou est
@@ -1815,6 +1844,33 @@ public class DeepLinkHandler {
                                     break;
                                 }
                             }
+                            // ✅ AJOUTÉ (25 sept 2026, demande Paul — "il
+                            // faut tout de même avoir dans le JSON du
+                            // running_flowing produit, code produit, type
+                            // produit... si on doit reconstruire le ticket
+                            // on doit l'avoir") — filet de sécurité
+                            // supplémentaire : si la recherche par index
+                            // (fProduct) n'a rien trouvé, réessaie par NOM
+                            // — le même texte brut envoyé par le deep
+                            // link (ex. "propane"), même comparaison que
+                            // RegisterTabFragment.resolveProduct() utilise
+                            // déjà avec succès pour la validation. Deux
+                            // chances de trouver le produit plutôt qu'une
+                            // seule — jamais vide sans avoir vraiment
+                            // essayé les deux méthodes.
+                            if (descArm.isEmpty() && produit != null && !produit.trim().isEmpty()) {
+                                for (com.pa.lcr.lcp.storage.RegisterProductStore.Row ligneArmNom : lignesArm) {
+                                    if (ligneArmNom.matchesName(produit)) {
+                                        descArm = ligneArmNom.description;
+                                        codeArm = ligneArmNom.productCode;
+                                        typeArm = ligneArmNom.productType;
+                                        android.util.Log.i(TAG, "Recherche produit (armement) — repli par nom réussi pour \""
+                                            + produit + "\" → noteIdx=" + ligneArmNom.noteIdx);
+                                        break;
+                                    }
+                                }
+                            }
+                            } // fin du "else" (descArm.isEmpty()) — filet de secours par index/nom
                         } catch (Exception e) {
                             android.util.Log.w(TAG, "Recherche produit (armement) ERR (non-bloquant): " + e.getMessage());
                         }

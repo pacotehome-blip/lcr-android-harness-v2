@@ -616,7 +616,25 @@ public class RegisterTabFragment extends Fragment {
     // déposées ici (pas écrites au registre tout de suite) — l'écriture
     // réelle (produit + preset ENSEMBLE) se fait au moment de l'armement,
     // comme c'était déjà le cas pour le preset seul.
-    private volatile Integer initValidatedProductIdx = null; // 0-based (LCP List 0 : 0 = produit 1)
+    // ✅ CORRIGÉ (25 sept 2026, demande Paul) — visibilité élargie de
+    // private à public : DeepLinkHandler.lancerLivraison() a besoin de
+    // lire cette valeur — celle réellement résolue et validée par l'app
+    // (COMPARAISON_TICKET et les autres étapes d'init), pas le
+    // paramètre brut du deep link (qui peut être vide/0 sur une
+    // livraison de continuation, FieldService supposant que l'app le
+    // sait déjà) — même principe déjà établi pour initSequenceRunning.
+    public volatile Integer initValidatedProductIdx = null; // 0-based (LCP List 0 : 0 = produit 1)
+    // ✅ AJOUTÉ (25 sept 2026, demande Paul — "c'est cette valeur-là
+    // qu'on veut, celle de la table produit... on reconstruit toujours
+    // la table produit en arrivant sur le tab, car la description peut
+    // changer pendant la journée... on doit être fidèle à ce que l'on
+    // a dans le registre") — le Row COMPLET (description/code/type),
+    // pas seulement l'index, capturé au même instant que
+    // initValidatedProductIdx, directement depuis la même validation
+    // déjà confirmée contre le registre — pour que DeepLinkHandler
+    // n'ait jamais besoin d'une deuxième recherche séparée, qui
+    // pourrait diverger de ce qui a vraiment été validé.
+    public volatile com.pa.lcr.lcp.storage.RegisterProductStore.Row initValidatedProductRow = null;
     // ✅ AJOUTÉ (2 sept 2026, demande Paul — "ben c'est ca qui a placer
     // lancerlivraison() avant l'établissement conforme du tab????") —
     // trouvé : même avec focus=false (correctif 28 août),
@@ -756,7 +774,9 @@ public class RegisterTabFragment extends Fragment {
     // registre. Vérifié par peutDemarrerLivraison() pour bloquer NEW dans
     // ce cas précis, avec une vraie raison affichée.
     private volatile String produitDeepLinkIntrouvableRaison = null;
-    private volatile Double initValidatedPresetL = null;
+    // ✅ CORRIGÉ (25 sept 2026, demande Paul) — même raison que
+    // initValidatedProductIdx juste au-dessus.
+    public volatile Double initValidatedPresetL = null;
 
     private void initSectionLog(InitSection section, int idx, String result) {
         InitSectionStatus st = initSectionStatus.get(section);
@@ -1689,6 +1709,7 @@ public class RegisterTabFragment extends Fragment {
                     // décalant TOUJOURS d'un cran la vraie comparaison
                     // produit demandé vs produit trouvé.
                     initValidatedProductIdx = resolved.noteIdx - 1;
+                    initValidatedProductRow = resolved; // ✅ AJOUTÉ (25 sept 2026) — le Row complet, même instant
                 } else if (produitDeepLink == null || produitDeepLink.trim().isEmpty()) {
                     initValidatedProductIdx = 0; // défaut produit 1 — légitime, aucune attente précise
                 }
