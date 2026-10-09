@@ -582,6 +582,9 @@ public class LcrDeliverySync {
         // ✅ Champ primaire requis par Dataverse
         putStr(j, "filgo_name",            row.woNum + "-" + (row.ticketNo != null ? row.ticketNo : row.id));
         putStr(j, "filgo_wo_id_guid",      row.woIdGuid);
+        // GUID Field Service transportés en silence (colonnes texte Dataverse)
+        putStr(j, "filgo_stopid",          row.stopid);
+        putStr(j, "filgo_productid",       row.productid);
         putStr(j, "filgo_tournee_id",       row.tourneeId);
         putInt(j, "filgo_transaction_no",   row.transactionNo);
         putInt(j, "filgo_stop_sequence",    row.stopSequence);
@@ -1121,6 +1124,11 @@ public class LcrDeliverySync {
         ContentValues cv = new ContentValues();
         cv.put(LcrDeliveryStatusDb.COL_WO_NUM,      optStringSafe(d, "filgo_wo_num", ""));
         cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID,  optStringSafe(d, "filgo_wo_id_guid", ""));
+        // Ne jamais écraser une valeur locale par du vide (ligne Dataverse antérieure à ces colonnes)
+        String pStopId = optStringSafe(d, "filgo_stopid", "");
+        String pProductId = optStringSafe(d, "filgo_productid", "");
+        if (pStopId != null && !pStopId.isEmpty()) cv.put(LcrDeliveryStatusDb.COL_STOPID, pStopId);
+        if (pProductId != null && !pProductId.isEmpty()) cv.put(LcrDeliveryStatusDb.COL_PRODUCTID, pProductId);
         cv.put(LcrDeliveryStatusDb.COL_SERIAL_ID,   optStringSafe(d, "filgo_serial_id", fallbackSerialId));
         cv.put(LcrDeliveryStatusDb.COL_LCRNODE,     d.optInt("filgo_lcrnode", fallbackLcrnode != null ? fallbackLcrnode : 0));
         cv.put(LcrDeliveryStatusDb.COL_TICKET_NO,   optStringSafe(d, "filgo_ticket_no", fallbackTicketNo));
