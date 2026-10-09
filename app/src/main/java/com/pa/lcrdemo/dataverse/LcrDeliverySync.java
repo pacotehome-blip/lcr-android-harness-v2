@@ -402,7 +402,7 @@ public class LcrDeliverySync {
         java.util.Map<Integer, JSONObject> existants = new java.util.HashMap<>();
         String filter = java.net.URLEncoder.encode("_filgo_registerid_value eq " + registreGuid, "UTF-8");
         JSONObject liste = doJsonGet(orgUrl + "/api/data/v9.2/" + TABLE_REGISTER_PRODUCT
-            + "?$select=filgo_registerproductid,filgo_note_idx,filgo_name,filgo_description,filgo_lcrnode"
+            + "?$select=filgo_registerproductid,filgo_note_idx,filgo_name,filgo_description,filgo_lcrnode,filgo_serial_id"
             + "&$filter=" + filter, accessToken);
         JSONArray values = liste != null ? liste.optJSONArray("value") : null;
         if (values != null) {
@@ -435,12 +435,14 @@ public class LcrDeliverySync {
                     String exId = ex.optString("filgo_registerproductid", null);
                     boolean identique = name.equals(ex.optString("filgo_name", ""))
                         && r.description.equals(ex.isNull("filgo_description") ? "" : ex.optString("filgo_description", ""))
-                        && lcrnode.equals(ex.isNull("filgo_lcrnode") ? "" : ex.optString("filgo_lcrnode", ""));
+                        && lcrnode.equals(ex.isNull("filgo_lcrnode") ? "" : ex.optString("filgo_lcrnode", ""))
+                        && serial.equals(ex.isNull("filgo_serial_id") ? "" : ex.optString("filgo_serial_id", ""));
                     if (!identique) {
                         JSONObject body = new JSONObject();
                         body.put("filgo_name", name);
                         body.put("filgo_description", r.description.isEmpty() ? JSONObject.NULL : r.description);
                         body.put("filgo_lcrnode", lcrnode);
+                        body.put("filgo_serial_id", serial);
                         doJsonRequest("PATCH", orgUrl + "/api/data/v9.2/" + TABLE_REGISTER_PRODUCT + "(" + exId + ")",
                             accessToken, body);
                     }
@@ -452,6 +454,7 @@ public class LcrDeliverySync {
                     body.put("filgo_name", name);
                     body.put("filgo_description", r.description);
                     body.put("filgo_lcrnode", lcrnode);
+                    body.put("filgo_serial_id", serial);
                     body.put("filgo_note_idx", String.valueOf(r.noteIdx));
                     body.put("filgo_registerid@odata.bind", "/" + TABLE_REGISTRE + "(" + registreGuid + ")");
                     JSONObject created = doJsonRequest("POST", orgUrl + "/api/data/v9.2/" + TABLE_REGISTER_PRODUCT,
