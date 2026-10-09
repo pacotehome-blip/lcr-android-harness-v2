@@ -7241,6 +7241,7 @@ private boolean ensureBtConnectPermission() {
             final com.pa.lcr.lcp.LcpLink.ProductScanResult[] recus =
                 new com.pa.lcr.lcp.LcpLink.ProductScanResult[NB_SLOTS];
             final String[] derniereErreur = new String[NB_SLOTS];
+            final boolean[] refuses = new boolean[NB_SLOTS]; // slot que le registre refuse de sélectionner (non configuré)
             boolean annule = false;
             try {
                 for (int tentative = 1; tentative <= MAX_TENTATIVES && !annule; tentative++) {
@@ -7250,7 +7251,21 @@ private boolean ensureBtConnectPermission() {
                         String desc = null, code = "";
                         int type = -1;
                         try {
-                            lien.opSetField(0, new byte[]{(byte) idx});
+                            try {
+                                lien.opSetField(0, new byte[]{(byte) idx});
+                            } catch (java.io.IOException eSel) {
+                                // Le registre répond mais refuse de sélectionner ce slot (ex. rc=0x71 observé
+                                // sur les slots 5 à 16 d'un registre qui n'en configure que 4) : slot non
+                                // configuré = VIDE, pas une erreur (même traitement que le scan du tab).
+                                if (eSel instanceof com.pa.lcr.lcp.LcpLink.TransportException
+                                        || eSel.getMessage() == null || !eSel.getMessage().contains(" rc=0x")) throw eSel;
+                                recus[idx] = new com.pa.lcr.lcp.LcpLink.ProductScanResult(idx + 1, "", "", -1);
+                                refuses[idx] = true;
+                                derniereErreur[idx] = null;
+                                com.pa.lcr.lcp.log.LogBus.api(node, TAG + " serial=" + serial + " slot=" + (idx + 1)
+                                    + " sélection refusée par le registre (" + eSel.getMessage() + ") → slot non configuré, compté vide");
+                                continue;
+                            }
                             try { Thread.sleep(80); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                             // Un slot vide est NORMAL (pas une erreur) : le registre peut répondre
                             // vide OU refuser le champ (rc=0xNN) → "reçu, vide". Seule une perte
@@ -7296,6 +7311,17 @@ private boolean ensureBtConnectPermission() {
                                 + " non reçu (tentative " + tentative + "/" + MAX_TENTATIVES + ") — " + derniereErreur[idx]);
                         }
                     }
+                    // Cohérence : les slots refusés doivent former la FIN de la liste. Un refus suivi d'un
+                    // slot accepté est suspect (refus passager) → ces slots sont relus à la prochaine tentative.
+                    int dernierAccepte = -1;
+                    for (int i = 0; i < NB_SLOTS; i++) if (recus[i] != null && !refuses[i]) dernierAccepte = i;
+                    for (int i = 0; i < dernierAccepte; i++) {
+                        if (refuses[i]) {
+                            recus[i] = null;
+                            refuses[i] = false;
+                            derniereErreur[i] = "sélection refusée alors qu'un slot suivant est configuré (refus passager?)";
+                        }
+                    }
                     boolean tousRecus = true;
                     for (int i = 0; i < NB_SLOTS; i++) if (recus[i] == null) { tousRecus = false; break; }
                     if (tousRecus) break;
@@ -7325,7 +7351,14 @@ private boolean ensureBtConnectPermission() {
             java.util.List<com.pa.lcr.lcp.LcpLink.ProductScanResult> liste = new java.util.ArrayList<>();
             StringBuilder manquants = new StringBuilder();
             for (int i = 0; i < NB_SLOTS; i++) {
-                if (recus[i] != null) { liste.add(recus[i]); continue; }
+                if (recus[i] != null) {
+                    com.pa.lcr.lcp.LcpLink.ProductScanResult r = recus[i];
+                    // Slot sans description NI code = vide : rien à inscrire (le type seul, ex. 7 "Aucun", ne compte pas).
+                    if (r.description.isEmpty() && r.productCode.isEmpty() && r.productType != -1)
+                        r = new com.pa.lcr.lcp.LcpLink.ProductScanResult(r.noteIdx, "", "", -1);
+                    liste.add(r);
+                    continue;
+                }
                 if (manquants.length() > 0) manquants.append("; ");
                 manquants.append("slot ").append(i + 1).append(" (").append(derniereErreur[i]).append(")");
             }
