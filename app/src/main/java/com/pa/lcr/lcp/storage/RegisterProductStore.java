@@ -332,6 +332,20 @@ public class RegisterProductStore {
         return rows;
     }
 
+    /** PENDING d'un seul registre (utilisé par le push de la validation manuelle). */
+    public List<Row> getPendingForSerial(String serialId) {
+        List<Row> rows = new ArrayList<>();
+        if (serialId == null) return rows;
+        try {
+            SQLiteDatabase db = helper.getReadableDatabase();
+            try (Cursor c = db.query(TABLE, null, COL_SERIAL + "=? AND " + COL_SYNC_STATUS + "=?",
+                    new String[]{serialId, SYNC_PENDING}, null, null, COL_NOTE_IDX + " ASC")) {
+                while (c != null && c.moveToNext()) rows.add(map(c, serialId));
+            }
+        } catch (Exception e) { Log.e(TAG, "getPendingForSerial ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "RegisterProductStore.getPendingForSerial", e); } catch (Exception ignored) {} }
+        return rows;
+    }
+
     public void markSynced(String serialId, int noteIdx) {
         if (serialId == null) return;
         try {

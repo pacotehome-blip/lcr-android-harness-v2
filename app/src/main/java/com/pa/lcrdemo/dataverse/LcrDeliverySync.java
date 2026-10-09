@@ -327,6 +327,171 @@ public class LcrDeliverySync {
         LogBus.api(row.nud, "[DATAVERSE-PUSH-REGISTRE] OK (mis à jour) serial=" + row.serialId);
     }
 
+    // =========================================================
+    // 1c. Push produits du registre → filgo_registerproducts
+    // =========================================================
+
+    private static final String TABLE_REGISTER_PRODUCT = "filgo_registerproducts";
+    private static final Object PUSH_REGISTER_PRODUCTS_LOCK = new Object();
+
+    /**
+     * ✅ AJOUTÉ (9 oct 2026, demande Paul — "populer les tables dans
+     * Dataverse pour les registres et les produits calibrés dans le
+     * registre") — pousse les produits (table locale register_products,
+     * statut PENDING) des SEULS registres dont la validation manuelle vient
+     * de recevoir les 16 slots (voir MainActivity.scannerProduitsPourValidation).
+     * Jamais appelé par syncAll() : uniquement à la fin de la validation
+     * manuelle (Configurer → Démarrer la validation).
+     *
+     * Règles : un slot vide sans ligne Dataverse = rien à ajouter ; un slot
+     * qui a déjà une ligne Dataverse est TOUJOURS mis à jour (PATCH, jamais
+     * supprimé ni recréé — le GUID reste stable), vide inclus (filgo_name
+     * "NA", description null). La ligne est retrouvée par (registre + slot),
+     * jamais par un GUID local. Une erreur laisse la ligne PENDING.
+     */
+    public static void pushPendingRegisterProducts(Context ctx, String accessToken,
+                                                    java.util.Collection<String> serials) {
+        if (serials == null || serials.isEmpty()) return;
+        synchronized (PUSH_REGISTER_PRODUCTS_LOCK) {
+            com.pa.lcr.lcp.storage.RegisterProductStore store =
+                new com.pa.lcr.lcp.storage.RegisterProductStore(ctx);
+            try {
+                RegistreStore registres = new RegistreStore(ctx);
+                String orgUrl = LcrConfig.getDataverseUrl(ctx);
+                for (String serial : serials) {
+                    if (serial == null || serial.trim().isEmpty()) continue;
+                    try {
+                        pushRegisterProductsForSerial(serial.trim(), orgUrl, accessToken, store, registres);
+                    } catch (Exception e) {
+                        Log.e(TAG, "pushPendingRegisterProducts: ERREUR serial=" + serial + " err=" + e.getMessage());
+                        LogBus.api(0, "[DATAVERSE-PUSH-PRODUITS] ERR serial=" + serial + " — " + e.getMessage());
+                    }
+                }
+            } finally {
+                store.close();
+            }
+        }
+    }
+
+    private static void pushRegisterProductsForSerial(String serial, String orgUrl, String accessToken,
+            com.pa.lcr.lcp.storage.RegisterProductStore store, RegistreStore registres) throws Exception {
+        List<com.pa.lcr.lcp.storage.RegisterProductStore.Row> pending = store.getPendingForSerial(serial);
+        if (pending.isEmpty()) {
+            LogBus.api(0, "[DATAVERSE-PUSH-PRODUITS] serial=" + serial + " — rien à pousser");
+            return;
+        }
+        int node = pending.get(0).lcrNode;
+
+        // GUID de la fiche registre (lookup) : celui mémorisé après le push du registre,
+        // sinon relu dans Dataverse par numéro de série.
+        String registreGuid = null;
+        RegistreStore.Row reg = registres.getBySerial(serial);
+        if (reg != null && reg.dataverseId != null && !reg.dataverseId.trim().isEmpty()) {
+            registreGuid = reg.dataverseId.trim();
+        } else {
+            JSONObject fiche = findRegistreByNumeroDeSerie(serial, orgUrl, accessToken);
+            if (fiche != null) registreGuid = fiche.optString("filgo_registrecompteurid", null);
+        }
+        if (registreGuid == null || registreGuid.isEmpty()) {
+            LogBus.api(node, "[DATAVERSE-PUSH-PRODUITS] serial=" + serial
+                + " — fiche registre introuvable dans Dataverse, produits laissés PENDING");
+            return;
+        }
+
+        // Lignes produit déjà présentes dans Dataverse pour ce registre, par slot.
+        java.util.Map<Integer, JSONObject> existants = new java.util.HashMap<>();
+        String filter = java.net.URLEncoder.encode("_filgo_registerid_value eq " + registreGuid, "UTF-8");
+        JSONObject liste = doJsonGet(orgUrl + "/api/data/v9.2/" + TABLE_REGISTER_PRODUCT
+            + "?$select=filgo_registerproductid,filgo_note_idx,filgo_name,filgo_description,filgo_lcrnode"
+            + "&$filter=" + filter, accessToken);
+        JSONArray values = liste != null ? liste.optJSONArray("value") : null;
+        if (values != null) {
+            for (int i = 0; i < values.length(); i++) {
+                JSONObject o = values.optJSONObject(i);
+                if (o == null) continue;
+                int slot;
+                try { slot = Integer.parseInt(o.optString("filgo_note_idx", "").trim()); }
+                catch (Exception ignored) { continue; }
+                if (existants.containsKey(slot)) {
+                    LogBus.api(node, "[DATAVERSE-PUSH-PRODUITS] serial=" + serial + " slot=" + slot
+                        + " — doublon dans Dataverse, première ligne conservée");
+                    continue;
+                }
+                existants.put(slot, o);
+            }
+        }
+
+        for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : pending) {
+            try {
+                boolean vide = r.description.isEmpty() && r.productCode.isEmpty();
+                JSONObject ex = existants.get(r.noteIdx);
+                if (vide && ex == null) {
+                    store.markSynced(serial, r.noteIdx); // rien à ajouter pour ce slot
+                    continue;
+                }
+                String name = r.productCode.isEmpty() ? "NA" : r.productCode;
+                String lcrnode = String.valueOf(r.lcrNode);
+                if (ex != null) {
+                    String exId = ex.optString("filgo_registerproductid", null);
+                    boolean identique = name.equals(ex.optString("filgo_name", ""))
+                        && r.description.equals(ex.isNull("filgo_description") ? "" : ex.optString("filgo_description", ""))
+                        && lcrnode.equals(ex.isNull("filgo_lcrnode") ? "" : ex.optString("filgo_lcrnode", ""));
+                    if (!identique) {
+                        JSONObject body = new JSONObject();
+                        body.put("filgo_name", name);
+                        body.put("filgo_description", r.description.isEmpty() ? JSONObject.NULL : r.description);
+                        body.put("filgo_lcrnode", lcrnode);
+                        doJsonRequest("PATCH", orgUrl + "/api/data/v9.2/" + TABLE_REGISTER_PRODUCT + "(" + exId + ")",
+                            accessToken, body);
+                    }
+                    store.markSynced(serial, r.noteIdx);
+                    LogBus.api(node, "[DATAVERSE-PUSH-PRODUITS] OK (" + (identique ? "déjà à jour" : "mis à jour")
+                        + ") serial=" + serial + " slot=" + r.noteIdx + " id=" + exId);
+                } else {
+                    JSONObject body = new JSONObject();
+                    body.put("filgo_name", name);
+                    body.put("filgo_description", r.description);
+                    body.put("filgo_lcrnode", lcrnode);
+                    body.put("filgo_note_idx", String.valueOf(r.noteIdx));
+                    body.put("filgo_registerid@odata.bind", "/" + TABLE_REGISTRE + "(" + registreGuid + ")");
+                    JSONObject created = doJsonRequest("POST", orgUrl + "/api/data/v9.2/" + TABLE_REGISTER_PRODUCT,
+                        accessToken, body);
+                    store.markSynced(serial, r.noteIdx);
+                    LogBus.api(node, "[DATAVERSE-PUSH-PRODUITS] OK (créé) serial=" + serial + " slot=" + r.noteIdx
+                        + " id=" + (created != null ? created.optString("filgo_registerproductid", "?") : "?"));
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "pushRegisterProductsForSerial: serial=" + serial + " slot=" + r.noteIdx + " err=" + e.getMessage());
+                LogBus.api(node, "[DATAVERSE-PUSH-PRODUITS] ERR serial=" + serial + " slot=" + r.noteIdx
+                    + " — " + e.getMessage());
+            }
+        }
+    }
+
+    /** GET JSON simple (liste OData). Lève une exception avec le code HTTP et le corps si la réponse n'est pas 200. */
+    private static JSONObject doJsonGet(String urlStr, String accessToken) throws Exception {
+        URL url = new URL(urlStr);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        try {
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(15000);
+            conn.setRequestProperty("Authorization",    "Bearer " + accessToken);
+            conn.setRequestProperty("Accept",           "application/json");
+            conn.setRequestProperty("OData-MaxVersion", "4.0");
+            conn.setRequestProperty("OData-Version",    "4.0");
+            int code = conn.getResponseCode();
+            if (code == 200) {
+                return new JSONObject(new String(readStream(conn.getInputStream()), StandardCharsets.UTF_8));
+            }
+            String err = "";
+            try { err = new String(readStream(conn.getErrorStream()), StandardCharsets.UTF_8); } catch (Exception ignored) {}
+            throw new RuntimeException("HTTP " + code + ": " + err.substring(0, Math.min(300, err.length())));
+        } finally {
+            conn.disconnect();
+        }
+    }
+
     /** Cherche une fiche existante par filgo_numerodeserie. Retourne null si absente. */
     private static JSONObject findRegistreByNumeroDeSerie(String serialId, String orgUrl,
                                                             String accessToken) throws Exception {

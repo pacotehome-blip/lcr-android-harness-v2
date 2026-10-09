@@ -6466,6 +6466,10 @@ private boolean ensureBtConnectPermission() {
     /** Annulation coopérative pour une validation lancée depuis RegisterValidationActivity — même drapeau que l'ancien flux. */
     public volatile boolean validationExterneAnnulee = false;
 
+    /** Registres dont les 16 produits ont été reçus pendant la validation en cours — seuls ceux-là sont poussés vers Dataverse. */
+    private final java.util.Set<String> serialsProduitsValides =
+        java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
     /**
      * Exécute la validation sur EXACTEMENT les candidats fournis (jamais
      * tous automatiquement — cases à cocher côté RegisterValidationActivity).
@@ -6481,6 +6485,7 @@ private boolean ensureBtConnectPermission() {
             return;
         }
         validationExterneAnnulee = false;
+        serialsProduitsValides.clear();
         validationEnCoursDepuisMs = System.currentTimeMillis();
         try {
             com.pa.lcr.lcp.RegisterSessionManager.get(this).closeAllForValidation();
@@ -6560,8 +6565,16 @@ private boolean ensureBtConnectPermission() {
                     @Override public void onReady() {
                         msalValidation.acquireToken(MainActivity.this, new MsalTokenProvider.TokenCallback() {
                             @Override public void onSuccess(String token) {
-                                new Thread(() -> com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(
-                                    MainActivity.this, token)).start();
+                                new Thread(() -> {
+                                    com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(MainActivity.this, token);
+                                    // Produits des registres validés (16/16 reçus) — après le registre, jamais hors validation.
+                                    try {
+                                        com.pa.lcrdemo.dataverse.LcrDeliverySync.pushPendingRegisterProducts(
+                                            MainActivity.this, token, new java.util.ArrayList<>(serialsProduitsValides));
+                                    } catch (Exception eProd) {
+                                        android.util.Log.w("MainActivity", "push produits (post-validation) ERR (non-bloquant): " + eProd.getMessage());
+                                    }
+                                }).start();
                             }
                             @Override public void onError(Exception e) {
                                 android.util.Log.w("MainActivity", "syncAll (post-validation) token ERR (non-bloquant): " + e.getMessage());
@@ -7380,6 +7393,7 @@ private boolean ensureBtConnectPermission() {
             int nonVides = 0;
             for (com.pa.lcr.lcp.LcpLink.ProductScanResult r : liste)
                 if (!r.description.isEmpty() || !r.productCode.isEmpty()) nonVides++;
+            serialsProduitsValides.add(serial);
             com.pa.lcr.lcp.log.LogBus.api(node, TAG + " serial=" + serial + " — 16/16 reçus, " + nonVides
                 + " non vide(s), " + modifies + " créé(s)/modifié(s)");
             return "\n  produits: ✅ 16/16 reçus — " + nonVides + " non vide(s), " + modifies + " créé(s)/modifié(s)";
