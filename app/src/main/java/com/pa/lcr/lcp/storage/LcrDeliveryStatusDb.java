@@ -42,7 +42,7 @@ import java.util.List;
 public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
 
     public static final String DB_NAME    = "filgo_delivery_status.db";
-    public static final int    DB_VERSION = 4; // v4: job_id — ancre stable pour recuperer une livraison encore en cours
+    public static final int    DB_VERSION = 5; // v4: job_id — ancre stable pour recuperer une livraison encore en cours; v5: stopid / productid (GUID Field Service du deep link)
 
     private static final String TAG = "LcrDeliveryStatusDb";
 
@@ -61,6 +61,9 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     // Identification
     public static final String COL_WO_NUM              = "wo_num";
     public static final String COL_WO_ID_GUID          = "wo_id_guid";
+    // GUID Field Service reçus par le deep link — noms locaux = filgo_stopid / filgo_productid sans préfixe
+    public static final String COL_STOPID              = "stopid";
+    public static final String COL_PRODUCTID           = "productid";
     public static final String COL_TOURNEE_ID          = "tournee_id";
     public static final String COL_TRANSACTION_NO      = "transaction_no";
     public static final String COL_STOP_SEQUENCE       = "stop_sequence";
@@ -229,6 +232,12 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         if (oldVersion < 4) {
             addColumnIfMissing(db, TABLE_DELIVERY, COL_JOB_ID, "TEXT");
         }
+        // v5: stopid / productid — GUID Field Service reçus par le deep link,
+        // simplement transportés (jamais utilisés pour décider)
+        if (oldVersion < 5) {
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_STOPID,    "TEXT");
+            addColumnIfMissing(db, TABLE_DELIVERY, COL_PRODUCTID, "TEXT");
+        }
     }
 
     // =========================================================
@@ -311,6 +320,9 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             // Erreurs
             COL_ERROR_CODE         + " TEXT," +
             COL_ERROR_MSG          + " TEXT," +
+            // GUID Field Service (deep link) — en fin de table, comme après un ALTER TABLE ADD COLUMN
+            COL_STOPID             + " TEXT," +
+            COL_PRODUCTID          + " TEXT," +
             // Anti-doublon: une seule ligne par (wo_num, ticket_no)
             "UNIQUE(" + COL_WO_NUM + "," + COL_TICKET_NO + ") ON CONFLICT IGNORE" +
             ");"
@@ -826,15 +838,31 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         }
     }
 
+    // Surcharge historique (sans stopid/productid) — conservée pour tout appelant existant.
+    // null = ne PAS écrire ces colonnes (un upsert ne doit jamais effacer des GUID déjà présents).
     public static ContentValues construireLivraisonComplete(
             String jobId, String woNum, String woIdGuid, String ticketNo, String saleNo,
             double netL, double grossL, String serialId, int lcrnode, String btmac,
             int produitNo, String produitDescription, String produitCode, int produitType,
             double presetL, String type, String stopType, String syncStatus, String payloadExtra) {
+        return construireLivraisonComplete(jobId, woNum, woIdGuid, ticketNo, saleNo,
+            netL, grossL, serialId, lcrnode, btmac,
+            produitNo, produitDescription, produitCode, produitType,
+            presetL, type, stopType, syncStatus, payloadExtra, null, null);
+    }
+
+    public static ContentValues construireLivraisonComplete(
+            String jobId, String woNum, String woIdGuid, String ticketNo, String saleNo,
+            double netL, double grossL, String serialId, int lcrnode, String btmac,
+            int produitNo, String produitDescription, String produitCode, int produitType,
+            double presetL, String type, String stopType, String syncStatus, String payloadExtra,
+            String stopid, String productid) {
         ContentValues cv = new ContentValues();
         if (jobId != null && !jobId.isEmpty()) cv.put(COL_JOB_ID, jobId);
         cv.put(COL_WO_NUM, woNum != null ? woNum : "");
         cv.put(COL_WO_ID_GUID, woIdGuid != null ? woIdGuid : "");
+        if (stopid != null)    cv.put(COL_STOPID, stopid);
+        if (productid != null) cv.put(COL_PRODUCTID, productid);
         cv.put(COL_TICKET_NO, ticketNo != null ? ticketNo : "");
         cv.put(COL_SALE_NO, saleNo != null ? saleNo : "");
         cv.put(COL_NET_L, netL);
@@ -852,15 +880,30 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         return cv;
     }
 
+    // Surcharge historique (sans stopid/productid) — les clés restent présentes, vides.
     public static org.json.JSONObject construireJsonLivraisonComplet(
             String jobId, String woNum, String woIdGuid, String ticketNo, String saleNo,
             double netL, double grossL, String serialId, int lcrnode, String btmac,
             int produitNo, String produitDescription, String produitCode, int produitType,
             double presetL, String type, String syncStatus, String payloadExtra) throws org.json.JSONException {
+        return construireJsonLivraisonComplet(jobId, woNum, woIdGuid, ticketNo, saleNo,
+            netL, grossL, serialId, lcrnode, btmac,
+            produitNo, produitDescription, produitCode, produitType,
+            presetL, type, syncStatus, payloadExtra, "", "");
+    }
+
+    public static org.json.JSONObject construireJsonLivraisonComplet(
+            String jobId, String woNum, String woIdGuid, String ticketNo, String saleNo,
+            double netL, double grossL, String serialId, int lcrnode, String btmac,
+            int produitNo, String produitDescription, String produitCode, int produitType,
+            double presetL, String type, String syncStatus, String payloadExtra,
+            String stopid, String productid) throws org.json.JSONException {
         org.json.JSONObject j = new org.json.JSONObject();
         if (jobId != null && !jobId.isEmpty()) j.put("job_id", jobId);
         j.put("wo_num", woNum != null ? woNum : "");
         j.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
+        j.put("stopid", stopid != null ? stopid : "");
+        j.put("productid", productid != null ? productid : "");
         j.put("ticket_no", ticketNo != null ? ticketNo : "");
         j.put("sale_no", saleNo != null ? saleNo : "");
         j.put("net_l", netL);
@@ -1135,6 +1178,10 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         public String errorCode;
         public String errorMsg;
 
+        // GUID Field Service (deep link) — transportés seulement
+        public String stopid;
+        public String productid;
+
         public static DeliveryRow fromCursor(Cursor c) {
             DeliveryRow r = new DeliveryRow();
             r.id                 = getLong(c, COL_ID);
@@ -1195,6 +1242,8 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             r.presetOverageL     = getDouble(c, COL_PRESET_OVERAGE_L);
             r.errorCode          = getString(c, COL_ERROR_CODE);
             r.errorMsg           = getString(c, COL_ERROR_MSG);
+            r.stopid             = getString(c, COL_STOPID);
+            r.productid          = getString(c, COL_PRODUCTID);
             return r;
         }
 

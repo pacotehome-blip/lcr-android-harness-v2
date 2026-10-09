@@ -206,6 +206,7 @@ public class RegisterTabFragment extends Fragment {
             if (ad != null && ad.woNum != null && !ad.woNum.isEmpty()) {
                 currentWoNum = ad.woNum;
                 if (ad.woIdGuid != null && !ad.woIdGuid.isEmpty()) currentWoIdGuid = ad.woIdGuid;
+                poserGuidsFs(ad.woNum, ad.stopid, ad.productid);
                 rafraichirCumulWo();
             }
 
@@ -1252,6 +1253,8 @@ public class RegisterTabFragment extends Fragment {
                     safetyNet.jobId = j.optString("job_id", "");
                     safetyNet.woNum = j.optString("wo_num", "");
                     safetyNet.woIdGuid = j.optString("wo_id_guid", "");
+                    safetyNet.stopid = j.optString("stopid", "");
+                    safetyNet.productid = j.optString("productid", "");
                     safetyNet.serialId = j.optString("serial_id", "");
                     safetyNet.lcrnode = j.optInt("lcrnode", 0);
                     safetyNet.btmac = j.optString("btmac", "");
@@ -1295,6 +1298,8 @@ public class RegisterTabFragment extends Fragment {
                         cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, safetyNet.jobId);
                         cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, safetyNet.woNum);
                         cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, safetyNet.woIdGuid);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOPID, safetyNet.stopid);
+                        cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUCTID, safetyNet.productid);
                         cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, safetyNet.serialId);
                         cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, safetyNet.lcrnode);
                         cvReinsert.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_BTMAC, safetyNet.btmac);
@@ -1498,7 +1503,8 @@ public class RegisterTabFragment extends Fragment {
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                     "RUNNING_FLOWING",
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                    "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + safetyNet.jobId + "\",\"recovered\":true}");
+                    "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + safetyNet.jobId + "\",\"recovered\":true}",
+                    safetyNet.stopid, safetyNet.productid);
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbRec2 =
                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
             try {
@@ -1518,7 +1524,8 @@ public class RegisterTabFragment extends Fragment {
                         produitFrais, produitDescription, produitCode, produitType, presetFrais,
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                        "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + safetyNet.jobId + "\",\"recovered\":true}");
+                        "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + safetyNet.jobId + "\",\"recovered\":true}",
+                        safetyNet.stopid != null ? safetyNet.stopid : "", safetyNet.productid != null ? safetyNet.productid : "");
                 com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                     requireContext().getApplicationContext(), safetyNet.woNum, safetyNet.jobId, backupPayloadRec);
             } catch (Exception e) {
@@ -2133,6 +2140,37 @@ public class RegisterTabFragment extends Fragment {
     private volatile boolean woNumFromDirectSource = false;
     private volatile boolean deliveryNotified = false; // guard anti-doublon notification
     private volatile String currentWoIdGuid = "";
+
+    // ✅ AJOUTÉ (9 oct 2026, demande Paul) — stopid / productid : GUID Field Service du stop et
+    // du produit, reçus par le deep link. Simplement TRANSPORTÉS (comme currentWoIdGuid),
+    // jamais utilisés pour décider. guidsFsPourWo = le WO auquel ils appartiennent : les
+    // accesseurs ne retournent JAMAIS une valeur d'un autre WO (voir poserGuidsFs).
+    private volatile String currentStopId    = "";
+    private volatile String currentProductId = "";
+    private volatile String guidsFsPourWo    = "";
+
+    private boolean guidsFsValides() {
+        String wo = currentWoNum;
+        return wo != null && !wo.isEmpty() && wo.equals(guidsFsPourWo);
+    }
+    public String getCurrentStopId()    { return guidsFsValides() ? currentStopId    : ""; }
+    public String getCurrentProductId() { return guidsFsValides() ? currentProductId : ""; }
+
+    // Même WO : une valeur non vide remplace, une valeur vide ne remplace jamais une valeur
+    // valide (même règle que currentWoIdGuid). Autre WO : on repart de ce qui est fourni.
+    private void poserGuidsFs(String wo, String stop, String prod) {
+        if (wo == null || wo.isEmpty()) return;
+        String s = stop != null ? stop : "";
+        String p = prod != null ? prod : "";
+        if (!wo.equals(guidsFsPourWo)) {
+            currentStopId = s;
+            currentProductId = p;
+            guidsFsPourWo = wo;
+        } else {
+            if (!s.isEmpty()) currentStopId = s;
+            if (!p.isEmpty()) currentProductId = p;
+        }
+    }
 
     // ✅ FIX (2026-07-29) : produit et preset du deep link mémorisés ici, et non
     // seulement poussés dans spnProduct/edtPreset. Le diagnostic de reconnexion
@@ -2796,6 +2834,8 @@ public class RegisterTabFragment extends Fragment {
                                 final String fTicketActuel = ticketPourAffichage.trim();
                                 final String fWoNumActuel = currentWoNum;
                                 final String fWoIdGuidActuel = currentWoIdGuid;
+                                final String fStopIdActuel = getCurrentStopId();
+                                final String fProductIdActuel = getCurrentProductId();
                                 final String fSerialActuel = serialFromArgs;
                                 final String fMacActuel = (tabTransportKey != null) ? tabTransportKey.trim() : "";
                                 final int fNodeActuel = node;
@@ -2899,6 +2939,8 @@ public class RegisterTabFragment extends Fragment {
                                             payloadHeartbeat.put("job_id", fJobIdActuel);
                                             payloadHeartbeat.put("wo_num", fWoNumActuel != null ? fWoNumActuel : "");
                                             payloadHeartbeat.put("wo_id_guid", fWoIdGuidActuel != null ? fWoIdGuidActuel : "");
+                                            payloadHeartbeat.put("stopid", fStopIdActuel);
+                                            payloadHeartbeat.put("productid", fProductIdActuel);
                                             payloadHeartbeat.put("serial_id", fSerialActuel != null ? fSerialActuel : "");
                                             payloadHeartbeat.put("lcrnode", fNodeActuel);
                                             payloadHeartbeat.put("btmac", fMacActuel);
@@ -3275,6 +3317,14 @@ public class RegisterTabFragment extends Fragment {
                         // currentWoIdGuid déjà maintenu au niveau de la classe.
                         if (currentWoIdGuid != null && !currentWoIdGuid.isEmpty()) {
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, currentWoIdGuid);
+                        }
+                        // ✅ AJOUTÉ (9 oct 2026, demande Paul) — stopid / productid, même règle
+                        // que le GUID du WO juste au-dessus (jamais écrits vides par-dessus).
+                        if (!getCurrentStopId().isEmpty()) {
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOPID, getCurrentStopId());
+                        }
+                        if (!getCurrentProductId().isEmpty()) {
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUCTID, getCurrentProductId());
                         }
                         cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID,
                             serialFromArgs != null ? serialFromArgs : "");
@@ -3833,6 +3883,22 @@ public class RegisterTabFragment extends Fragment {
             ui.post(() -> rafraichirCumulWo());
         }
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
+        // ✅ AJOUTÉ (9 oct 2026, demande Paul) — stopid / productid d'un vrai deep link : relus
+        // depuis la livraison courante que handleDeepLink() vient de sauvegarder (même WO).
+        if (woIdGuid != null && !woIdGuid.isEmpty() && woNum != null && !woNum.isEmpty()) {
+            try {
+                android.content.Context ctxGuids = getContext();
+                if (ctxGuids != null) {
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery adGuids =
+                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(ctxGuids).load();
+                    if (adGuids != null && woNum.equals(adGuids.woNum)) {
+                        poserGuidsFs(woNum, adGuids.stopid, adGuids.productid);
+                    }
+                }
+            } catch (Exception eGuids) {
+                android.util.Log.w("RegisterTabFragment", "prefill stopid/productid ERR (non-bloquant): " + eGuids.getMessage());
+            }
+        }
         if (produit != null && !produit.isEmpty()) currentProduit = produit;
         if (preset  != null && !preset.isEmpty())  currentPreset  = preset;
         // ✅ AJOUTÉ (14 sept 2026, demande Paul — "il faut s'assurer de
@@ -4643,6 +4709,8 @@ public class RegisterTabFragment extends Fragment {
                             android.content.ContentValues cv = new android.content.ContentValues();
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM,       woNum);
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,   woIdGuid);
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOPID,       getCurrentStopId());
+                            cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUCTID,    getCurrentProductId());
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO,    ticketNoAfter);
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO_REF,ticketNoBefore);
                             cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,        netL);
@@ -5489,11 +5557,14 @@ public class RegisterTabFragment extends Fragment {
                                 syncStatusTrouve = lastRow.syncStatus;
                                 final String fWoRecovered = woCheck;
                                 final String fWoIdRecovered = lastRow.woIdGuid;
+                                final String fStopRecovered = lastRow.stopid;
+                                final String fProductRecovered = lastRow.productid;
                                 android.util.Log.i("RegisterTabFragment", "btnRetourWO: currentWoNum vide — WO récupéré depuis dernière livraison serial="
                                         + serialForFallback + " -> wo=" + fWoRecovered);
                                 ui.post(() -> {
                                     currentWoNum = fWoRecovered;
                                     if (fWoIdRecovered != null && !fWoIdRecovered.isEmpty()) currentWoIdGuid = fWoIdRecovered;
+                                    poserGuidsFs(fWoRecovered, fStopRecovered, fProductRecovered);
                                 });
                             }
                         } finally {
@@ -6171,6 +6242,12 @@ public class RegisterTabFragment extends Fragment {
                         cvUpdate.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_NET_L,   netL);
                         cvUpdate.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_GROSS_L, grossL);
                         cvUpdate.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID, woIdGuid);
+                        if (!getCurrentStopId().isEmpty()) {
+                            cvUpdate.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOPID, getCurrentStopId());
+                        }
+                        if (!getCurrentProductId().isEmpty()) {
+                            cvUpdate.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_PRODUCTID, getCurrentProductId());
+                        }
                         lcrDb.updateDelivery(existing.id, cvUpdate);
                         android.util.Log.i("RetourWO", "Ticket " + ticketNo
                             + " mis a jour — net=" + netL + " gross=" + grossL);
@@ -6240,7 +6317,7 @@ public class RegisterTabFragment extends Fragment {
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                             "LIVRAISON",
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                            payloadCompletReel);
+                            payloadCompletReel, getCurrentStopId(), getCurrentProductId());
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "REGISTRE");
                     long localId = lcrDb.insertDelivery(cv);
                     android.util.Log.i("RetourWO", "Delivery sauvegardée localId=" + localId
@@ -6256,7 +6333,7 @@ public class RegisterTabFragment extends Fragment {
                             produitRetour, descRetour, codeRetour, typeRetour, presetRetour,
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                            payloadCompletReel);
+                            payloadCompletReel, getCurrentStopId(), getCurrentProductId());
                     backupPayload.put("backup_ts", System.currentTimeMillis());
                     backupPayload.put("payload_complet", payloadCompletReel);
                     // ✅ AJOUTÉ (11 août 2026, demande Paul — "ajoute-le au
@@ -7366,7 +7443,7 @@ public class RegisterTabFragment extends Fragment {
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION,
                             "ANNULATION",
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                            payload.toString());
+                            payload.toString(), getCurrentStopId(), getCurrentProductId());
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "OPERATEUR");
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbAnnuler =
                         new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
@@ -7515,7 +7592,7 @@ public class RegisterTabFragment extends Fragment {
                                 produitAnnul, descAnnul, codeAnnul, typeProduitAnnul, presetAnnul,
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION,
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                                payload.toString());
+                                payload.toString(), getCurrentStopId(), getCurrentProductId());
                         com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                             requireContext().getApplicationContext(), woNum, ticketNo, backupPayloadAnnul);
                     } catch (Exception e) {
@@ -9292,6 +9369,8 @@ public class RegisterTabFragment extends Fragment {
         }
 
         final String fWoIdGuid = row.woIdGuid != null ? row.woIdGuid : "";
+        final String fStopIdRow = row.stopid != null ? row.stopid : "";
+        final String fProductIdRow = row.productid != null ? row.productid : "";
         // ✅ delivery_uid n'est pas stocké tel quel dans LcrDeliveryStatusDb —
         // il se reconstruit toujours de la même façon que dans DeliveryController
         // (numero_livraison + "-" + ticketNo). Permet de valider Field Service
@@ -9332,6 +9411,7 @@ public class RegisterTabFragment extends Fragment {
             // capturé par un deep link réel quelques instants plus tôt.
             // Ne descend plus jamais un GUID valide vers une valeur vide.
             if (fWoIdGuid != null && !fWoIdGuid.isEmpty()) currentWoIdGuid = fWoIdGuid;
+            poserGuidsFs(fWoNum, fStopIdRow, fProductIdRow);
             LogBus.api(node, "[WO-DETECT] WO trouvé=" + fWoNum + " deliveryUid=" + fDeliveryUid);
             if (txtTicketNo != null)
                 txtTicketNo.setText("Ticket Number : " + ticketNo);

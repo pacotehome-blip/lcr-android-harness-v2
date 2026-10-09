@@ -323,6 +323,8 @@ public class LocalDeliveryBackup {
                         ContentValues cv = new ContentValues();
                         cv.put(LcrDeliveryStatusDb.COL_WO_NUM, woNum);
                         cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID, j.optString("wo_id_guid", ""));
+                        cv.put(LcrDeliveryStatusDb.COL_STOPID, j.optString("stopid", ""));
+                        cv.put(LcrDeliveryStatusDb.COL_PRODUCTID, j.optString("productid", ""));
                         cv.put(LcrDeliveryStatusDb.COL_TICKET_NO, ticketNo);
                         cv.put(LcrDeliveryStatusDb.COL_SALE_NO, j.optString("sale_no", ""));
                         cv.put(LcrDeliveryStatusDb.COL_NET_L, j.optDouble("net_l", 0.0));
@@ -521,6 +523,8 @@ public class LocalDeliveryBackup {
                         ContentValues cv = new ContentValues();
                         cv.put(LcrDeliveryStatusDb.COL_WO_NUM, woNum);
                         cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID, j.optString("wo_id_guid", ""));
+                        cv.put(LcrDeliveryStatusDb.COL_STOPID, j.optString("stopid", ""));
+                        cv.put(LcrDeliveryStatusDb.COL_PRODUCTID, j.optString("productid", ""));
                         cv.put(LcrDeliveryStatusDb.COL_TICKET_NO, ticketNo);
                         cv.put(LcrDeliveryStatusDb.COL_SALE_NO, j.optString("sale_no", ""));
                         cv.put(LcrDeliveryStatusDb.COL_NET_L, j.optDouble("net_l", 0.0));
@@ -892,6 +896,8 @@ public class LocalDeliveryBackup {
         ContentValues cv = new ContentValues();
         cv.put(LcrDeliveryStatusDb.COL_WO_NUM, j.optString("wo_num", ""));
         cv.put(LcrDeliveryStatusDb.COL_WO_ID_GUID, j.optString("wo_id_guid", ""));
+        cv.put(LcrDeliveryStatusDb.COL_STOPID, j.optString("stopid", ""));
+        cv.put(LcrDeliveryStatusDb.COL_PRODUCTID, j.optString("productid", ""));
         cv.put(LcrDeliveryStatusDb.COL_TICKET_NO, j.optString("ticket_no", ""));
         cv.put(LcrDeliveryStatusDb.COL_SALE_NO, j.optString("sale_no", ""));
         cv.put(LcrDeliveryStatusDb.COL_NET_L, j.optDouble("net_l", 0.0));

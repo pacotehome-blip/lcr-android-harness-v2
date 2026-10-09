@@ -46,6 +46,10 @@ public class ActiveDeliveryStore {
         public double preset;
         public String status;   // PENDING / STARTED / DONE
         public long   tsStartedMs;
+        // GUID Field Service reçus par le deep link (stopid / productid) —
+        // simplement transportés avec la livraison, jamais utilisés pour décider.
+        public String stopid;
+        public String productid;
 
         @Override
         public String toString() {
@@ -59,9 +63,28 @@ public class ActiveDeliveryStore {
     // Écrire / mettre à jour la livraison courante
     // =========================================================
 
+    // Compatibilité — sans stopid/productid : PRÉSERVE ceux déjà enregistrés pour le même WO
+    // (CONFLICT_REPLACE écrase toute la ligne — sans ça, un save() STARTED ou
+    // un changement de transport effacerait les GUID reçus par le deep link).
     public void save(String woNum, String woIdGuid, String jobId,
                      String mac, int node, String serialId,
                      int produit, double preset, String status) {
+        String stopidExistant = "";
+        String productidExistant = "";
+        ActiveDelivery existant = load();
+        // Même WO seulement : jamais de GUID d'un autre bon de travail.
+        if (existant != null && woNum != null && woNum.equals(existant.woNum)) {
+            if (existant.stopid != null) stopidExistant = existant.stopid;
+            if (existant.productid != null) productidExistant = existant.productid;
+        }
+        save(woNum, woIdGuid, jobId, mac, node, serialId, produit, preset, status,
+             stopidExistant, productidExistant);
+    }
+
+    public void save(String woNum, String woIdGuid, String jobId,
+                     String mac, int node, String serialId,
+                     int produit, double preset, String status,
+                     String stopid, String productid) {
         try {
             SQLiteDatabase db = dbHelper.getWritableDatabase();
             ContentValues v = new ContentValues();
@@ -76,6 +99,8 @@ public class ActiveDeliveryStore {
             v.put("preset",        preset);
             v.put("status",        status     != null ? status     : "PENDING");
             v.put("ts_started_ms", System.currentTimeMillis());
+            v.put("stopid",        stopid     != null ? stopid     : "");
+            v.put("productid",     productid  != null ? productid  : "");
             db.insertWithOnConflict("active_delivery", null, v,
                     SQLiteDatabase.CONFLICT_REPLACE);
             Log.i(TAG, "save: woNum=" + woNum + " jobId=" + jobId + " status=" + status);
@@ -125,6 +150,11 @@ public class ActiveDeliveryStore {
                     d.preset      = c.getDouble(c.getColumnIndexOrThrow("preset"));
                     d.status      = c.getString(c.getColumnIndexOrThrow("status"));
                     d.tsStartedMs = c.getLong(c.getColumnIndexOrThrow("ts_started_ms"));
+                    // stopid / productid : lecture tolérante (colonnes ajoutées en v28)
+                    int iStopid = c.getColumnIndex("stopid");
+                    int iProductid = c.getColumnIndex("productid");
+                    d.stopid    = (iStopid >= 0 && !c.isNull(iStopid)) ? c.getString(iStopid) : "";
+                    d.productid = (iProductid >= 0 && !c.isNull(iProductid)) ? c.getString(iProductid) : "";
                     Log.i(TAG, "load: " + d);
                     return d;
                 }

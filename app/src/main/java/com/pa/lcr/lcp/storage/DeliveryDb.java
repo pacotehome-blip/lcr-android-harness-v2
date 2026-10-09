@@ -43,7 +43,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      chaque soir) + diagnostic_match_history (persiste chaque résultat de
     //      DiagnosticRuleEngine, jusqu'ici calculé à la volée et jamais stocké — nécessaire
     //      pour calibrer les règles / futur agent IA, demande Paul 31 juillet 2026).
-    public static final int DB_VERSION = 27;
+    public static final int DB_VERSION = 28;
 
     private static final String TAG = "DeliveryDb";
 
@@ -253,6 +253,14 @@ public class DeliveryDb extends SQLiteOpenHelper {
         // l'affichage diagnostic mais jamais conservé jusqu'ici.
         if (oldVersion < 27) {
             addColumnIfMissing(db, "registre", "firmware", "TEXT");
+        }
+        // v28 (9 oct 2026, demande Paul) — stopid / productid (GUID Field
+        // Service reçus par le deep link), transportés avec la livraison
+        // courante exactement comme wo_id_guid. Aucune logique ne dépend
+        // d'eux.
+        if (oldVersion < 28) {
+            addColumnIfMissing(db, "active_delivery", "stopid",    "TEXT");
+            addColumnIfMissing(db, "active_delivery", "productid", "TEXT");
         }
     }
 
@@ -765,7 +773,9 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "produit INTEGER," +
             "preset REAL," +
             "status TEXT," +
-            "ts_started_ms INTEGER" +
+            "ts_started_ms INTEGER," +
+            "stopid TEXT," +
+            "productid TEXT" +
             ");"
         );
     }

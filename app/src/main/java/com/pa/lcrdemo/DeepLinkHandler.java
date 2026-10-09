@@ -284,6 +284,12 @@ public class DeepLinkHandler {
             // connexion directe déterministe (pas de scan réseau nécessaire).
             String nportIp     = data.getQueryParameter("nportip");
             String nportPortStr = data.getQueryParameter("nportport");
+            // ✅ AJOUTÉ (9 oct 2026, demande Paul) — GUID Field Service du stop et du
+            // produit (stopid / productid). Simplement TRANSPORTÉS avec la livraison,
+            // exactement comme woid : aucune logique ne dépend d'eux, vides si absents.
+            // Lus ICI, après le verrou PENDING — un lien refusé n'écrase donc rien.
+            String stopId    = nettoyerGuidDeepLink(data.getQueryParameter("stopid"));
+            String productId = nettoyerGuidDeepLink(data.getQueryParameter("productid"));
 
             // ✅ Configurer l'environnement selon l'URL Dataverse reçue de FSM
             // Un seul APK pour DEV / QA / STAGING / PROD
@@ -306,6 +312,9 @@ public class DeepLinkHandler {
                 " serial=" + serialId + " node=" + lcrnode +
                 " nportIp=" + nportIp + " nportPort=" + nportPort +
                 " produit=" + produit + " preset=" + presetStr);
+            com.pa.lcr.lcp.log.LogBus.api(lcrnode != null ? lcrnode : 250,
+                "[DEEP-LINK] stopid=" + (stopId.isEmpty() ? "(vide)" : stopId)
+                + " productid=" + (productId.isEmpty() ? "(vide)" : productId));
 
             // ❌ RETIRÉ (2 sept 2026, demande Paul — "ben caliss pourquoi ton
             // correctif a eu un impact direct... j'entre pas sur filgo-registre")
@@ -347,7 +356,7 @@ public class DeepLinkHandler {
                     woNum, woIdGuid, "", // jobId vide — pas encore démarré
                     btMac != null ? btMac : "",
                     lcrnode != null ? lcrnode : 250,
-                    fSerialId, iProduit, dPreset, "PENDING");
+                    fSerialId, iProduit, dPreset, "PENDING", stopId, productId);
             } catch (Exception e) {
                 // ✅ FIX (4 août 2026, demande Paul) — si cette sauvegarde échoue,
                 // le flux "reprendre une livraison en attente" (RegisterTabFragment
@@ -1905,6 +1914,7 @@ public class DeepLinkHandler {
                         } catch (Exception e) {
                             android.util.Log.w(TAG, "Recherche produit (armement) ERR (non-bloquant): " + e.getMessage());
                         }
+                        String[] guidsArm = guidsLivraison(jobId, woNum, tabArmRef);
                         android.content.ContentValues cvArm =
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
                                 jobId, woNum, woIdGuid, ticketArm, ticketArm,
@@ -1913,7 +1923,8 @@ public class DeepLinkHandler {
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                                 "RUNNING_FLOWING",
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                                buildArmementPayloadExtra(tabArmRef, jobId, fProduct, fPresetD, node, descArm, codeArm, typeArm));
+                                buildArmementPayloadExtra(tabArmRef, jobId, fProduct, fPresetD, node, descArm, codeArm, typeArm),
+                                guidsArm[0], guidsArm[1]);
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "ARMEMENT");
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbArm =
                             new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
@@ -1932,7 +1943,8 @@ public class DeepLinkHandler {
                                 fProduct, descArm, codeArm, typeArm, fPresetD,
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                                "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}");
+                                "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}",
+                                guidsArm[0], guidsArm[1]);
                         com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                             activity.getApplicationContext(), woNum, jobId, backupPayloadArm);
                     } catch (Exception e) {
@@ -2511,6 +2523,7 @@ public class DeepLinkHandler {
                                     }
                                 }
                             } catch (Exception ignored) {}
+                            String[] guidsConnect = guidsLivraison(jobIdConnect, woNum, tabArmRef2ForFinally);
                             android.content.ContentValues cvConnect =
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
                                     jobIdConnect, woNum, fWoIdGuid, ticketArmConnect, ticketArmConnect,
@@ -2519,7 +2532,8 @@ public class DeepLinkHandler {
                                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                                     "RUNNING_FLOWING",
                                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                                    "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobIdConnect + "\"}");
+                                    "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobIdConnect + "\"}",
+                                    guidsConnect[0], guidsConnect[1]);
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbConnect =
                                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
                             try {
@@ -2534,7 +2548,8 @@ public class DeepLinkHandler {
                                     fProduct, descConnect, codeConnect, typeConnect, fPresetD,
                                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                                    "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobIdConnect + "\"}");
+                                    "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobIdConnect + "\"}",
+                                    guidsConnect[0], guidsConnect[1]);
                             com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                                 activity.getApplicationContext(), woNum, jobIdConnect, jsonConnect);
                             android.util.Log.i(TAG, "connectBtByMacAndOpenTab: livraison enregistrée dès l'armement — jobId=" + jobIdConnect);
@@ -3013,6 +3028,9 @@ public class DeepLinkHandler {
                                                     payloadStab.put("job_id", jobId);
                                                     payloadStab.put("wo_num", woNum != null ? woNum : "");
                                                     payloadStab.put("wo_id_guid", woIdGuid != null ? woIdGuid : "");
+                                                    String[] guidsStab = guidsLivraison(jobId, woNum, null);
+                                                    payloadStab.put("stopid", guidsStab[0]);
+                                                    payloadStab.put("productid", guidsStab[1]);
                                                     payloadStab.put("serial_id", serialId != null ? serialId : "");
                                                     payloadStab.put("lcrnode", node);
                                                     payloadStab.put("btmac", mac != null ? mac : "");
@@ -3609,6 +3627,9 @@ public class DeepLinkHandler {
     // COL_BTMAC jamais posé).
     public void onDeliveryEnded(String woNum, String woIdGuid, String extraJson,
                                  int nodeParam, String serialIdParam, String macParam) {
+        // ✅ AJOUTÉ (9 oct 2026, demande Paul) — stopid / productid de la livraison courante,
+        // lus AVANT clear() (le store est vidé juste en dessous) — repli pour la ligne finale.
+        final String[] guidsFinStore = guidsLivraison(null, woNum, null);
         // ✅ Effacer la livraison courante
         try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignored) {}
         android.util.Log.i(TAG,
@@ -3767,6 +3788,11 @@ public class DeepLinkHandler {
                 // cohérence — toujours écrit ici aussi maintenant.
                 String mac = macParam;
 
+                // ✅ AJOUTÉ (9 oct 2026, demande Paul) — stopid / productid : d'abord la ligne
+                // d'armement de CETTE livraison (même job_id), puis le store lu avant clear().
+                String[] guidsFin = guidsLivraison(d.optString("jobId", ""), woNum, null);
+                if (guidsFin[0].isEmpty()) guidsFin[0] = guidsFinStore[0];
+                if (guidsFin[1].isEmpty()) guidsFin[1] = guidsFinStore[1];
                 android.content.ContentValues cv =
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
                         d.optString("jobId", ""), woNum, woIdGuid, ticketNo, saleNo,
@@ -3775,7 +3801,7 @@ public class DeepLinkHandler {
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                         "LIVRAISON",
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                        extraJsonCorrige);
+                        extraJsonCorrige, guidsFin[0], guidsFin[1]);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,
                     woIdGuid != null ? woIdGuid.replace("{","").replace("}","") : "");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,  deltaNet);
@@ -3863,7 +3889,7 @@ public class DeepLinkHandler {
                             produitNo, produitDescriptionFin, produitCodeFin, produitTypeFin, presetL,
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                            extraJsonCorrige);
+                            extraJsonCorrige, guidsFin[0], guidsFin[1]);
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                         activity.getApplicationContext(), woNum, ticketNo, backupPayloadFin);
                     // ✅ AJOUTÉ (17 sept 2026, demande Paul) — le fichier
@@ -4660,6 +4686,60 @@ public class DeepLinkHandler {
         } catch (Exception e) {
             return "{\"error_code\":\"" + code + "\"}";
         }
+    }
+
+    // ✅ AJOUTÉ (9 oct 2026, demande Paul) — nettoie un GUID reçu par deep link : null → "",
+    // sans espaces ni accolades (même nettoyage que woid à l'écriture, voir onDeliveryEnded).
+    private static String nettoyerGuidDeepLink(String s) {
+        if (s == null) return "";
+        return s.trim().replace("{", "").replace("}", "");
+    }
+
+    // ✅ AJOUTÉ (9 oct 2026, demande Paul) — stopid / productid d'une livraison. Ne retient
+    // JAMAIS une valeur d'un autre WO, et ne remplace jamais une valeur non vide par du vide :
+    //   1) la ligne de CETTE livraison (job_id) si elle existe déjà,
+    //   2) la livraison courante (ActiveDeliveryStore) si c'est le même WO,
+    //   3) le tab (getCurrentStopId / getCurrentProductId, valides seulement pour son WO).
+    // Retourne toujours {stopid, productid}, jamais null, "" si inconnu. Lecture BD seulement :
+    // aucun appel au registre, jamais utilisé pendant le tick RUNNING_FLOWING.
+    private String[] guidsLivraison(String jobId, String woNum, RegisterTabFragment tab) {
+        String stop = "";
+        String prod = "";
+        if (jobId != null && !jobId.isEmpty()) {
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbG = null;
+            try {
+                dbG = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowG = dbG.getByJobId(jobId);
+                if (rowG != null) {
+                    if (rowG.stopid != null) stop = rowG.stopid;
+                    if (rowG.productid != null) prod = rowG.productid;
+                }
+            } catch (Exception e) {
+                android.util.Log.w(TAG, "guidsLivraison (ligne job) ERR (non-bloquant): " + e.getMessage());
+            } finally {
+                if (dbG != null) { try { dbG.close(); } catch (Exception ignored) {} }
+            }
+        }
+        if ((stop.isEmpty() || prod.isEmpty()) && woNum != null && !woNum.isEmpty()) {
+            try {
+                ActiveDeliveryStore.ActiveDelivery adG = new ActiveDeliveryStore(activity).load();
+                if (adG != null && woNum.equals(adG.woNum)) {
+                    if (stop.isEmpty() && adG.stopid != null) stop = adG.stopid;
+                    if (prod.isEmpty() && adG.productid != null) prod = adG.productid;
+                }
+            } catch (Exception e) {
+                android.util.Log.w(TAG, "guidsLivraison (store) ERR (non-bloquant): " + e.getMessage());
+            }
+        }
+        if (tab != null && (stop.isEmpty() || prod.isEmpty())) {
+            try {
+                if (stop.isEmpty()) stop = tab.getCurrentStopId();
+                if (prod.isEmpty()) prod = tab.getCurrentProductId();
+            } catch (Exception e) {
+                android.util.Log.w(TAG, "guidsLivraison (tab) ERR (non-bloquant): " + e.getMessage());
+            }
+        }
+        return new String[]{stop != null ? stop : "", prod != null ? prod : ""};
     }
 
     // ✅ AJOUTÉ (14 sept 2026, demande Paul — "on fait une sortie de

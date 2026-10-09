@@ -177,6 +177,8 @@ public class LcrDeliverySync {
                     jsonSynced.put("job_id",      row.jobId != null ? row.jobId : "");
                     jsonSynced.put("wo_num",      row.woNum != null ? row.woNum : "");
                     jsonSynced.put("wo_id_guid",  row.woIdGuid != null ? row.woIdGuid : "");
+                    jsonSynced.put("stopid",      row.stopid != null ? row.stopid : "");
+                    jsonSynced.put("productid",   row.productid != null ? row.productid : "");
                     jsonSynced.put("ticket_no",   row.ticketNo != null ? row.ticketNo : "");
                     jsonSynced.put("sale_no",     row.saleNo != null ? row.saleNo : "");
                     jsonSynced.put("net_l",       row.netL);
