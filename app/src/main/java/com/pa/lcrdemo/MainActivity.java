@@ -7184,9 +7184,12 @@ private boolean ensureBtConnectPermission() {
      *  - jamais de scan si livraison active ou ticket en attente sur le
      *    registre (le scan change le produit courant, champ #0) ;
      *  - le produit courant (#0) est TOUJOURS remis à sa valeur d'origine.
-     * Un refus du registre (rc=0xNN) sur #1 ou #94 compte comme "reçu,
-     * vide" (champ non applicable) ; tout autre échec (timeout, coupure,
-     * refus sur #0/#11) = slot non reçu.
+     * Un slot vide (description, code et type vides) est NORMAL : il est
+     * enregistré tel quel (vide / -1), jamais traité comme une erreur. Un
+     * refus du registre (rc=0xNN) sur #11, #1 ou #94 compte comme "reçu,
+     * vide" (champ non applicable) ; seuls une perte de communication
+     * (timeout, coupure) ou un refus sur #0 (sélection du slot) rendent
+     * le slot non reçu.
      *
      * @return ligne à ajouter au résultat de validation (commence par "\n")
      */
@@ -7249,10 +7252,20 @@ private boolean ensureBtConnectPermission() {
                         try {
                             lien.opSetField(0, new byte[]{(byte) idx});
                             try { Thread.sleep(80); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                            byte[] f11 = lien.opGetField(11, TO_MS);
-                            desc = (f11 != null && f11.length > 0)
-                                ? new String(f11, java.nio.charset.StandardCharsets.US_ASCII).replace("\0", "").trim()
-                                : "";
+                            // Un slot vide est NORMAL (pas une erreur) : le registre peut répondre
+                            // vide OU refuser le champ (rc=0xNN) → "reçu, vide". Seule une perte
+                            // de communication (timeout, coupure) rend le slot non reçu.
+                            desc = "";
+                            try {
+                                byte[] f11 = lien.opGetField(11, TO_MS);
+                                if (f11 != null && f11.length > 0)
+                                    desc = new String(f11, java.nio.charset.StandardCharsets.US_ASCII).replace("\0", "").trim();
+                            } catch (java.io.IOException e11) {
+                                if (e11 instanceof com.pa.lcr.lcp.LcpLink.TransportException
+                                        || e11.getMessage() == null || !e11.getMessage().contains(" rc=0x")) throw e11;
+                                com.pa.lcr.lcp.log.LogBus.api(node, TAG + " serial=" + serial + " slot=" + (idx + 1)
+                                    + " #11 refusé par le registre (" + e11.getMessage() + ") → compté vide");
+                            }
                             try {
                                 byte[] f1 = lien.opGetField(1, TO_MS);
                                 if (f1 != null && f1.length > 0)
