@@ -143,6 +143,73 @@ public class RegisterProductStore {
         }
     }
 
+    /**
+     * ✅ AJOUTÉ (9 oct 2026, demande Paul — "nous ayons la vérité du
+     * registre pour les produits") — écriture réservée à la VALIDATION
+     * manuelle (Configurer → Démarrer la validation). Contrairement à
+     * upsertAll() (scan du tab, inchangé) : ne remplace jamais une ligne
+     * (pas de CONFLICT_REPLACE — les colonnes ajoutées plus tard, comme
+     * le GUID Dataverse, ne seront jamais effacées) et ne repasse en
+     * PENDING QUE les slots dont une valeur a réellement changé.
+     * Reçoit TOUJOURS les 16 slots (vides inclus) — l'appelant ne l'appelle
+     * qu'après avoir reçu les 16, jamais sur un scan incomplet.
+     *
+     * @return nombre de slots créés ou modifiés (donc PENDING), -1 si erreur
+     */
+    public int upsertDepuisValidation(String serialId, int lcrNode,
+                                      List<LcpLink.ProductScanResult> results) {
+        if (serialId == null || serialId.isEmpty() || results == null) return -1;
+        SQLiteDatabase db = helper.getWritableDatabase();
+        int changes = 0;
+        db.beginTransaction();
+        try {
+            long now = System.currentTimeMillis();
+            for (LcpLink.ProductScanResult r : results) {
+                String code = r.productCode != null ? r.productCode : "";
+                String desc = r.description != null ? r.description : "";
+                Row existing = null;
+                try (Cursor c = db.query(TABLE, null,
+                        COL_SERIAL + "=? AND " + COL_NOTE_IDX + "=?",
+                        new String[]{serialId, String.valueOf(r.noteIdx)},
+                        null, null, null, "1")) {
+                    if (c != null && c.moveToFirst()) existing = map(c, serialId);
+                }
+                boolean changed = existing == null
+                    || !existing.description.equals(desc)
+                    || !existing.productCode.equals(code)
+                    || existing.productType != r.productType
+                    || existing.isPropane != r.isPropane
+                    || existing.lcrNode != lcrNode;
+                if (!changed) continue;
+                ContentValues cv = new ContentValues();
+                cv.put(COL_DESC,         desc);
+                cv.put(COL_LCR_NODE,     lcrNode);
+                cv.put(COL_IS_PROPANE,   r.isPropane ? 1 : 0);
+                cv.put(COL_UPDATED,      now);
+                cv.put(COL_SYNC_STATUS,  SYNC_PENDING);
+                cv.put(COL_PRODUCT_CODE, code);
+                cv.put(COL_PRODUCT_TYPE, r.productType);
+                if (existing == null) {
+                    cv.put(COL_SERIAL,   serialId);
+                    cv.put(COL_NOTE_IDX, r.noteIdx);
+                    db.insertOrThrow(TABLE, null, cv);
+                } else {
+                    db.update(TABLE, cv, COL_SERIAL + "=? AND " + COL_NOTE_IDX + "=?",
+                        new String[]{serialId, String.valueOf(r.noteIdx)});
+                }
+                changes++;
+            }
+            db.setTransactionSuccessful();
+            return changes;
+        } catch (Exception e) {
+            Log.e(TAG, "upsertDepuisValidation ERR: " + e.getMessage());
+            try { com.pa.lcr.lcp.log.LogBus.err(lcrNode, "RegisterProductStore.upsertDepuisValidation", e); } catch (Exception ignored) {}
+            return -1;
+        } finally {
+            db.endTransaction();
+        }
+    }
+
     // ── Lecture ───────────────────────────────────────────────
 
     /** Tous les produits filtrés par serial_id + lcr_node. */

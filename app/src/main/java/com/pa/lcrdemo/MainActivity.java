@@ -6534,7 +6534,7 @@ private boolean ensureBtConnectPermission() {
                 final String label = candidat[0];
                 final String candidatKey = candidat[1];
                 if (listener != null) runOnUiThread(() -> listener.onCandidatStart(label, candidatKey));
-                String resultat = validerUnCandidatLectureSeule(candidatKey);
+                String resultat = validerUnCandidatLectureSeule(candidatKey, true);
                 logMedia1("[VALIDATION-CANDIDATS] " + label + " → " + resultat.replace("\n", " | "));
                 final String finalResultat = resultat;
                 if (listener != null) runOnUiThread(() -> listener.onCandidatResult(label, candidatKey, finalResultat));
@@ -6702,7 +6702,7 @@ private boolean ensureBtConnectPermission() {
                 if (containerCliquables != null) {
                     runOnUiThread(() -> rowRef[0] = ajouterLigneCandidatCliquable(containerCliquables, label, candidatKey, "⏳ en cours..."));
                 }
-                String resultat = validerUnCandidatLectureSeule(candidatKey);
+                String resultat = validerUnCandidatLectureSeule(candidatKey, true);
                 final String finalResultat = resultat;
                 logMedia1("[VALIDATION-CANDIDATS] " + label + " → " + finalResultat.replace("\n", " | "));
                 // ✅ ÉLARGI (20 août 2026, demande Paul — "je veux être
@@ -6977,6 +6977,17 @@ private boolean ensureBtConnectPermission() {
     }
 
     private String validerUnCandidatLectureSeule(String candidatKey) {
+        return validerUnCandidatLectureSeule(candidatKey, false);
+    }
+
+    /**
+     * @param avecProduits true UNIQUEMENT pour la validation manuelle
+     *        (Configurer → Démarrer la validation) — ajoute le scan des 16
+     *        produits du registre trouvé. Les appelants automatiques
+     *        (ex. probeKnownTransportsForLostRegister) passent par
+     *        l'ancienne signature : jamais de scan produits sans demande.
+     */
+    private String validerUnCandidatLectureSeule(String candidatKey, boolean avecProduits) {
         long t0 = System.currentTimeMillis();
         if (candidatKey.equals("USB")) {
             // Réutilise le port déjà ouvert par l'app s'il existe — ne touche à
@@ -6995,12 +7006,14 @@ private boolean ensureBtConnectPermission() {
                     String fwUsb = null;
                     try { fwUsb = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
                     enregistrerRegistreDepuisValidation("USB", trouve.node, trouve.serial, fwUsb);
+                    // Scan produits AVANT la détection de débit (qui peut changer le baud du port).
+                    String ligneProduits = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
                     String detailBauds = "";
                     if (usbPort != null) {
                         java.util.List<String> lignesBaud = detecterBaudDetaille(usbPort, trouve.node);
                         detailBauds = "\n  Débits testés :\n" + String.join("\n", lignesBaud);
                     }
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "19200 (confirmé — port app)") + detailBauds;
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "19200 (confirmé — port app)") + ligneProduits + detailBauds;
                 }
                 // ✅ AJOUTÉ (20 août 2026, demande Paul — "ajouter dans la
                 // validation la détection du baud rate") — au lieu de
@@ -7069,7 +7082,8 @@ private boolean ensureBtConnectPermission() {
                     String fwBt = null;
                     try { fwBt = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
                     enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwBt);
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)");
+                    String ligneProduitsBt = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)") + ligneProduitsBt;
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés) — débit du pont BT à vérifier séparément (voir guide)";
             } catch (Exception e) {
@@ -7096,7 +7110,8 @@ private boolean ensureBtConnectPermission() {
                     String fwTcp = null;
                     try { fwTcp = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
                     enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwTcp);
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)");
+                    String ligneProduitsTcp = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)") + ligneProduitsTcp;
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés) — mauvais débit probable";
             } catch (Exception e) {
@@ -7153,6 +7168,178 @@ private boolean ensureBtConnectPermission() {
             }
         } catch (Exception e) {
             android.util.Log.w("MainActivity", "enregistrerRegistreDepuisValidation ERR (non-bloquant): " + e.getMessage());
+        }
+    }
+
+    /**
+     * ✅ AJOUTÉ (9 oct 2026, demande Paul — "nous ayons la vérité du
+     * registre pour les produits") — scan STRICT des 16 slots du registre
+     * qui vient d'être trouvé, appelé UNIQUEMENT par la validation manuelle
+     * (Configurer → Démarrer la validation, voir avecProduits). Règle :
+     *  - il faut recevoir les 16 slots ; sinon on reprend les slots
+     *    manquants, 3 tentatives au total ;
+     *  - toujours 16/16 → mise à jour de register_products (local) ;
+     *  - incomplet après 3 tentatives → RIEN n'est écrit pour ce registre
+     *    et l'erreur est loguée dans Support (LogBus.err) ;
+     *  - jamais de scan si livraison active ou ticket en attente sur le
+     *    registre (le scan change le produit courant, champ #0) ;
+     *  - le produit courant (#0) est TOUJOURS remis à sa valeur d'origine.
+     * Un refus du registre (rc=0xNN) sur #1 ou #94 compte comme "reçu,
+     * vide" (champ non applicable) ; tout autre échec (timeout, coupure,
+     * refus sur #0/#11) = slot non reçu.
+     *
+     * @return ligne à ajouter au résultat de validation (commence par "\n")
+     */
+    private String scannerProduitsPourValidation(com.pa.lcr.lcp.LcpLink lien, int node, String serial) {
+        final int NB_SLOTS = 16;
+        final int MAX_TENTATIVES = 3;
+        final int TO_MS = 5000;
+        final String TAG = "[VALIDATION-PRODUITS]";
+        try {
+            // 1. Garde registre : livraison active ou ticket en attente → pas de scan.
+            int[] ds = null;
+            Exception errStatut = null;
+            for (int t = 1; t <= MAX_TENTATIVES && ds == null; t++) {
+                try { ds = lien.opDeliveryStatus(TO_MS); } catch (Exception e) { errStatut = e; }
+            }
+            if (ds == null) {
+                com.pa.lcr.lcp.log.LogBus.err(node, "Validation.produits",
+                    new java.io.IOException("serial=" + serial + " — état livraison illisible après "
+                        + MAX_TENTATIVES + " tentatives, scan produits non fait: "
+                        + (errStatut != null ? errStatut.getMessage() : "?")));
+                return "\n  produits: ⚠ non scannés — état du registre illisible (voir log Support)";
+            }
+            if ((ds[1] & com.pa.lcr.lcp.LcpLink.DC_DELIVERY_ACTIVE) != 0
+                    || (ds[1] & com.pa.lcr.lcp.LcpLink.DC_TICKET_PENDING) != 0) {
+                com.pa.lcr.lcp.log.LogBus.api(node, TAG + " serial=" + serial
+                    + " — scan sauté (livraison active ou ticket en attente, delStatus=0x"
+                    + Integer.toHexString(ds[1]) + ")");
+                return "\n  produits: ⚠ non scannés — livraison active ou ticket en attente sur le registre";
+            }
+
+            // 2. Produit courant d'origine (à restaurer dans tous les cas).
+            int idxOrigine = -1;
+            Exception errOrigine = null;
+            for (int t = 1; t <= MAX_TENTATIVES && idxOrigine < 0; t++) {
+                try {
+                    byte[] cur = lien.opGetField(0, TO_MS);
+                    idxOrigine = (cur != null && cur.length > 0) ? (cur[0] & 0xFF) : 0;
+                } catch (Exception e) { errOrigine = e; }
+            }
+            if (idxOrigine < 0) {
+                com.pa.lcr.lcp.log.LogBus.err(node, "Validation.produits",
+                    new java.io.IOException("serial=" + serial + " — produit courant (#0) illisible après "
+                        + MAX_TENTATIVES + " tentatives, scan produits non fait: "
+                        + (errOrigine != null ? errOrigine.getMessage() : "?")));
+                return "\n  produits: ⚠ non scannés — produit courant illisible (voir log Support)";
+            }
+
+            // 3. Lecture des 16 slots, reprise des seuls slots manquants.
+            final com.pa.lcr.lcp.LcpLink.ProductScanResult[] recus =
+                new com.pa.lcr.lcp.LcpLink.ProductScanResult[NB_SLOTS];
+            final String[] derniereErreur = new String[NB_SLOTS];
+            boolean annule = false;
+            try {
+                for (int tentative = 1; tentative <= MAX_TENTATIVES && !annule; tentative++) {
+                    for (int idx = 0; idx < NB_SLOTS; idx++) {
+                        if (recus[idx] != null) continue;
+                        if (validationExterneAnnulee || candidatsAnnules) { annule = true; break; }
+                        String desc = null, code = "";
+                        int type = -1;
+                        try {
+                            lien.opSetField(0, new byte[]{(byte) idx});
+                            try { Thread.sleep(80); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                            byte[] f11 = lien.opGetField(11, TO_MS);
+                            desc = (f11 != null && f11.length > 0)
+                                ? new String(f11, java.nio.charset.StandardCharsets.US_ASCII).replace("\0", "").trim()
+                                : "";
+                            try {
+                                byte[] f1 = lien.opGetField(1, TO_MS);
+                                if (f1 != null && f1.length > 0)
+                                    code = new String(f1, java.nio.charset.StandardCharsets.US_ASCII).replace("\0", "").trim();
+                            } catch (java.io.IOException e1) {
+                                if (e1 instanceof com.pa.lcr.lcp.LcpLink.TransportException
+                                        || e1.getMessage() == null || !e1.getMessage().contains(" rc=0x")) throw e1;
+                                com.pa.lcr.lcp.log.LogBus.api(node, TAG + " serial=" + serial + " slot=" + (idx + 1)
+                                    + " #1 refusé par le registre (" + e1.getMessage() + ") → compté vide");
+                            }
+                            try {
+                                byte[] f94 = lien.opGetField(94, TO_MS);
+                                if (f94 != null && f94.length > 0) type = f94[0] & 0xFF;
+                            } catch (java.io.IOException e94) {
+                                if (e94 instanceof com.pa.lcr.lcp.LcpLink.TransportException
+                                        || e94.getMessage() == null || !e94.getMessage().contains(" rc=0x")) throw e94;
+                                com.pa.lcr.lcp.log.LogBus.api(node, TAG + " serial=" + serial + " slot=" + (idx + 1)
+                                    + " #94 refusé par le registre (" + e94.getMessage() + ") → compté absent");
+                            }
+                            recus[idx] = new com.pa.lcr.lcp.LcpLink.ProductScanResult(idx + 1, desc, code, type);
+                            derniereErreur[idx] = null;
+                            com.pa.lcr.lcp.log.LogBus.api(node, TAG + " serial=" + serial + " slot=" + (idx + 1)
+                                + " desc='" + desc + "' code='" + code + "' type=" + type
+                                + (tentative > 1 ? " (tentative " + tentative + ")" : ""));
+                        } catch (Exception e) {
+                            derniereErreur[idx] = e.getClass().getSimpleName() + ": " + e.getMessage();
+                            com.pa.lcr.lcp.log.LogBus.api(node, TAG + " serial=" + serial + " slot=" + (idx + 1)
+                                + " non reçu (tentative " + tentative + "/" + MAX_TENTATIVES + ") — " + derniereErreur[idx]);
+                        }
+                    }
+                    boolean tousRecus = true;
+                    for (int i = 0; i < NB_SLOTS; i++) if (recus[i] == null) { tousRecus = false; break; }
+                    if (tousRecus) break;
+                }
+            } finally {
+                // 4. Toujours remettre le produit courant d'origine (3 essais).
+                boolean restaure = false;
+                Exception errRestore = null;
+                for (int t = 1; t <= MAX_TENTATIVES && !restaure; t++) {
+                    try { lien.opSetField(0, new byte[]{(byte) idxOrigine}); restaure = true; }
+                    catch (Exception e) { errRestore = e; }
+                }
+                if (!restaure) {
+                    com.pa.lcr.lcp.log.LogBus.err(node, "Validation.produits",
+                        new java.io.IOException("serial=" + serial + " — IMPOSSIBLE de remettre le produit courant (#0) à "
+                            + idxOrigine + " après " + MAX_TENTATIVES + " tentatives: "
+                            + (errRestore != null ? errRestore.getMessage() : "?")));
+                }
+            }
+
+            if (annule) {
+                com.pa.lcr.lcp.log.LogBus.api(node, TAG + " serial=" + serial + " — annulé par l'utilisateur, rien enregistré");
+                return "\n  produits: ⛔ scan annulé — rien enregistré";
+            }
+
+            // 5. Verdict : 16/16 → on enregistre ; sinon rien + erreur Support.
+            java.util.List<com.pa.lcr.lcp.LcpLink.ProductScanResult> liste = new java.util.ArrayList<>();
+            StringBuilder manquants = new StringBuilder();
+            for (int i = 0; i < NB_SLOTS; i++) {
+                if (recus[i] != null) { liste.add(recus[i]); continue; }
+                if (manquants.length() > 0) manquants.append("; ");
+                manquants.append("slot ").append(i + 1).append(" (").append(derniereErreur[i]).append(")");
+            }
+            if (manquants.length() > 0) {
+                com.pa.lcr.lcp.log.LogBus.err(node, "Validation.produits",
+                    new java.io.IOException("serial=" + serial + " — produits INCOMPLETS (" + liste.size()
+                        + "/" + NB_SLOTS + ") après " + MAX_TENTATIVES + " tentatives, rien enregistré: " + manquants));
+                return "\n  produits: ⚠ incomplets (" + liste.size() + "/" + NB_SLOTS
+                    + " reçus) — rien enregistré (voir log Support)";
+            }
+            com.pa.lcr.lcp.storage.RegisterProductStore store =
+                new com.pa.lcr.lcp.storage.RegisterProductStore(getApplicationContext());
+            int modifies;
+            try { modifies = store.upsertDepuisValidation(serial, node, liste); }
+            finally { store.close(); }
+            if (modifies < 0) {
+                return "\n  produits: ⚠ 16/16 reçus mais enregistrement local en échec (voir log Support)";
+            }
+            int nonVides = 0;
+            for (com.pa.lcr.lcp.LcpLink.ProductScanResult r : liste)
+                if (!r.description.isEmpty() || !r.productCode.isEmpty()) nonVides++;
+            com.pa.lcr.lcp.log.LogBus.api(node, TAG + " serial=" + serial + " — 16/16 reçus, " + nonVides
+                + " non vide(s), " + modifies + " créé(s)/modifié(s)");
+            return "\n  produits: ✅ 16/16 reçus — " + nonVides + " non vide(s), " + modifies + " créé(s)/modifié(s)";
+        } catch (Exception e) {
+            try { com.pa.lcr.lcp.log.LogBus.err(node, "Validation.produits", e); } catch (Exception ignored) {}
+            return "\n  produits: ⚠ erreur inattendue (voir log Support)";
         }
     }
 
