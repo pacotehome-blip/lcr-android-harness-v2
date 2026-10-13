@@ -7374,6 +7374,33 @@ public class RegisterTabFragment extends Fragment {
                     }
                 } catch (Exception ignored) {}
 
+                // ✅ AJOUTÉ (13 oct 2026, demande Paul — "ce n'est pas le 308
+                // car il était là avant") — trouvé avec les fichiers réels : les
+                // replis ci-dessus (tickSnapshot / lastKnownTicketNo) ont rendu 308,
+                // le ticket de la livraison PRÉCÉDENTE (déjà terminée et synchronisée),
+                // alors que l'armement de CETTE livraison avait enregistré 309. Le
+                // ticket de la ligne d'armement (ancre par job_id) fait foi pour
+                // l'annulation de ce job; les replis restent pour le cas sans ligne.
+                if (!jobIdAnnul.isEmpty()) {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbTicketArm = null;
+                    try {
+                        dbTicketArm = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowTicketArm =
+                            dbTicketArm.getByJobId(jobIdAnnul);
+                        if (rowTicketArm != null && rowTicketArm.ticketNo != null
+                                && !rowTicketArm.ticketNo.trim().isEmpty()
+                                && !rowTicketArm.ticketNo.trim().equals(ticketNo)) {
+                            android.util.Log.w("Annuler", "ticket de l'annulation corrigé: \"" + ticketNo
+                                + "\" (repli registre/tick) → \"" + rowTicketArm.ticketNo.trim() + "\" (ligne d'armement job_id=" + jobIdAnnul + ")");
+                            ticketNo = rowTicketArm.ticketNo.trim();
+                        }
+                    } catch (Exception eTicketArm) {
+                        android.util.Log.w("Annuler", "Lecture ticket armement ERR (non-bloquant): " + eTicketArm.getMessage());
+                    } finally {
+                        if (dbTicketArm != null) { try { dbTicketArm.close(); } catch (Exception ignored) {} }
+                    }
+                }
+
                 // 6. Logger TYPE_ANNULATION dans SQLite avec le ticket UID
                 try {
                     // ✅ CORRIGÉ (28 août 2026, demande Paul — "sur une bd
@@ -7504,7 +7531,16 @@ public class RegisterTabFragment extends Fragment {
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbAnnuler =
                         new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                     try {
-                        dbAnnuler.insertDelivery(cv);
+                        // ✅ CORRIGÉ (13 oct 2026, demande Paul — "juste un fichier") —
+                        // avec un job_id connu, la ligne d'armement de CE job devient
+                        // l'annulation (même patron que l'armement et la fin de livraison)
+                        // au lieu d'une 2e ligne: sinon l'armement restait PENDING et
+                        // partait à Dataverse comme livraison fantôme (vide, ORIGINAL).
+                        if (!jobIdAnnul.isEmpty()) {
+                            dbAnnuler.upsertByJobId(cv);
+                        } else {
+                            dbAnnuler.insertDelivery(cv);
+                        }
                     } finally {
                         try { dbAnnuler.close(); } catch (Exception ignored) {}
                     }
