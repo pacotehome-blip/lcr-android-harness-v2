@@ -502,6 +502,35 @@ public class DeepLinkHandler {
                             + "cette livraison cible BT, connexion TCP ignorée");
                     }
 
+                    // ✅ ESSAI (13 oct 2026, demande Paul — "ça marche avec 0000
+                    // automatiquement") — si cette livraison cible un BT (btmac
+                    // fourni), s'assurer AVANT toute résolution que ce registre est
+                    // appairé à la tablette. api_registerConnectAuto() (étape BT →
+                    // api_btActivate()) ne parcourt que les appareils déjà appairés :
+                    // sans ça, un registre jamais appairé n'est jamais essayé.
+                    // MAC déjà appairée → aucun effet (chemin actuel inchangé).
+                    // Échec → NON bloquant pendant l'essai : trace [APPAIRAGE] +
+                    // message, puis le flux continue exactement comme avant.
+                    if (btIsTarget) {
+                        try {
+                            BtAutoPairing.Resultat rPair = BtAutoPairing.assurerAppairage(
+                                activity, fBtMac, fNode,
+                                () -> activity.runOnUiThread(
+                                    () -> activity.toast("🔗 Appairage du registre...")));
+                            if (!rPair.ok) {
+                                final String fRaisonPair = rPair.raison;
+                                logError(fSerialId, woNum, "BT_PAIRING", fRaisonPair);
+                                activity.runOnUiThread(() -> activity.toast(
+                                    "⚠️ Appairage du registre impossible — " + fRaisonPair));
+                            } else if (!rPair.dejaAppaire) {
+                                activity.runOnUiThread(() -> activity.toast("✅ Registre appairé"));
+                            }
+                        } catch (Exception ePair) {
+                            try { com.pa.lcr.lcp.log.LogBus.err(fNode, "DeepLinkHandler.appairage", ePair); }
+                            catch (Exception ignored) {}
+                        }
+                    }
+
                     com.pa.lcr.lcp.DeliveryController dc =
                         rsm.resolveOrCreateForNode(fNode, 255);
 
