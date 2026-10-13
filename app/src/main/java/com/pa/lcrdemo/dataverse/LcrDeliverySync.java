@@ -190,7 +190,11 @@ public class LcrDeliverySync {
                     jsonSynced.put("backup_ts",   System.currentTimeMillis());
                     jsonSynced.put("payload_complet", row.payloadJson != null ? row.payloadJson : "{}");
                     jsonSynced.put("sync_status", com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_SYNCED);
-                    String ticketPourNomFichier = (row.ticketNo != null && !row.ticketNo.trim().isEmpty())
+                    // ✅ AJOUTÉ (13 oct 2026) — une ligne ORPHELINE porte le ticket d'une
+                    // AUTRE livraison réelle (numéro de vente avant RUN) : la nommer par
+                    // ticket écraserait le fichier JSON de cette vraie livraison. Nommée par jobId.
+                    String ticketPourNomFichier = (!LcrDeliveryStatusDb.STOP_TYPE_ORPHELIN.equals(row.stopType)
+                        && row.ticketNo != null && !row.ticketNo.trim().isEmpty())
                         ? row.ticketNo : row.jobId;
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                         ctx, row.woNum, ticketPourNomFichier, jsonSynced);
@@ -748,7 +752,17 @@ public class LcrDeliverySync {
         // Identification
         putStr(j, "filgo_wo_num",          row.woNum);
         // ✅ Champ primaire requis par Dataverse
-        putStr(j, "filgo_name",            row.woNum + "-" + (row.ticketNo != null ? row.ticketNo : row.id));
+        // ✅ AJOUTÉ (13 oct 2026, demande Paul) — ligne ORPHELINE : son ticket est celui
+        // d'une AUTRE livraison réelle (numéro de vente avant RUN) ; avec le même
+        // filgo_name, pushDeliveryRow() la prendrait pour un doublon et sauterait le
+        // POST. Nom distinct, déterministe (wo + jobId) ; l'indication d'orphelin est
+        // dans filgo_payload_json ("orphelin": true).
+        if (LcrDeliveryStatusDb.STOP_TYPE_ORPHELIN.equals(row.stopType)) {
+            String jid = row.jobId != null ? row.jobId : String.valueOf(row.id);
+            putStr(j, "filgo_name",        row.woNum + "-ORPH-" + (jid.length() > 8 ? jid.substring(0, 8) : jid));
+        } else {
+            putStr(j, "filgo_name",            row.woNum + "-" + (row.ticketNo != null ? row.ticketNo : row.id));
+        }
         putStr(j, "filgo_wo_id_guid",      row.woIdGuid);
         // GUID Field Service transportés en silence (colonnes texte Dataverse)
         putStr(j, "filgo_stopid",          row.stopid);
@@ -763,7 +777,9 @@ public class LcrDeliverySync {
         putStr(j, "filgo_btmac",            row.btmac);
 
         // Type transaction
-        putStr(j, "filgo_stop_type",        row.stopType);
+        // ORPHELIN est une valeur LOCALE : Dataverse reçoit une valeur qu'il connaît déjà.
+        putStr(j, "filgo_stop_type",        LcrDeliveryStatusDb.STOP_TYPE_ORPHELIN.equals(row.stopType)
+                                                ? LcrDeliveryStatusDb.STOP_TYPE_LIVRAISON : row.stopType);
         putStr(j, "filgo_type",             row.type);
         putStr(j, "filgo_source",           row.source);
         putStr(j, "filgo_ticket_no_ref",    row.ticketNoRef);

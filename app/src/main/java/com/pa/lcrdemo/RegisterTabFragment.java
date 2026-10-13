@@ -195,6 +195,26 @@ public class RegisterTabFragment extends Fragment {
                 new com.pa.lcr.lcp.storage.ActiveDeliveryStore(ctx);
             com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery ad = ads.load();
 
+            // ✅ AJOUTÉ (13 oct 2026, demande Paul) — un job "STARTED" qui est en fait une
+            // ligne orpheline (remplacée par une livraison plus récente de ce registre)
+            // ne doit plus déclencher de reprise ni détourner un nouveau deep link :
+            // marquée ORPHELIN (voir LcrDeliveryStatusDb.marquerOrphelines), puis
+            // ActiveDeliveryStore relu (vidé si c'était ce job).
+            if (ad != null && "STARTED".equals(ad.status) && ad.jobId != null && !ad.jobId.isEmpty()
+                    && serialFromArgs != null && !serialFromArgs.isEmpty()) {
+                try {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbOrphAd =
+                        new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(ctx);
+                    try {
+                        if (dbOrphAd.marquerOrphelines(ctx, serialFromArgs) > 0) ad = ads.load();
+                    } finally {
+                        try { dbOrphAd.close(); } catch (Exception ignored) {}
+                    }
+                } catch (Exception eOrphAd) {
+                    android.util.Log.w("RegisterTabFragment", "marquerOrphelines (ActiveDelivery STARTED) ERR (non-bloquant): " + eOrphAd.getMessage());
+                }
+            }
+
             // ✅ Filet de sécurité — capturer le contexte WO stable dès qu'on le voit,
             // et rafraîchir le panneau cumulatif. Ceci doit tourner MÊME si le
             // controller est CONNECTED (l'état normal une fois le registre lié) —

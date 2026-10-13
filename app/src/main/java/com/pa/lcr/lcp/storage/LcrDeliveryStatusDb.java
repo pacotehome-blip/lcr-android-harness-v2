@@ -153,6 +153,15 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     public static final String STOP_TYPE_CHARGEMENT = "CHARGEMENT";
     public static final String STOP_TYPE_LIVRAISON  = "LIVRAISON";
     public static final String STOP_TYPE_TRANSFERT  = "TRANSFERT";
+    // ✅ AJOUTÉ (13 oct 2026, demande Paul — "dans le cas d'une situation
+    // orphelin avec un deeplink... tu la marques comme orphelin et sur
+    // dataverse on l'indique comme orphelin" / "je le mettrais dans le
+    // payload json") — valeur LOCALE seulement : une ligne RUNNING_FLOWING
+    // jamais suivie, remplacée par une livraison plus récente du même
+    // registre. Poussée vers Dataverse sous stop_type="LIVRAISON" (valeur
+    // déjà connue de Dataverse) ; l'indication d'orphelin est dans le
+    // payload JSON ("orphelin": true). Voir marquerOrphelines().
+    public static final String STOP_TYPE_ORPHELIN   = "ORPHELIN";
 
     // Valeurs type
     public static final String TYPE_ORIGINAL    = "ORIGINAL";
@@ -182,8 +191,11 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     // =========================================================
     // Constructeur
     // =========================================================
+    private final Context appContext;
+
     public LcrDeliveryStatusDb(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
+        this.appContext = context != null ? context.getApplicationContext() : null;
     }
 
     @Override
@@ -714,6 +726,15 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     // (STOP_TYPE="LIVRAISON") ou d'une annulation (STOP_TYPE="ANNULATION")
     // — ne cherche QUE les lignes jamais arrivées à terme.
     public DeliveryRow getRunningFlowingSafetyNet(String woNum, String serialId) {
+        // ✅ AJOUTÉ (13 oct 2026, demande Paul) — point d'entrée commun de
+        // toutes les reprises (MainActivity.upsertRegisterTabFromScan,
+        // [FINALISATION-ORPHELINE], [RECUP-RUNNING], [FILET-CONNECTED]) :
+        // avant de renvoyer une ligne "non résolue", écarte celles qu'une
+        // livraison plus récente du même registre a remplacées (orphelines)
+        // pour qu'elles ne détournent plus un nouveau deep link.
+        if (serialId != null && !serialId.isEmpty()) {
+            try { marquerOrphelines(appContext, serialId); } catch (Exception ignoredOrph) {}
+        }
         String where; String[] args;
         if (woNum != null && !woNum.isEmpty()) {
             where = COL_WO_NUM + "=? AND " + COL_STOP_TYPE + "=?";
@@ -917,6 +938,137 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             produitNo, produitDescription, produitCode, produitType, presetL, payloadExtra));
         j.put("sync_status", syncStatus != null ? syncStatus : SYNC_PENDING);
         return j;
+    }
+
+    // ✅ AJOUTÉ (13 oct 2026, demande Paul — "dans le cas d'une situation
+    // orphelin avec un deeplink le plus simple est que tu la marques comme
+    // orphelin et sur dataverse on l'indique comme orphelin" / "je le
+    // mettrais dans le payload json"). Confirmé par la BD du 13 oct 17:20 :
+    // le repli connectBtByMacAndOpenTab écrivait une ligne RUNNING_FLOWING
+    // sous un jobId aléatoire (ticket 338 = numéro de vente AVANT le RUN)
+    // alors que le suivi tournait sous un AUTRE jobId (ticket 339) — la
+    // première ligne ne se finalisait jamais, puis détournait les deep
+    // links suivants. Une ligne RUNNING_FLOWING est déclarée orpheline
+    // seulement si, pour le MÊME registre (#série) et le MÊME bon de
+    // travail, une ligne d'un AUTRE job_id, créée APRÈS elle, porte un
+    // numéro de ticket numériquement SUPÉRIEUR. (Le numéro de ticket sert
+    // de garde : des lignes restaurées depuis Dataverse sur une BD neuve
+    // ont un ts_created récent mais jamais un ticket supérieur.) Ticket
+    // vide/non numérique = on ne touche à rien (reprise après crash
+    // préservée).
+    // Effet : stop_type=ORPHELIN, sync_status=PENDING (poussée vers
+    // Dataverse), payload JSON enrichi ("orphelin", "orphelin_raison",
+    // "orphelin_ts", "orphelin_remplace_par"), copie JSON locale réécrite
+    // sans "RUNNING_FLOWING" (sinon retrouvée comme filet de sécurité),
+    // et ActiveDeliveryStore vidé s'il pointait ce job. Retourne le
+    // nombre de lignes marquées.
+    public int marquerOrphelines(Context ctx, String serialId) {
+        if (serialId == null || serialId.isEmpty()) return 0;
+        int marquees = 0;
+        List<DeliveryRow> toutes = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, null,
+                COL_SERIAL_ID + "=?", new String[]{serialId},
+                null, null, COL_TS_CREATED_MS + " ASC")) {
+            while (c.moveToNext()) toutes.add(DeliveryRow.fromCursor(c));
+        } catch (Exception e) {
+            Log.e(TAG, "marquerOrphelines lecture ERR: " + e.getMessage());
+            return 0;
+        }
+        for (DeliveryRow r : toutes) {
+            if (!"RUNNING_FLOWING".equals(r.stopType)) continue;
+            if (r.jobId == null || r.jobId.isEmpty()) continue;
+            long tRef;
+            try { tRef = Long.parseLong(r.ticketNo == null ? "" : r.ticketNo.trim()); }
+            catch (NumberFormatException nfe) { continue; }
+            DeliveryRow remplacante = null;
+            for (DeliveryRow s : toutes) {
+                if (s == r) continue;
+                if (s.jobId != null && s.jobId.equals(r.jobId)) continue;
+                if (estOrphelin(s)) continue;
+                if (s.woNum == null || !s.woNum.equals(r.woNum)) continue;
+                if (s.tsCreatedMs <= r.tsCreatedMs) continue;
+                long tS;
+                try { tS = Long.parseLong(s.ticketNo == null ? "" : s.ticketNo.trim()); }
+                catch (NumberFormatException nfe) { continue; }
+                if (tS > tRef) { remplacante = s; break; }
+            }
+            if (remplacante == null) continue;
+
+            try {
+                org.json.JSONObject pj;
+                try { pj = new org.json.JSONObject(r.payloadJson != null && !r.payloadJson.isEmpty() ? r.payloadJson : "{}"); }
+                catch (Exception ePj) { pj = new org.json.JSONObject(); }
+                String raison = "Armement jamais suivi (jobId different du suivi reel) — remplace par jobId="
+                    + remplacante.jobId + " ticket=" + remplacante.ticketNo;
+                pj.put("orphelin", true);
+                pj.put("orphelin_raison", raison);
+                pj.put("orphelin_ts", System.currentTimeMillis());
+                pj.put("orphelin_remplace_par", remplacante.jobId);
+                pj.put("orphelin_ticket_armement", r.ticketNo);
+                // Plus jamais retrouvée comme "filet de sécurité" (recherche par texte)
+                String pjStr = pj.toString().replace("RUNNING_FLOWING", "ORPHELIN");
+
+                ContentValues cv = new ContentValues();
+                cv.put(COL_STOP_TYPE, STOP_TYPE_ORPHELIN);
+                cv.put(COL_SYNC_STATUS, SYNC_PENDING);
+                cv.put(COL_PAYLOAD_JSON, pjStr);
+                cv.put(COL_TS_UPDATED_MS, System.currentTimeMillis());
+                int n = getWritableDatabase().update(
+                    TABLE_DELIVERY, cv, COL_JOB_ID + "=?", new String[]{r.jobId});
+                if (n <= 0) continue;
+                if (r.woNum != null) ALL_FOR_WO_CACHE.remove(r.woNum);
+                marquees++;
+                Log.w(TAG, "marquerOrphelines: jobId=" + r.jobId + " ticket=" + r.ticketNo + " → ORPHELIN");
+                try { com.pa.lcr.lcp.log.LogBus.api(r.lcrnode, "[ORPHELIN] ligne RUNNING_FLOWING jamais suivie marquée orpheline — jobId="
+                    + r.jobId + " ticket=" + r.ticketNo + " wo=" + r.woNum + " — " + raison); } catch (Exception ignoredLb) {}
+
+                // Copie JSON locale (nommée par jobId à l'armement) réécrite sans RUNNING_FLOWING
+                if (ctx != null) {
+                    try {
+                        org.json.JSONObject jf = new org.json.JSONObject();
+                        jf.put("job_id", r.jobId);
+                        jf.put("wo_num", r.woNum != null ? r.woNum : "");
+                        jf.put("wo_id_guid", r.woIdGuid != null ? r.woIdGuid : "");
+                        jf.put("stopid", r.stopid != null ? r.stopid : "");
+                        jf.put("productid", r.productid != null ? r.productid : "");
+                        jf.put("ticket_no", r.ticketNo != null ? r.ticketNo : "");
+                        jf.put("sale_no", r.saleNo != null ? r.saleNo : "");
+                        jf.put("net_l", r.netL);
+                        jf.put("gross_l", r.grossL);
+                        jf.put("serial_id", r.serialId != null ? r.serialId : "");
+                        jf.put("lcrnode", r.lcrnode);
+                        jf.put("btmac", r.btmac != null ? r.btmac : "");
+                        jf.put("type", r.type != null ? r.type : TYPE_ORIGINAL);
+                        jf.put("backup_ts", System.currentTimeMillis());
+                        jf.put("payload_complet", pjStr);
+                        jf.put("sync_status", SYNC_PENDING);
+                        LocalDeliveryBackup.backupDeliveryAsync(ctx, r.woNum, r.jobId, jf);
+                    } catch (Exception eJf) {
+                        Log.w(TAG, "marquerOrphelines: copie JSON ERR (non-bloquant): " + eJf.getMessage());
+                    }
+                    // ActiveDeliveryStore : ne plus pointer ce job
+                    try {
+                        ActiveDeliveryStore ads = new ActiveDeliveryStore(ctx);
+                        ActiveDeliveryStore.ActiveDelivery ad = ads.load();
+                        if (ad != null && r.jobId.equals(ad.jobId)) {
+                            ads.clear();
+                            try { com.pa.lcr.lcp.log.LogBus.api(r.lcrnode, "[ORPHELIN] ActiveDeliveryStore vidé — jobId=" + r.jobId); } catch (Exception ignoredLb2) {}
+                        }
+                    } catch (Exception eAds) {
+                        Log.w(TAG, "marquerOrphelines: ActiveDeliveryStore ERR (non-bloquant): " + eAds.getMessage());
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "marquerOrphelines ERR jobId=" + r.jobId + ": " + e.getMessage());
+            }
+        }
+        return marquees;
+    }
+
+    // Une ligne déjà orpheline ne peut pas "remplacer" une autre.
+    private static boolean estOrphelin(DeliveryRow s) {
+        return STOP_TYPE_ORPHELIN.equals(s.stopType);
     }
 
     public long upsertByJobId(ContentValues cv) {

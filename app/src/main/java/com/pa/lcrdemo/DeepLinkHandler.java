@@ -2514,7 +2514,20 @@ public class DeepLinkHandler {
                         // Même patron exact, job_id généré ici puisque ce
                         // chemin n'en avait jamais eu.
                         try {
-                            String jobIdConnect = java.util.UUID.randomUUID().toString();
+                            // ✅ CORRIGÉ (13 oct 2026, demande Paul — "qu'il y ait qu'un
+                            // processus"). Confirmé par la BD du 13 oct 17:20 : cette ligne
+                            // portait un jobId ALÉATOIRE (26b934a6, ticket 338) alors que
+                            // api_deliveryOneShotStart() venait de créer SON jobId (9c2f26e1,
+                            // celui du vrai suivi, ticket 339) — la ligne d'ici ne se
+                            // finalisait jamais (orpheline) et détournait les deep links
+                            // suivants. Un seul jobId maintenant : celui de l'armement ; et
+                            // aucune ligne si l'armement a échoué (rien n'est armé).
+                            String jobIdConnect = (r.code == 1 && r.data != null)
+                                ? r.data.optString("jobId", "") : "";
+                            if (jobIdConnect == null || jobIdConnect.isEmpty()) {
+                                throw new IllegalStateException("armement non réussi (code=" + r.code
+                                    + ") — aucune ligne RUNNING_FLOWING écrite");
+                            }
                             String ticketArmConnect = "";
                             try {
                                 com.pa.lcr.lcp.DeliveryController controllerConnect =
