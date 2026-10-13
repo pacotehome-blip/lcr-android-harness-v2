@@ -114,6 +114,10 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
 
+    // Persistance de LogBus: un seul listener par processus (voir onCreate()).
+    private static com.pa.lcr.lcp.storage.LogBusStore logBusPersistStore;
+    private static LogBus.Listener logBusPersistListener;
+
     public static final String ACTION_USB_PERMISSION = "com.pa.lcrdemo.USB_PERMISSION";
 
     
@@ -796,10 +800,23 @@ public class MainActivity extends AppCompatActivity {
         // buffer 100% en mémoire, jamais persisté, invisible pour le RCA après coup. Ce
         // listener écrit chaque événement (UI/API/IO_TX/IO_RX) dans log_bus_event de façon
         // async, sans jamais ralentir l'émission LogBus elle-même.
-        final com.pa.lcr.lcp.storage.LogBusStore logBusStore =
-                new com.pa.lcr.lcp.storage.LogBusStore(getApplicationContext());
-        LogBus.addListener(event -> logBusStore.addEventAsync(
-                event.node, event.src != null ? event.src.name() : "", event.msg));
+        // ✅ CORRIGÉ (13 oct 2026, demande Paul — "j'ai en moyenne trois inscriptions
+        // avec la même date et heure") — confirmé par le log Support: 1 copie de chaque
+        // événement avant la première relance, 2 après la deuxième, 3 après la troisième.
+        // Cause: LogBus est statique (survit aux recréations de l'activité dans le même
+        // processus) alors que ce listener était recréé à CHAQUE onCreate() sans jamais
+        // être retiré — N onCreate() = N listeners = N insertions du même événement dans
+        // log_bus_event. Maintenant: UN SEUL listener de persistance pour tout le
+        // processus (store basé sur l'Application, aucune fuite d'Activity).
+        synchronized (MainActivity.class) {
+            if (logBusPersistListener == null) {
+                logBusPersistStore = new com.pa.lcr.lcp.storage.LogBusStore(getApplicationContext());
+                final com.pa.lcr.lcp.storage.LogBusStore storeUnique = logBusPersistStore;
+                logBusPersistListener = event -> storeUnique.addEventAsync(
+                        event.node, event.src != null ? event.src.name() : "", event.msg);
+                LogBus.addListener(logBusPersistListener);
+            }
+        }
 
         // ✅ MSAL — init + login au premier démarrage de l'APK
         // Après ce premier login le token est en cache → silent pour toutes les livraisons
