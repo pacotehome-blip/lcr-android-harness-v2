@@ -5417,7 +5417,7 @@ public class RegisterTabFragment extends Fragment {
         // sans exception, tant qu'un armement est en cours.
         if (armementEnCoursParCetteSession) {
             if (btnRetourWO != null) btnRetourWO.setVisibility(android.view.View.GONE);
-            LogBus.api(node, "[BTN-RETOUR-WO] caché — armement en cours (" + armementEnCoursSource + ")");
+            LogBus.apiUntilChanged(node, "BTN-RETOUR-WO.arme", "[BTN-RETOUR-WO] caché — armement en cours (" + armementEnCoursSource + ")");
             if (doneSignal != null) doneSignal.countDown();
             return;
         }
@@ -5632,7 +5632,7 @@ public class RegisterTabFragment extends Fragment {
                         // obligatoire est en cours.
                         boolean hasJobId = row != null && row.jobId != null && !row.jobId.trim().isEmpty();
                         hasData = row != null && (hasTicket || isAnnulation || hasJobId);
-                        LogBus.api(node, "[BTN-RETOUR-WO] woCheck=" + woCheck + " connectedFinal=" + connectedFinal
+                        LogBus.apiUntilChanged(node, "BTN-RETOUR-WO.woCheck", "[BTN-RETOUR-WO] woCheck=" + woCheck + " connectedFinal=" + connectedFinal
                                 + " row=" + (row != null) + " row.ticketNo=" + (row != null ? row.ticketNo : "n/a")
                                 + " row.type=" + (row != null ? row.type : "n/a")
                                 + " isAnnulation=" + isAnnulation + " hasTicket=" + hasTicket
@@ -5643,11 +5643,11 @@ public class RegisterTabFragment extends Fragment {
                         if (db != null) { try { db.close(); } catch (Exception ignored) {} }
                     }
                 } else {
-                    LogBus.api(node, "[BTN-RETOUR-WO] woCheck vide/null — currentWoNum=" + woForCheck
+                    LogBus.apiUntilChanged(node, "BTN-RETOUR-WO.woVide", "[BTN-RETOUR-WO] woCheck vide/null — currentWoNum=" + woForCheck
                             + " serialFromArgs=" + serialForFallback + " — aucune vérification possible, bouton restera caché");
                 }
                 final boolean show = connectedFinal && hasData;
-                LogBus.api(node, "[BTN-RETOUR-WO] décision finale — show=" + show
+                LogBus.apiUntilChanged(node, "BTN-RETOUR-WO.decision", "show=" + show + "|" + connectedFinal + "|" + hasData, "[BTN-RETOUR-WO] décision finale — show=" + show
                         + " (connectedFinal=" + connectedFinal + " hasData=" + hasData
                         + " monNumeroSeq=" + monNumeroSeq + " dernierNumeroSeq=" + updateButtonsSeq.get() + ")");
                 ui.post(() -> {
@@ -5660,7 +5660,7 @@ public class RegisterTabFragment extends Fragment {
                     // jamais laisser un résultat périmé écraser un résultat
                     // plus récent.
                     if (monNumeroSeq != updateButtonsSeq.get()) {
-                        LogBus.api(node, "[BTN-RETOUR-WO] résultat périmé ignoré (monNumeroSeq=" + monNumeroSeq
+                        LogBus.apiUntilChanged(node, "BTN-RETOUR-WO.perime", "perime", "[BTN-RETOUR-WO] résultat périmé ignoré (monNumeroSeq=" + monNumeroSeq
                                 + " != dernierNumeroSeq=" + updateButtonsSeq.get() + ")");
                         if (doneSignal != null) doneSignal.countDown();
                         return;
@@ -5683,7 +5683,7 @@ public class RegisterTabFragment extends Fragment {
                         // jamais à une valeur capturée plus tôt pendant la
                         // recherche BD en arrière-plan.
                         btnRetourWO.setVisibility(android.view.View.GONE);
-                        LogBus.api(node, "[BTN-RETOUR-WO] caché — état réel plus CONNECTED au moment d'afficher (probablement RUNNING_FLOWING)");
+                        LogBus.apiUntilChanged(node, "BTN-RETOUR-WO.etatReel", "[BTN-RETOUR-WO] caché — état réel plus CONNECTED au moment d'afficher (probablement RUNNING_FLOWING)");
                         if (doneSignal != null) doneSignal.countDown();
                         return;
                     }
@@ -8452,7 +8452,7 @@ public class RegisterTabFragment extends Fragment {
         // de la relance de la correspondance produit car actuellement ça
         // ne marche pas") — trace complète, à chaque étape, pas juste au
         // déclenchement initial.
-        LogBus.api(node, "[PRODUIT-CACHE] applierDescriptionsProduits() appelée — serial=" + serialId
+        LogBus.apiUntilChanged(node, "PRODUIT-CACHE.applier", "[PRODUIT-CACHE] applierDescriptionsProduits() appelée — serial=" + serialId
                 + " node=" + lcrNode + " ticketConnu=" + lastKnownTicketNo);
         safeBg(() -> {
             try {
@@ -8602,7 +8602,7 @@ public class RegisterTabFragment extends Fragment {
                     boolean curEstDejaResolu = !cur.trim().isEmpty() && !cur.trim().matches("\\d+");
                     spnProduct.setAdapter(new android.widget.ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, labels));
                     if (curEstDejaResolu) {
-                        LogBus.api(node, "[PRODUIT-CACHE] valeur déjà résolue préservée sans changement: \"" + cur + "\" — "
+                        LogBus.apiUntilChanged(node, "PRODUIT-CACHE.preserve", "[PRODUIT-CACHE] valeur déjà résolue préservée sans changement: \"" + cur + "\" — "
                                 + "correspondance trouvée (idxASelectionner=" + idxASelectionner + ") NON appliquée pour cette raison");
                         spnProduct.setText(cur, false);
                     } else if (idxASelectionner > 0 && idxASelectionner <= 16) {
@@ -8831,7 +8831,7 @@ public class RegisterTabFragment extends Fragment {
     // ✅ Afficher le cumul WO à droite du live — lecture depuis LcrDeliveryStatusDb
     private void rafraichirCumulWo() {
         if (currentWoNum == null || currentWoNum.isEmpty()) {
-            LogBus.api(node, "[CUMUL-WO] appelée mais currentWoNum vide — skip");
+            LogBus.apiUntilChanged(node, "CUMUL-WO.vide", "[CUMUL-WO] appelée mais currentWoNum vide — skip");
             // Ne pas cacher le panel — il doit toujours etre visible
             return;
         }
@@ -8863,7 +8863,7 @@ public class RegisterTabFragment extends Fragment {
         if (nowCumul - lastCumulWoRefreshMs < 2000) return;
         lastCumulWoRefreshMs = nowCumul;
         final String wo = currentWoNum;
-        LogBus.api(node, "[CUMUL-WO] recherche pour wo=" + wo);
+        LogBus.apiUntilChanged(node, "CUMUL-WO.recherche", "[CUMUL-WO] recherche pour wo=" + wo);
         safeBg(() -> {
             double totalNet = 0, totalGross = 0;
             int count = 0;
@@ -8876,7 +8876,7 @@ public class RegisterTabFragment extends Fragment {
                 } finally {
                     try { db.close(); } catch (Exception ignored) {}
                 }
-                LogBus.api(node, "[CUMUL-WO] getAllForWo(" + wo + ") a retourné " + rows.size() + " ligne(s)");
+                LogBus.apiUntilChanged(node, "CUMUL-WO.retour", "[CUMUL-WO] getAllForWo(" + wo + ") a retourné " + rows.size() + " ligne(s)");
                 for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
                     if (!"ANNULATION".equals(r.type) && r.netL > 0) {
                         totalNet   += r.netL;

@@ -3415,7 +3415,7 @@ softResync("retry/" + step);
                     // seule façon d'être certain quelle source a vraiment été
                     // utilisée. LogBus.api() ajouté, sans retirer le log
                     // existant.
-                    try { com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(), "[TICKET-SOURCE] Field #23 (ticket_number)=0 "
+                    try { com.pa.lcr.lcp.log.LogBus.apiUntilChanged(resolveLcpNode(), "TICKET-SOURCE", "[TICKET-SOURCE] Field #23 (ticket_number)=0 "
                             + "— repli sur SaleNumber #22=" + saleNo + " (la valeur finale utilisée EST le sale_number, "
                             + "pas le vrai ticket_number)"); } catch (Exception ignored) {}
                     android.util.Log.i("DeliveryController", "readTicketNo23: champ #23=0 "

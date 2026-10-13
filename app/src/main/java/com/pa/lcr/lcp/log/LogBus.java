@@ -99,6 +99,54 @@ public final class LogBus {
         emit(node, Src.API, msg);
     }
 
+    // ✅ AJOUTÉ (13 oct 2026, demande Paul — "les logs dans support sont répétés à
+    // plusieurs reprises, il faut simplifier cela sans rien briser") — réalise la
+    // note ci-dessus. Pour les messages émis par un sondage qui se répète à
+    // l'identique (ex: [TICKET-SOURCE] ~260 fois pour 4 valeurs différentes dans
+    // un log réel). Opt-in, appelant par appelant: emit() et api() restent
+    // inchangés, donc aucun autre message n'est affecté.
+    //   key    = identifie le point d'émission (ex: "TICKET-SOURCE")
+    //   stable = partie du message qui définit « le même état » (sans compteurs
+    //            qui changent à chaque appel); le message complet, lui, est émis
+    //            tel quel quand il est émis.
+    // Émet si stable a changé, OU si plus de REPEAT_REEMIT_MS se sont écoulés
+    // depuis la dernière émission (un état qui dure reste visible de temps en
+    // temps). Quand des appels ont été supprimés, le message émis ensuite porte
+    // « (précédent répété Nx) » — la fréquence n'est jamais perdue.
+    private static final long REPEAT_REEMIT_MS = 60_000L;
+    private static final HashMap<String, String> LAST_STABLE = new HashMap<>();
+    private static final HashMap<String, Long> LAST_EMIT_MS = new HashMap<>();
+    private static final HashMap<String, Integer> SUPPRESSED = new HashMap<>();
+
+    public static void apiUntilChanged(int node, String key, String stable, String msg) {
+        if (msg == null) return;
+        String k = node + "|" + (key != null ? key : "");
+        String st = (stable != null) ? stable : msg;
+        String out = msg;
+        synchronized (LogBus.class) {
+            long now = System.currentTimeMillis();
+            String last = LAST_STABLE.get(k);
+            Long lastMs = LAST_EMIT_MS.get(k);
+            boolean same = st.equals(last);
+            boolean fresh = lastMs != null && (now - lastMs) < REPEAT_REEMIT_MS;
+            if (same && fresh) {
+                Integer n = SUPPRESSED.get(k);
+                SUPPRESSED.put(k, (n == null ? 0 : n) + 1);
+                return;
+            }
+            Integer n = SUPPRESSED.remove(k);
+            if (n != null && n > 0) out = msg + " (précédent répété " + n + "x)";
+            LAST_STABLE.put(k, st);
+            LAST_EMIT_MS.put(k, now);
+        }
+        emit(node, Src.API, out);
+    }
+
+    /** Variante simple: le message complet fait foi pour détecter un changement. */
+    public static void apiUntilChanged(int node, String key, String msg) {
+        apiUntilChanged(node, key, msg, msg);
+    }
+
     public static void ioTx(int node, String msg) {
         emit(node, Src.IO_TX, msg);
     }
