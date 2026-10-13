@@ -852,8 +852,39 @@ public class MainActivity extends AppCompatActivity {
         // propre code, sans aucune intervention réelle de FieldService.
         // Consomme l'Intent ici, une fois traité, pour qu'une future
         // recréation ne le rejoue jamais.
-        deepLinkHandler.handleDeepLink(getIntent());
+        if (!intentRejoueDepuisHistorique(getIntent(), "onCreate")) {
+            deepLinkHandler.handleDeepLink(getIntent());
+        }
         setIntent(new android.content.Intent());
+    }
+
+    // ✅ AJOUTÉ (13 oct 2026, demande Paul — "si j'entre dans l'apk sans passer
+    // par le deeplink pcf, j'ai une nouvelle livraison qui démarre sans l'avoir
+    // demandée") — confirmé par log réel: un deep link (avec stopid/productid)
+    // arrive à handleDeepLink() au simple retour dans l'APK depuis Field Service
+    // (après RETOUR_WO), sans qu'aucun nouveau deep link ne parte du PCF.
+    // Quand l'utilisateur revient via les applications récentes, Android relance
+    // l'activité avec l'Intent D'ORIGINE de la tâche (le dernier deep link) et
+    // pose FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY — l'effacement de l'Intent déjà en
+    // place (2 sept) ne couvre pas ce cas, car il n'agit que dans l'instance en
+    // cours. Un vrai deep link envoyé par Field Service n'a jamais ce flag.
+    // Ne touche à rien d'autre: ping/livraison réels passent comme avant.
+    private boolean intentRejoueDepuisHistorique(android.content.Intent in, String origine) {
+        try {
+            if (in == null || in.getData() == null) return false;
+            int flags = in.getFlags();
+            if ((flags & android.content.Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) {
+                String msg = "[DEEP-LINK] ignoré — intent rejoué depuis l'historique (" + origine
+                    + ", flags=0x" + Integer.toHexString(flags) + ") — aucune livraison armée";
+                android.util.Log.w("MainActivity", msg + " data=" + in.getData());
+                try { com.pa.lcr.lcp.log.LogBus.api(0, msg); } catch (Exception ignored) {}
+                return true;
+            }
+            android.util.Log.i("MainActivity", "deep link reçu (" + origine + ", flags=0x" + Integer.toHexString(flags) + ")");
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "intentRejoueDepuisHistorique ERR (non-bloquant): " + e.getMessage());
+        }
+        return false;
     }
 
     @Override
@@ -1034,7 +1065,9 @@ public class MainActivity extends AppCompatActivity {
     protected void onNewIntent(android.content.Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (deepLinkHandler != null) deepLinkHandler.handleDeepLink(intent);
+        if (deepLinkHandler != null && !intentRejoueDepuisHistorique(intent, "onNewIntent")) {
+            deepLinkHandler.handleDeepLink(intent);
+        }
         // ✅ AJOUTÉ (2 sept 2026, demande Paul — "tu as un affaire qui
         // hijack l'apk") — même correctif que onCreate() : consomme
         // l'Intent une fois traité, pour qu'une recréation ultérieure
