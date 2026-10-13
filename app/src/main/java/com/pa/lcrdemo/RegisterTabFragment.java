@@ -7221,6 +7221,12 @@ public class RegisterTabFragment extends Fragment {
         if (btnRetourWO != null) btnRetourWO.setEnabled(false);
         // ✅ Poser le flag AVANT bg.execute — évite race avec onStateChanged(ENDED)
         cancelInProgress = true;
+        // ✅ AJOUTÉ (13 oct 2026, demande Paul — annulation = mêmes informations
+        // qu'une livraison complète) — job_id capturé AVANT forceEndSync(), qui
+        // peut réinitialiser le job courant du contrôleur.
+        String jobIdAnnulTmp = "";
+        try { String j0 = c.getLastActiveJobId(); if (j0 != null) jobIdAnnulTmp = j0.trim(); } catch (Exception ignoredJobAnnul) {}
+        final String jobIdAnnul = jobIdAnnulTmp;
         safeBg(() -> {
             try {
                 // 1. Terminer la livraison ET confirmer via lecture réelle du registre
@@ -7429,7 +7435,57 @@ public class RegisterTabFragment extends Fragment {
                     // D'ABORD, puis utilisé comme base pour la fonction
                     // partagée — même patron que partout ailleurs
                     // aujourd'hui.
+                    // ✅ AJOUTÉ (13 oct 2026, demande Paul — "il faut la même
+                    // information que la livraison complète") — base = payload de
+                    // la ligne d'armement (RUNNING_FLOWING) retrouvée par job_id
+                    // (lecture BD seulement, aucun appel au registre), puis
+                    // complété avec delivery_uid / ticket_no / sale_no. Repli sur
+                    // le payload minimal d'avant si aucune ligne n'est trouvée.
                     org.json.JSONObject payload = new org.json.JSONObject();
+                    // stopid/productid (GUID Field Service): valeurs du tab, avec repli
+                    // sur celles de la ligne d'armement si le tab les a perdues.
+                    String stopIdAnnul = getCurrentStopId();
+                    String productIdAnnul = getCurrentProductId();
+                    if (!jobIdAnnul.isEmpty()) {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbArmAnnul = null;
+                        try {
+                            dbArmAnnul = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowArmAnnul =
+                                dbArmAnnul.getByJobId(jobIdAnnul);
+                            if (rowArmAnnul != null && rowArmAnnul.payloadJson != null
+                                    && !rowArmAnnul.payloadJson.trim().isEmpty()) {
+                                payload = new org.json.JSONObject(rowArmAnnul.payloadJson);
+                            }
+                            if (rowArmAnnul != null) {
+                                if ((stopIdAnnul == null || stopIdAnnul.isEmpty()) && rowArmAnnul.stopid != null)
+                                    stopIdAnnul = rowArmAnnul.stopid;
+                                if ((productIdAnnul == null || productIdAnnul.isEmpty()) && rowArmAnnul.productid != null)
+                                    productIdAnnul = rowArmAnnul.productid;
+                            }
+                            if (rowArmAnnul == null || rowArmAnnul.payloadJson == null
+                                    || rowArmAnnul.payloadJson.trim().isEmpty()) {
+                                android.util.Log.w("Annuler", "Aucune ligne d'armement pour job_id=" + jobIdAnnul + " — payload minimal");
+                            }
+                        } catch (Exception eArmAnnul) {
+                            payload = new org.json.JSONObject();
+                            android.util.Log.w("Annuler", "Lecture armement (annulation) ERR (non-bloquant): " + eArmAnnul.getMessage());
+                        } finally {
+                            if (dbArmAnnul != null) { try { dbArmAnnul.close(); } catch (Exception ignored) {} }
+                        }
+                        payload.put("job_id", jobIdAnnul);
+                    } else {
+                        android.util.Log.w("Annuler", "job_id introuvable pour l'annulation — payload minimal, job_id non écrit");
+                    }
+                    payload.put("status",          "CANCELLED");
+                    if (!woNum.isEmpty() && !ticketNo.isEmpty()) {
+                        payload.put("delivery_uid", woNum + "-" + ticketNo);
+                    } else {
+                        android.util.Log.w("Annuler", "delivery_uid non généré (wo=\"" + woNum + "\" ticket=\"" + ticketNo + "\")");
+                    }
+                    if (!ticketNo.isEmpty()) {
+                        payload.put("ticket_no", ticketNo);
+                        payload.put("sale_no",   ticketNo);
+                    }
                     payload.put("cancelled",       true);
                     payload.put("cancel_reason",   "operator_cancel");
                     payload.put("net_at_cancel",   netAtCancel);
@@ -7437,13 +7493,13 @@ public class RegisterTabFragment extends Fragment {
                     payload.put("cancel_ts",       System.currentTimeMillis());
                     android.content.ContentValues cv =
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
-                            null, woNum, woIdGuid, ticketNo, ticketNo,
+                            jobIdAnnul, woNum, woIdGuid, ticketNo, ticketNo,
                             0.0, 0.0, serialFromArgs, node, macAnnul,
                             produitAnnul, descAnnul, codeAnnul, typeProduitAnnul, presetAnnul,
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION,
                             "ANNULATION",
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                            payload.toString(), getCurrentStopId(), getCurrentProductId());
+                            payload.toString(), stopIdAnnul, productIdAnnul);
                     cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "OPERATEUR");
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbAnnuler =
                         new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
@@ -7587,12 +7643,12 @@ public class RegisterTabFragment extends Fragment {
                     try {
                         org.json.JSONObject backupPayloadAnnul =
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireJsonLivraisonComplet(
-                                null, woNum, woIdGuid, ticketNo, ticketNo,
+                                jobIdAnnul, woNum, woIdGuid, ticketNo, ticketNo,
                                 0.0, 0.0, serialFromArgs, node, macAnnul,
                                 produitAnnul, descAnnul, codeAnnul, typeProduitAnnul, presetAnnul,
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ANNULATION,
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                                payload.toString(), getCurrentStopId(), getCurrentProductId());
+                                payload.toString(), stopIdAnnul, productIdAnnul);
                         com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                             requireContext().getApplicationContext(), woNum, ticketNo, backupPayloadAnnul);
                     } catch (Exception e) {
