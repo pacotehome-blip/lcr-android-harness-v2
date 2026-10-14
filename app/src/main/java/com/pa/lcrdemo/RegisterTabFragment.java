@@ -798,7 +798,15 @@ public class RegisterTabFragment extends Fragment {
     // même chose — les 7 étapes de l'init, pas seulement le produit
     // isolément.
     public boolean isPeutDemarrerLivraison() {
-        return peutDemarrerLivraison();
+        // ✅ CORRIGÉ (14 oct 2026, demande Paul) — pour un VRAI deep link
+        // (woIdGuid connu), l'armement exige en plus : cycle d'init terminé,
+        // et étape PRODUIT conclue POUR CE woIdGuid. Ne change pas
+        // peutDemarrerLivraison() (bouton local New C inchangé).
+        if (initSequenceRunning.get()) return false;
+        if (!peutDemarrerLivraison()) return false;
+        String guid = currentWoIdGuid;
+        if (guid != null && !guid.isEmpty() && !guid.equals(produitSectionWoGuid)) return false;
+        return true;
     }
 
     private void signalerFinScanProduit(java.util.concurrent.CountDownLatch doneSignal) {
@@ -813,6 +821,18 @@ public class RegisterTabFragment extends Fragment {
     // registre. Vérifié par peutDemarrerLivraison() pour bloquer NEW dans
     // ce cas précis, avec une vraie raison affichée.
     private volatile String produitDeepLinkIntrouvableRaison = null;
+    // ✅ AJOUTÉ (14 oct 2026, demande Paul — "il faut vraiment que le produit
+    // soit validé avant l'armement") — woIdGuid pour lequel l'étape PRODUIT
+    // (2/7) a réellement CONCLU (produit trouvé, ou introuvable avec
+    // produitDeepLinkIntrouvableRaison posée). produitVerificationTerminee
+    // seul ne suffit pas : il peut venir de la livraison précédente.
+    private volatile String produitSectionWoGuid = null;
+    // woIdGuid pour lequel un cycle d'init a déjà été relancé parce que le deep
+    // link est arrivé après l'étape PRODUIT d'un cycle déjà en vol (une seule
+    // relance par woIdGuid, jamais de boucle).
+    private volatile String relanceInitPourGuid = null;
+    // vrai seulement si le cycle d'init en cours (ou le dernier) est arrivé à l'étape PRODUIT
+    private volatile boolean produitSectionAtteinte = false;
     // ✅ CORRIGÉ (25 sept 2026, demande Paul) — même raison que
     // initValidatedProductIdx juste au-dessus.
     public volatile Double initValidatedPresetL = null;
@@ -1590,6 +1610,7 @@ public class RegisterTabFragment extends Fragment {
             LogBus.api(node, "[INIT-TIMING] avant bg.execute() — t=0ms");
             bg.execute(() -> {
           LogBus.api(node, "[INIT-TIMING] tâche démarrée réellement — +" + (System.currentTimeMillis() - initStartMs) + "ms");
+          produitSectionAtteinte = false;
           try {
             // 1) REGISTRE — connecté, accessible. Dépendance : rien après ne
             // doit avancer si ça échoue (pas de allowDegraded).
@@ -1676,6 +1697,18 @@ public class RegisterTabFragment extends Fragment {
             // échouer transitoirement avant de réussir).
             final boolean[] produitDeepLinkDemandeMaisIntrouvable = {false};
             final String produitDeepLinkPourAnnulation = (getArguments() != null) ? getArguments().getString("produit") : null;
+            // ✅ AJOUTÉ (14 oct 2026, demande Paul) — pour un vrai deep link
+            // avec produit précis attendu : repartir à zéro. Avant, la
+            // valeur de la livraison PRÉCÉDENTE (initValidatedProductIdx) et
+            // une ancienne raison de mismatch survivaient, masquant un
+            // produit non retrouvé cette fois-ci (armement sur un produit
+            // périmé) ou bloquant à tort.
+            final String guidDebutProduit = currentWoIdGuid;
+            if (guidDebutProduit != null && !guidDebutProduit.isEmpty()
+                    && produitDeepLinkPourAnnulation != null && !produitDeepLinkPourAnnulation.trim().isEmpty()) {
+                initValidatedProductIdx = null;
+                produitDeepLinkIntrouvableRaison = null;
+            }
             runSectionWithRetry(InitSection.PRODUIT, 2, true, () -> {
                 // ✅ CORRIGÉ (28 août 2026, demande Paul — "chaque point
                 // doit donner sa confirmation avant de passer au
@@ -1771,6 +1804,12 @@ public class RegisterTabFragment extends Fragment {
                         + "\") introuvable dans la liste des produits déjà scannés du registre";
                 LogBus.api(node, "[PRODUIT] ANNULATION — " + produitDeepLinkIntrouvableRaison);
             }
+            // Étape PRODUIT conclue pour le woIdGuid courant au DÉBUT de la section.
+            produitSectionWoGuid = (guidDebutProduit != null) ? guidDebutProduit : "";
+            produitSectionAtteinte = true;
+            LogBus.api(node, "[PRODUIT] validation conclue pour woIdGuid=" + produitSectionWoGuid
+                    + " produitIdx=" + initValidatedProductIdx
+                    + (produitDeepLinkIntrouvableRaison != null ? " (introuvable)" : ""));
             if (etatLivraisonActiveDetecte("runInitSequence (après PRODUIT)")) return;
 
             // ✅ AJOUTÉ (27 août 2026, demande Paul — "il devrait y en avoir
@@ -1988,6 +2027,25 @@ public class RegisterTabFragment extends Fragment {
             LogBus.api(node, "[INIT-TIMING] finally atteint — flag remis à false — +"
                 + (System.currentTimeMillis() - initStartMs) + "ms depuis le démarrage");
             initSequenceRunning.set(false);
+            // ✅ AJOUTÉ (14 oct 2026, demande Paul) — le deep link (woIdGuid)
+            // est arrivé APRÈS le début de l'étape PRODUIT de ce cycle (prefill
+            // a sauté la revalidation parce que le cycle était en vol) : le
+            // produit n'a donc pas été validé pour CE deep link. Un seul
+            // nouveau cycle par woIdGuid, jamais de boucle.
+            try {
+                String g = currentWoIdGuid;
+                if (g != null && !g.isEmpty() && produitSectionAtteinte
+                        && !g.equals(produitSectionWoGuid) && !g.equals(relanceInitPourGuid)) {
+                    relanceInitPourGuid = g;
+                    produitDejaResoluPourCetteSession = false;
+                    produitVerificationTerminee = false;
+                    LogBus.api(node, "[PRODUIT] relance du cycle d'init — le deep link (woIdGuid=" + g
+                            + ") est arrivé après l'étape PRODUIT du cycle précédent");
+                    runInitSequence();
+                }
+            } catch (Exception eRelance) {
+                LogBus.api(node, "[PRODUIT] relance ERR (non-bloquant): " + eRelance.getMessage());
+            }
           }
             });
         } catch (java.util.concurrent.RejectedExecutionException e) {

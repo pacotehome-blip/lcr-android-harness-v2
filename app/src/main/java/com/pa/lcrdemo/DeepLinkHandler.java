@@ -1565,15 +1565,12 @@ public class DeepLinkHandler {
                     // pour couvrir ce cas de reconnexion à froid légitime,
                     // sans affaiblir le refus lui-même contre un registre
                     // réellement en panne.
-                    for (int waitProduit = 0; waitProduit < 200; waitProduit++) {
-                        if (tabArmRef.isPeutDemarrerLivraison()) { produitValideAvantArmement = true; break; }
-                        try { Thread.sleep(100); } catch (Exception ignored) {}
-                    }
+                    produitValideAvantArmement = attendreInitApprouvee(tabArmRef);
                 }
             } catch (Exception ignored) {}
 
             if (!produitValideAvantArmement) {
-                android.util.Log.w(TAG, "lancerLivraison: REFUS armement — initialisation (7 étapes) jamais approuvée après 20s");
+                android.util.Log.w(TAG, "lancerLivraison: REFUS armement — initialisation (7 étapes) jamais approuvée après 30s");
                 logError(serialId, woNum, "INIT_NON_APPROUVEE", "Initialisation jamais complétée avant armement (registre/produit/preset/live/retour_wo) — livraison refusée par sécurité");
                 retournerFieldService(woNum, woIdGuid, "erreur_init_non_approuvee",
                     buildErrorJson("INIT_NON_APPROUVEE", "L'initialisation n'a pas pu se compléter avant l'armement — livraison refusée par sécurité. Réessayez, ou vérifiez le registre."));
@@ -1587,58 +1584,7 @@ public class DeepLinkHandler {
             // (startNewDeliveryC()), jamais répliquée ici — annulation
             // franche, pas un défaut silencieux sur un produit différent
             // de celui attendu par FieldService.
-            if (tabArmRef != null) {
-                String raisonMismatch = tabArmRef.getProduitDeepLinkIntrouvableRaison();
-                if (raisonMismatch != null && !raisonMismatch.isEmpty()) {
-                    android.util.Log.w(TAG, "lancerLivraison: REFUS armement — mismatch produit: " + raisonMismatch);
-                    logError(serialId, woNum, "PRODUIT_MISMATCH", raisonMismatch);
-                    // ✅ CORRIGÉ (14 sept 2026, demande Paul — bug trouvé
-                    // via diff complet, confirmé par un vrai enregistrement
-                    // Dataverse qui marchait à 14:18 et plus après) —
-                    // retournerFieldService() était le SEUL endroit qui
-                    // nettoie le verrou ActiveDeliveryStore (PENDING). En
-                    // le retirant plus bas sans le remplacer, ce verrou ne
-                    // se nettoyait plus JAMAIS ici — bloquant tout deep
-                    // link suivant, même pour un WO complètement
-                    // différent. Nettoyé directement, sans réintroduire
-                    // retournerFieldService()/finish().
-                    try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredClearProduit) {}
-                    // ✅ CORRIGÉ (14 sept 2026, demande Paul — "on veut
-                    // laisser le livreur faire le changement dans produit
-                    // ou preset pour ensuite lancer la livraison bouton
-                    // vert avec les changements") — trouvé : le correctif
-                    // précédent affichait bien le dialogue, mais appelait
-                    // ensuite retournerFieldService() → finish() —
-                    // renvoyant le chauffeur à FieldService SANS lui
-                    // laisser la chance de corriger sur place. Ne renvoie
-                    // plus à FieldService ici : affiche le dialogue
-                    // (informatif, rien à décider), puis RESTE dans le
-                    // tab — spnProduct (liste déroulante des vrais
-                    // produits scannés sur le registre) et edtPreset
-                    // restent éditables, btnC (🚀 Lancer la livraison)
-                    // reste disponible pour que le chauffeur corrige et
-                    // relance lui-même via startNewDeliveryC(), qui
-                    // revalide déjà produit et preset à partir de l'écran.
-                    final java.util.concurrent.CountDownLatch produitMismatchLatch =
-                        new java.util.concurrent.CountDownLatch(1);
-                    final String fRaisonMismatch = raisonMismatch;
-                    activity.runOnUiThread(() -> {
-                        try {
-                            new android.app.AlertDialog.Builder(activity)
-                                .setTitle("Produit non trouvé sur le registre")
-                                .setMessage(fRaisonMismatch + "\n\nCorrigez le produit ou le preset à l'écran, puis appuyez sur \"Lancer la livraison\".")
-                                .setPositiveButton("OK", (d, w) -> produitMismatchLatch.countDown())
-                                .setCancelable(false)
-                                .show();
-                        } catch (Exception eDialogProduit) {
-                            android.util.Log.w(TAG, "[PRODUIT-MISMATCH] dialogue ERR (non-bloquant): " + eDialogProduit.getMessage());
-                            produitMismatchLatch.countDown();
-                        }
-                    });
-                    try { produitMismatchLatch.await(); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                    return;
-                }
-            }
+            if (produitMismatchBloque(tabArmRef, serialId, woNum)) return;
 
             // ✅ CORRIGÉ (2 sept 2026, demande Paul — "je dirais même que le
             // running_flowing ne devrait jamais démarrer si j'ai pas le
@@ -2455,6 +2401,9 @@ public class DeepLinkHandler {
                         android.util.Log.i(TAG, "connectBt: attente scan auto produits — "
                             + (scanTermine ? "terminé" : "timeout 10s, poursuite quand même"));
                     } catch (Exception ignored) {}
+
+                    // Porte d'armement (14 oct 2026) : init 7 étapes + produit validé AVANT d'armer.
+                    if (porteArmementRepli(fTransportKey, node, serialId, woNum, woIdGuid) == null) return;
 
                     try {
                         // ✅ CORRIGÉ (2 sept 2026, demande Paul) — même
@@ -4158,6 +4107,107 @@ public class DeepLinkHandler {
                                         String woIdGuid, String serialId, String mac) {
         pollJobUntilDone(jobId, node, woNum, woIdGuid, serialId, mac);
     }
+
+    // ✅ AJOUTÉ (14 oct 2026, demande Paul — "il faut vraiment que le produit
+    // soit validé avant l'armement") — PORTE UNIQUE, partagée par le chemin
+    // normal (lancerLivraison) et le repli (connectBtByMacAndOpenTab). Le log
+    // du 14 oct 11:10 montrait le repli armant à 11:10:44.759, AVANT
+    // [INIT 1/7] (11:10:45.4) et [INIT 2/7] PRODUIT (11:10:51.3) : il n'avait
+    // aucune porte. Sort dès que l'init est approuvée pour CE deep link
+    // (RegisterTabFragment.isPeutDemarrerLivraison()) ; 30 s maximum.
+    private boolean attendreInitApprouvee(RegisterTabFragment tab) {
+        if (tab == null) return false;
+        for (int waitProduit = 0; waitProduit < 300; waitProduit++) {
+            if (tab.isPeutDemarrerLivraison()) return true;
+            try { Thread.sleep(100); } catch (Exception ignored) {}
+        }
+        return false;
+    }
+
+    /** true = livraison annulée pour produit introuvable (dialogue affiché, le
+     *  chauffeur reste dans le tab) ; l'appelant doit alors NE PAS armer. */
+    private boolean produitMismatchBloque(RegisterTabFragment tabArmRef, String serialId, String woNum) {
+        if (tabArmRef == null) return false;
+
+                String raisonMismatch = tabArmRef.getProduitDeepLinkIntrouvableRaison();
+                if (raisonMismatch != null && !raisonMismatch.isEmpty()) {
+                    android.util.Log.w(TAG, "lancerLivraison: REFUS armement — mismatch produit: " + raisonMismatch);
+                    logError(serialId, woNum, "PRODUIT_MISMATCH", raisonMismatch);
+                    // ✅ CORRIGÉ (14 sept 2026, demande Paul — bug trouvé
+                    // via diff complet, confirmé par un vrai enregistrement
+                    // Dataverse qui marchait à 14:18 et plus après) —
+                    // retournerFieldService() était le SEUL endroit qui
+                    // nettoie le verrou ActiveDeliveryStore (PENDING). En
+                    // le retirant plus bas sans le remplacer, ce verrou ne
+                    // se nettoyait plus JAMAIS ici — bloquant tout deep
+                    // link suivant, même pour un WO complètement
+                    // différent. Nettoyé directement, sans réintroduire
+                    // retournerFieldService()/finish().
+                    try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredClearProduit) {}
+                    // ✅ CORRIGÉ (14 sept 2026, demande Paul — "on veut
+                    // laisser le livreur faire le changement dans produit
+                    // ou preset pour ensuite lancer la livraison bouton
+                    // vert avec les changements") — trouvé : le correctif
+                    // précédent affichait bien le dialogue, mais appelait
+                    // ensuite retournerFieldService() → finish() —
+                    // renvoyant le chauffeur à FieldService SANS lui
+                    // laisser la chance de corriger sur place. Ne renvoie
+                    // plus à FieldService ici : affiche le dialogue
+                    // (informatif, rien à décider), puis RESTE dans le
+                    // tab — spnProduct (liste déroulante des vrais
+                    // produits scannés sur le registre) et edtPreset
+                    // restent éditables, btnC (🚀 Lancer la livraison)
+                    // reste disponible pour que le chauffeur corrige et
+                    // relance lui-même via startNewDeliveryC(), qui
+                    // revalide déjà produit et preset à partir de l'écran.
+                    final java.util.concurrent.CountDownLatch produitMismatchLatch =
+                        new java.util.concurrent.CountDownLatch(1);
+                    final String fRaisonMismatch = raisonMismatch;
+                    activity.runOnUiThread(() -> {
+                        try {
+                            new android.app.AlertDialog.Builder(activity)
+                                .setTitle("Produit non trouvé sur le registre")
+                                .setMessage(fRaisonMismatch + "\n\nCorrigez le produit ou le preset à l'écran, puis appuyez sur \"Lancer la livraison\".")
+                                .setPositiveButton("OK", (d, w) -> produitMismatchLatch.countDown())
+                                .setCancelable(false)
+                                .show();
+                        } catch (Exception eDialogProduit) {
+                            android.util.Log.w(TAG, "[PRODUIT-MISMATCH] dialogue ERR (non-bloquant): " + eDialogProduit.getMessage());
+                            produitMismatchLatch.countDown();
+                        }
+                    });
+                    try { produitMismatchLatch.await(); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    return true;
+                }
+        return false;
+    }
+
+    /** Porte d'armement du REPLI : retrouve le tab, attend l'init approuvée,
+     *  applique le contrôle de mismatch. Retourne le tab si on peut armer, null
+     *  si refus (déjà géré : retour FS ou dialogue). */
+    private RegisterTabFragment porteArmementRepli(String transportKey, int node, String serialId,
+                                                    String woNum, String woIdGuid) {
+        RegisterTabFragment tab = null;
+        try {
+            String mediaShort = activity.mediaShortFromTransportKey(transportKey);
+            String tabKey = activity.tabKeyOf(mediaShort, node, serialId);
+            for (int i = 0; i < 20 && tab == null; i++) {
+                Fragment f = activity.getSupportFragmentManager().findFragmentByTag("regtab_" + tabKey);
+                if (f instanceof RegisterTabFragment) { tab = (RegisterTabFragment) f; break; }
+                try { Thread.sleep(500); } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        if (!attendreInitApprouvee(tab)) {
+            android.util.Log.w(TAG, "connectBtByMacAndOpenTab: REFUS armement — initialisation (7 étapes) jamais approuvée après 30s");
+            logError(serialId, woNum, "INIT_NON_APPROUVEE", "Initialisation jamais complétée avant armement (registre/produit/preset/live/retour_wo) — livraison refusée par sécurité");
+            retournerFieldService(woNum, woIdGuid, "erreur_init_non_approuvee",
+                buildErrorJson("INIT_NON_APPROUVEE", "L'initialisation n'a pas pu se compléter avant l'armement — livraison refusée par sécurité. Réessayez, ou vérifiez le registre."));
+            return null;
+        }
+        if (produitMismatchBloque(tab, serialId, woNum)) return null;
+        return tab;
+    }
+
 
     private void retournerFieldService(String woNum, String woIdGuid,
                                         String status, String extraJson) {
