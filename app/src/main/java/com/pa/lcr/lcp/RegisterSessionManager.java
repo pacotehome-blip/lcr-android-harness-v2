@@ -298,6 +298,40 @@ public final class RegisterSessionManager {
     // interroger plusieurs transports READY) bloquait TOUT appel concurrent
     // à n'importe quelle méthode synchronized de cette classe — y compris
     // pour un registre totalement indépendant sur un autre transport.
+    // ✅ AJOUTÉ (14 oct 2026, demande Paul — "si on a un mac dans le deeplink
+    // aller chercher ce mac et rien d'autre"). Confirmé par le logcat du 14 oct
+    // 10:22 : resolveOrCreateForNode() sonde TOUS les transports READY (étape 2,
+    // imprimante comprise : octets LCP reçus = line feed) puis prend n'importe
+    // quel transport prêt (étape 3, pickReady(null)) — c'est ainsi qu'un
+    // transport qui n'était pas le registre (…91:3A) est devenu "le registre".
+    // Variante sans aucune sonde ni repli : seulement le transport demandé, et
+    // seulement s'il est réellement ouvert. Sinon null (l'appelant poursuit par
+    // la connexion ciblée sur cette MAC).
+    public DeliveryController resolveOrCreateForNodeOnTransport(int nodeDec, int fromDec, String transportKey) {
+        if (transportKey == null || transportKey.trim().isEmpty()) return null;
+        String tk = transportKey.trim();
+        TransportIo io = MediaTransportManager.get(appCtx).getByKey(tk);
+        if (io == null || !io.isOpen()) return null;
+        return getOrCreate(tk, nodeDec, fromDec & 0xFF, io);
+    }
+
+    // ✅ AJOUTÉ (14 oct 2026) — vrai s'il existe une session non arrêtée et non
+    // DISCONNECTED (tout node confondu) sur ce transport. Sert à ne jamais
+    // fermer un transport qu'un registre vivant utilise.
+    public synchronized boolean hasLiveSessionOn(String transportKey) {
+        if (transportKey == null || transportKey.trim().isEmpty()) return false;
+        String prefix = transportKey.trim() + ":";
+        for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
+            if (e.getKey() == null || !e.getKey().startsWith(prefix)) continue;
+            NodeSession ns = e.getValue();
+            if (ns == null || ns.dc == null) continue;
+            try {
+                if (!ns.dc.isStopped() && ns.dc.getState() != DeliveryState.DISCONNECTED) return true;
+            } catch (Exception ignored) {}
+        }
+        return false;
+    }
+
     public DeliveryController resolveOrCreateForNode(int nodeDec, int fromDec) {
         int node = nodeDec;
         int from = fromDec & 0xFF;

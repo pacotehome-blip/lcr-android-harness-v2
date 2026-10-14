@@ -461,7 +461,18 @@ public class DeepLinkHandler {
                     // sur le média ACTUELLEMENT ACTIF. Si oui → réutilisation
                     // immédiate, on saute complètement nportip/resolveOrCreateForNode
                     // /auto-connect — aucun autre transport n'est touché du tout.
+                    // ✅ AJOUTÉ (14 oct 2026, demande Paul — "si on a un mac dans le deeplink
+                    // aller chercher ce mac et rien d'autre") — MAC fournie = seul transport
+                    // acceptable : BT:<cette MAC>. Tout autre média "actif" est ignoré.
+                    final String btCibleDL = (fBtMac != null && !fBtMac.trim().isEmpty()) ? fBtMac.trim() : null;
+                    final String btCleCible = (btCibleDL != null)
+                        ? com.pa.lcr.lcp.transport.MediaTransportManager.btKey(btCibleDL) : null;
                     String activeMatch = activity.resolveIfActiveMatches(fNode, fSerialId);
+                    if (activeMatch != null && btCleCible != null && !btCleCible.equalsIgnoreCase(activeMatch.trim())) {
+                        try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] média actif " + activeMatch
+                            + " ignoré — le deep link vise " + btCleCible + " et rien d'autre"); } catch (Exception ignoredLb) {}
+                        activeMatch = null;
+                    }
                     if (activeMatch != null) {
                         android.util.Log.i(TAG, "Deep link: média actif correspond déjà (" + activeMatch
                                 + ") — aucune résolution/scan nécessaire");
@@ -531,8 +542,9 @@ public class DeepLinkHandler {
                         }
                     }
 
-                    com.pa.lcr.lcp.DeliveryController dc =
-                        rsm.resolveOrCreateForNode(fNode, 255);
+                    com.pa.lcr.lcp.DeliveryController dc = (btCleCible != null)
+                        ? rsm.resolveOrCreateForNodeOnTransport(fNode, 255, btCleCible)
+                        : rsm.resolveOrCreateForNode(fNode, 255);
 
                     if (dc != null) {
                         // ✅ Attendre que le DC soit CONNECTED (probeAndIdentify terminé)
@@ -557,10 +569,13 @@ public class DeepLinkHandler {
                             // ✅ Tenter auto-connect (USB ou BT) avant d'abandonner
                             MultiRegisterApiFacadeImpl facadeRetry = new MultiRegisterApiFacadeImpl(activity);
                             com.pa.lcr.lcp.ApiResult ra2 = facadeRetry.api_registerConnectAuto(
-                                fSerialId.isEmpty() ? null : fSerialId, fNode);
+                                fSerialId.isEmpty() ? null : fSerialId, fNode, btCibleDL);
+                            try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] auto-connect (reprise) : code="
+                                + (ra2 != null ? ra2.code : "null") + " msg=" + (ra2 != null ? ra2.msg : "null")); } catch (Exception ignoredLb) {}
                             if (ra2 != null && ra2.code == 1) {
-                                com.pa.lcr.lcp.DeliveryController dc3 =
-                                    rsm.resolveOrCreateForNode(fNode, 255);
+                                com.pa.lcr.lcp.DeliveryController dc3 = (btCleCible != null)
+                                    ? rsm.resolveOrCreateForNodeOnTransport(fNode, 255, btCleCible)
+                                    : rsm.resolveOrCreateForNode(fNode, 255);
                                 if (dc3 != null) {
                                     for (int w = 0; w < 75; w++) {
                                         if (dc3.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
@@ -602,14 +617,22 @@ public class DeepLinkHandler {
                         activity.runOnUiThread(() -> activity.toast("📡 Connexion au registre en cours..."));
                         MultiRegisterApiFacadeImpl facadeAuto = new MultiRegisterApiFacadeImpl(activity);
                         com.pa.lcr.lcp.ApiResult ra = facadeAuto.api_registerConnectAuto(
-                            fSerialId.isEmpty() ? null : fSerialId, fNode);
+                            fSerialId.isEmpty() ? null : fSerialId, fNode, btCibleDL);
                         android.util.Log.i(TAG, "auto-connect: code=" + (ra != null ? ra.code : "null")
                             + " msg=" + (ra != null ? ra.msg : "null"));
+                        // ✅ AJOUTÉ (14 oct 2026, demande Paul) — dans Support, plus seulement dans logcat :
+                        // résultat de l'auto-connect et chemin qui en découle.
+                        try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] auto-connect : code="
+                            + (ra != null ? ra.code : "null") + " msg=" + (ra != null ? ra.msg : "null")
+                            + ((ra == null || ra.code != 1)
+                                ? (btCibleDL != null ? " — repli connexion BT directe sur " + btCibleDL : " — aucun repli (pas de MAC)")
+                                : " — chemin normal")); } catch (Exception ignoredLb) {}
 
                         if (ra != null && ra.code == 1) {
                             // Auto-connect réussi — attendre DC CONNECTED
-                            com.pa.lcr.lcp.DeliveryController dc2 =
-                                rsm.resolveOrCreateForNode(fNode, 255);
+                            com.pa.lcr.lcp.DeliveryController dc2 = (btCleCible != null)
+                                ? rsm.resolveOrCreateForNodeOnTransport(fNode, 255, btCleCible)
+                                : rsm.resolveOrCreateForNode(fNode, 255);
                             if (dc2 != null) {
                                 activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre..."));
                                 for (int w = 0; w < 75; w++) {
@@ -2277,7 +2300,8 @@ public class DeepLinkHandler {
                         MultiRegisterApiFacadeImpl facadeAuto =
                             new MultiRegisterApiFacadeImpl(activity);
                         com.pa.lcr.lcp.ApiResult ra =
-                            facadeAuto.api_registerConnectAuto(serialId, node);
+                            facadeAuto.api_registerConnectAuto(serialId, node,
+                                (mac != null && !mac.trim().isEmpty()) ? mac.trim() : null);
                         android.util.Log.i(TAG, "register/connect-auto: code=" + ra.code + " msg=" + ra.msg);
 
                         if (ra.code != 1) {

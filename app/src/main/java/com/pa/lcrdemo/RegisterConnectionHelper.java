@@ -645,8 +645,11 @@ public class RegisterConnectionHelper {
             // ✅ Étape 3: api_registerConnectAuto — probe LCP (USB→BT→TCP), valide node + serial
             Log.i(TAG, "étape 3: api_registerConnectAuto tentative " + attempt
                 + " node=" + fNodeFinal + " serial=" + fSerialIdFinal);
+            // ✅ 14 oct 2026 (demande Paul) : diagnostic lancé par un deep link avec btmac →
+            // la recherche se limite à cette MAC (mac = null pour tout autre appelant).
             com.pa.lcr.lcp.ApiResult r = facade.api_registerConnectAuto(
-                fSerialIdFinal.isEmpty() ? null : fSerialIdFinal, fNodeFinal);
+                fSerialIdFinal.isEmpty() ? null : fSerialIdFinal, fNodeFinal,
+                (mac != null && !mac.trim().isEmpty()) ? mac.trim() : null);
             Log.i(TAG, "étape 3: code=" + r.code + " msg=" + r.msg);
 
             // ✅ FIX (4 août 2026, demande Paul — "je veux le détail complet

@@ -349,6 +349,79 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     }
 
     // =========================================================
+    // ✅ BT ACTIVATE — MAC CIBLE (deep link)
+    // =========================================================
+    // ✅ AJOUTÉ (14 oct 2026, demande Paul — "si on a un mac dans le deeplink
+    // aller chercher ce mac et rien d'autre"). api_btActivate() parcourt TOUS
+    // les appareils appairés de la tablette et active le premier qui accepte la
+    // connexion RFCOMM, sans vérifier que c'est un registre (logcat du 14 oct
+    // 10:21:55 : …91:3A activé ; l'imprimante recevait aussi des octets LCP).
+    // Ici : cette MAC, et aucune autre. Non appairée ou connexion refusée =
+    // échec explicite, jamais un autre appareil.
+    public ApiResult api_btActivateMac(String macCible, int node) {
+        if (mediaMgr == null) return ApiResult.fail("MTM null", "ERR_MEDIA_MTM_NULL");
+        final String mac = (macCible == null) ? "" : macCible.trim();
+        if (mac.isEmpty()) return ApiResult.fail("BT activate (MAC): 0 - MAC vide", "ERR_BT_MAC_EMPTY");
+        final String key = MediaTransportManager.btKey(mac);
+        try {
+            TransportIo existing = mediaMgr.getByKey(key);
+            if (existing != null && existing.isOpen()) {
+                if (!isApiTransportSwitchSafe(key)) {
+                    return ApiResult.fail("BT activate: 0 - livraison active sur un autre transport",
+                        "ERR_DELIVERY_ACTIVE_ELSEWHERE");
+                }
+                mediaMgr.activateExclusive(key, "API_BT_AUTO_MAC");
+                JSONObject d = new JSONObject();
+                d.put("transportKey", key);
+                d.put("activeKey", MediaTransportManager.getActiveKeyStatic());
+                LogBus.api(node, "[BT-RECHERCHE] " + key + " déjà ouvert — activé (aucun autre appareil essayé)");
+                return ApiResult.ok("BT activate: 1 - OK (already open)", d);
+            }
+        } catch (Exception ignored) {}
+
+        BluetoothDevice dev = null;
+        for (BluetoothDevice cand : listBondedSorted()) {
+            if (cand != null && mac.equalsIgnoreCase(cand.getAddress())) { dev = cand; break; }
+        }
+        if (dev == null) {
+            LogBus.api(node, "[BT-RECHERCHE] " + key + " non appairé à la tablette — aucun autre appareil essayé");
+            return ApiResult.fail("BT activate: 0 - MAC cible non appairée", "ERR_BT_TARGET_NOT_BONDED");
+        }
+        BluetoothSocket sock = null;
+        try {
+            if (!isApiTransportSwitchSafe(key)) {
+                return ApiResult.fail("BT activate: 0 - livraison active sur un autre transport",
+                    "ERR_DELIVERY_ACTIVE_ELSEWHERE");
+            }
+            try { BluetoothAdapter adp = btAdapterSafe(); if (adp != null) adp.cancelDiscovery(); } catch (Exception ignored) {}
+            sock = dev.createRfcommSocketToServiceRecord(SPP_UUID);
+            sock.connect();
+            InputStream in = sock.getInputStream();
+            OutputStream out = sock.getOutputStream();
+            mediaMgr.onBtConnected(dev, sock, in, out, "BT ready (API)");
+            boolean ok = mediaMgr.activateExclusive(key, "API_BT_AUTO_MAC");
+            if (!ok) {
+                try { sock.close(); } catch (Exception ignored2) {}
+                LogBus.api(node, "[BT-RECHERCHE] " + key + " connecté mais activation refusée");
+                return ApiResult.fail("BT activate failed", "ERR_BT_ACTIVATE_FAILED");
+            }
+            JSONObject d = new JSONObject();
+            d.put("transportKey", key);
+            d.put("activeKey", MediaTransportManager.getActiveKeyStatic());
+            LogBus.api(node, "[BT-RECHERCHE] " + key + " connecté (RFCOMM) — aucun autre appareil essayé");
+            return ApiResult.ok("BT activate: 1 - OK", d);
+        } catch (Exception e) {
+            try { if (sock != null) sock.close(); } catch (Exception ignored) {}
+            LogBus.api(node, "[BT-RECHERCHE] " + key + " connexion RFCOMM refusée — " + e.getMessage()
+                + " — aucun autre appareil essayé");
+            JSONObject d = new JSONObject();
+            try { d.put("mac", mac); } catch (Exception ignored) {}
+            try { d.put("detail", e.getMessage()); } catch (Exception ignored) {}
+            return ApiResult.fail("BT activate: 0 - Connexion échouée", "ERR_BT_CONNECT_FAILED", d);
+        }
+    }
+
+    // =========================================================
     // ✅ BT DISCONNECT
     // =========================================================
     @Override
@@ -839,6 +912,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     // =========================================================
     @Override
     public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode) {
+        return api_registerConnectAuto(serialId, lcrnode, null);
+    }
+
+    // ✅ AJOUTÉ (14 oct 2026, demande Paul) — btMacCible non vide (deep link avec
+    // btmac) : la recherche se limite à CETTE MAC (ni USB, ni TCP, ni un autre
+    // appareil BT). btMacCible null/vide : comportement inchangé.
+    public ApiResult api_registerConnectAuto(String serialId, Integer lcrnode, String btMacCible) {
         // ✅ FIX (4 août 2026) — voir commentaire du verrou plus haut. Un seul
         // appel à la fois, peu importe combien d'endroits différents dans le
         // code appellent cette méthode.
@@ -848,13 +928,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             return ApiResult.fail("Register connect-auto: 0 - Connexion déjà en cours", "ERR_CONNECT_AUTO_BUSY", d);
         }
         try {
-            return api_registerConnectAutoLocked(serialId, lcrnode);
+            return api_registerConnectAutoLocked(serialId, lcrnode, btMacCible);
         } finally {
             libererLeVerrouConnectAuto();
         }
     }
 
-    private ApiResult api_registerConnectAutoLocked(String serialId, Integer lcrnode) {
+    private ApiResult api_registerConnectAutoLocked(String serialId, Integer lcrnode, String btMacCible) {
         final int from = 255;
         final boolean hasNode = (lcrnode != null && lcrnode.intValue() != 0);
         final boolean hasSerial = (serialId != null && !serialId.trim().isEmpty());
@@ -908,7 +988,14 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         // que l'écran Diagnostic puisse afficher le détail réel au lieu d'un
         // simple "Recherche... (1/3)" opaque.
         JSONArray attemptsDetail = new JSONArray();
-        ArrayList<String> candidates = listCandidateTransportKeysForAutoConnect();
+        final boolean cibleBt = (btMacCible != null && !btMacCible.trim().isEmpty());
+        // ✅ AJOUTÉ (14 oct 2026, demande Paul — visibilité Support) — début de recherche.
+        try { LogBus.api(node, "[BT-RECHERCHE] début — "
+            + (cibleBt ? "MAC cible=" + btMacCible.trim() + " (aucun autre appareil ne sera essayé)" : "sans MAC cible (recherche USB→BT→TCP)")
+            + " série=" + (hasSerial ? serialId.trim() : "(aucune)") + " node=" + node); } catch (Exception ignoredLog) {}
+        ArrayList<String> candidates = cibleBt
+            ? listCandidateTransportKeysForBtCible(btMacCible.trim(), node)
+            : listCandidateTransportKeysForAutoConnect();
         // ✅ FIX (4 août 2026) — inclut les échecs de CONSTRUCTION de la liste
         // de candidats elle-même (ex. USB jamais essayé car api_openPingUsb()
         // a échoué avant même d'atteindre la boucle ci-dessous) — sans ça,
@@ -948,6 +1035,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             if (io == null || !safeIsOpen(io)) {
                 attemptOutcome = "transport fermé/indisponible";
                 attemptsDetail.put(buildAttemptDetail(transportKey, attemptOutcome, null));
+                traceRechercheBt(node, transportKey, attemptOutcome);
                 continue;
             }
 
@@ -955,6 +1043,11 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             if (serial == null || serial.trim().isEmpty()) {
                 attemptOutcome = "ouvert mais #série illisible (registre ne répond pas)";
                 attemptsDetail.put(buildAttemptDetail(transportKey, attemptOutcome, null));
+                traceRechercheBt(node, transportKey, attemptOutcome);
+                // ✅ AJOUTÉ (14 oct 2026, demande Paul) — un transport BT qui ne répond à aucune
+                // lecture LCP n'est pas un registre : fermé, il ne peut plus être réutilisé
+                // (migration de session, "transport actif") ni recevoir d'autres octets LCP.
+                fermerBtNonRegistre(transportKey, node, btMacCible);
                 continue;
             }
             serial = serial.trim();
@@ -962,11 +1055,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             if (hasSerial && !serialId.trim().equalsIgnoreCase(serial)) {
                 attemptOutcome = "#série trouvé (" + serial + ") ne correspond pas à celui attendu (" + serialId.trim() + ")";
                 attemptsDetail.put(buildAttemptDetail(transportKey, attemptOutcome, serial));
+                traceRechercheBt(node, transportKey, attemptOutcome);
                 continue;
             }
 
             attemptOutcome = "✓ trouvé — #série=" + serial;
             attemptsDetail.put(buildAttemptDetail(transportKey, attemptOutcome, serial));
+            traceRechercheBt(node, transportKey, attemptOutcome);
 
             DeliveryController dc = null;
             try { dc = sessions.getOrCreate(transportKey, node, from, io); } catch (Exception ignored) {}
@@ -1014,8 +1109,10 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         }
 
         // ✅ Dernier essai — retourner ce qui est connecté même si serial ne correspond pas
+        // ✅ 14 oct 2026 : jamais pour un deep link à MAC cible — ce "dernier essai" sonde le transport
+        // "actif" quel qu'il soit (autre appareil, imprimante) : exactement ce qu'on veut éviter.
         String activeKey = MediaTransportManager.getActiveKeyStatic();
-        if (activeKey != null && mediaMgr != null) {
+        if (!cibleBt && activeKey != null && mediaMgr != null) {
             try {
                 TransportIo activeIo = mediaMgr.getByKey(activeKey);
                 if (activeIo != null && safeIsOpen(activeIo)) {
@@ -1046,6 +1143,8 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             } catch (Exception ignored) {}
         }
 
+        try { LogBus.api(node, "[BT-RECHERCHE] échec — registre non trouvé"
+            + (cibleBt ? " sur la MAC cible " + btMacCible.trim() : "") + " (essayés=" + tried + ")"); } catch (Exception ignoredLog) {}
         JSONObject dn = new JSONObject();
         safePut(dn, "node",          node);
         safePut(dn, "from",          from);
@@ -1062,6 +1161,51 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     // pour UNE tentative de connexion sur UN transport, utilisée pour donner
     // à l'écran Diagnostic une vraie visibilité par transport au lieu d'un
     // message opaque "Recherche... (1/3)".
+    // ✅ AJOUTÉ (14 oct 2026, demande Paul — visibilité Support) — une ligne par
+    // candidat essayé : jusqu'ici ce détail n'existait que dans le dialogue Diagnostic
+    // (écran), jamais dans Support/logcat.
+    private void traceRechercheBt(int node, String transportKey, String outcome) {
+        try { LogBus.api(node, "[BT-RECHERCHE] " + transportKey + " → " + outcome); } catch (Exception ignored) {}
+    }
+
+    // ✅ AJOUTÉ (14 oct 2026, demande Paul) — ferme un transport BT ouvert qui n'a répondu à
+    // aucune lecture LCP. Jamais : la MAC cible du deep link, un transport qu'une session
+    // vivante utilise, ni un transport sur lequel une livraison tourne.
+    private void fermerBtNonRegistre(String transportKey, int node, String btMacCible) {
+        try {
+            if (transportKey == null || !transportKey.startsWith("BT:") || mediaMgr == null) return;
+            if (btMacCible != null && !btMacCible.trim().isEmpty()
+                    && transportKey.equalsIgnoreCase(MediaTransportManager.btKey(btMacCible.trim()))) return;
+            if (sessions.hasLiveSessionOn(transportKey) || sessions.hasRunningDeliveryOn(transportKey)) return;
+            mediaMgr.onBtDisconnected(transportKey.substring(3), "aucun registre ne répond (sonde LCP)");
+            LogBus.api(node, "[BT-RECHERCHE] " + transportKey + " fermé — n'est pas un registre (aucune réponse LCP)");
+        } catch (Exception ignored) {}
+    }
+
+    // ✅ AJOUTÉ (14 oct 2026, demande Paul — "aller chercher ce mac et rien d'autre") — liste de
+    // candidats pour un deep link qui fournit btmac : uniquement cette MAC. Aucun USB, aucun TCP,
+    // aucun autre BT (donc aucune sonde LCP envoyée à un autre appareil, imprimante comprise).
+    private ArrayList<String> listCandidateTransportKeysForBtCible(String btMac, int node) {
+        lastCandidateBuildFailures.clear();
+        ArrayList<String> keys = new ArrayList<>();
+        final String key = MediaTransportManager.btKey(btMac);
+        try {
+            TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(key) : null;
+            if (io == null || !safeIsOpen(io)) {
+                ApiResult r = api_btActivateMac(btMac, node);
+                io = (mediaMgr != null) ? mediaMgr.getByKey(key) : null;
+                if (io == null || !safeIsOpen(io)) {
+                    lastCandidateBuildFailures.add(buildAttemptDetail(key,
+                        "connexion à la MAC cible impossible : " + (r != null ? r.msg : "raison inconnue"), null));
+                }
+            }
+            if (io != null && safeIsOpen(io)) keys.add(key);
+        } catch (Exception e) {
+            lastCandidateBuildFailures.add(buildAttemptDetail(key, "erreur : " + e.getMessage(), null));
+        }
+        return keys;
+    }
+
     private JSONObject buildAttemptDetail(String transportKey, String outcome, String serialFound) {
         JSONObject o = new JSONObject();
         safePut(o, "transportKey", transportKey);
