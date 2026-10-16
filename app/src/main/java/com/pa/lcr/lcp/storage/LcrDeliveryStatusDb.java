@@ -522,6 +522,22 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         return null;
     }
 
+    // ✅ AJOUTÉ (16 oct 2026, demande Paul — "le ticket number en tenant compte du #série du
+    // registre") — le numéro de ticket est propre à chaque registre : deux registres peuvent
+    // avoir le même. Sans #série, retombe sur getByTicketNo().
+    public DeliveryRow getByTicketNoAndSerial(String ticketNo, String serialId) {
+        if (ticketNo == null || ticketNo.isEmpty()) return null;
+        if (serialId == null || serialId.trim().isEmpty()) return getByTicketNo(ticketNo);
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, null,
+                COL_TICKET_NO + "=? AND " + COL_SERIAL_ID + "=?", new String[]{ticketNo, serialId.trim()},
+                null, null,
+                COL_ID + " DESC", "1")) {
+            if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
+        } catch (Exception e) { Log.e(TAG, "getByTicketNoAndSerial ERR: " + e.getMessage()); }
+        return null;
+    }
+
     public int updateDelivery(long id, ContentValues cv) {
         cv.put(COL_TS_UPDATED_MS, System.currentTimeMillis());
         try {

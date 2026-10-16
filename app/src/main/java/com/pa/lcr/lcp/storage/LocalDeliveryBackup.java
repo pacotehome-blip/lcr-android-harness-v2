@@ -319,7 +319,9 @@ public class LocalDeliveryBackup {
                         String ticketNo = j.optString("ticket_no", "");
                         String woNum = j.optString("wo_num", "");
                         if (ticketNo.isEmpty() || woNum.isEmpty()) continue;
-                        if (lcrDb.getByTicketNo(ticketNo) != null) continue; // déjà présent
+                        // ✅ CORRIGÉ (16 oct 2026, demande Paul) — présence testée par ticket_no ET #série
+                        // du registre (le numéro de ticket est propre à chaque registre).
+                        if (lcrDb.getByTicketNoAndSerial(ticketNo, j.optString("serial_id", "")) != null) continue; // déjà présent
 
                         ContentValues cv = new ContentValues();
                         cv.put(LcrDeliveryStatusDb.COL_WO_NUM, woNum);
@@ -374,15 +376,33 @@ public class LocalDeliveryBackup {
                     try {
                         JSONObject j = new JSONObject(new String(ref.content, StandardCharsets.UTF_8));
                         String tk = j.optString("ticket_no", "");
-                        String wo = j.optString("wo_num", "");
-                        LcrDeliveryStatusDb.DeliveryRow row = tk.isEmpty() ? null : lcrDb2.getByTicketNo(tk);
-                        boolean dbSynced = row != null && wo.equals(row.woNum)
-                                && LcrDeliveryStatusDb.SYNC_SYNCED.equals(row.syncStatus);
+                        String serial = j.optString("serial_id", "").trim();
+                        LcrDeliveryStatusDb.DeliveryRow row = tk.isEmpty() ? null : lcrDb2.getByTicketNoAndSerial(tk, serial);
+                        boolean dbSynced = row != null && LcrDeliveryStatusDb.SYNC_SYNCED.equals(row.syncStatus);
                         if (!"SYNCED".equals(j.optString("sync_status", "")) && !dbSynced) continue; // jamais touché
-                        long ts = (row != null && wo.equals(row.woNum) && row.tsCreatedMs > 0)
-                                ? row.tsCreatedMs : j.optLong("backup_ts", 0L);
+
+                        // Récence = date de FIN de la livraison lue dans le JSON lui-même
+                        // (payload_complet.result.end_ms, sinon start_ms). Ne dépend ni de
+                        // backup_ts (remis à "maintenant" à chaque réécriture post-sync) ni de
+                        // ts_created_ms (remis à "maintenant" pour une ligne restaurée).
+                        long ts = 0L;
+                        try {
+                            JSONObject pl = new JSONObject(j.optString("payload_complet", "{}"));
+                            JSONObject res = pl.optJSONObject("result");
+                            if (res != null) {
+                                ts = res.optLong("end_ms", 0L);
+                                if (ts <= 0L) ts = res.optLong("start_ms", 0L);
+                            }
+                        } catch (Exception ignoredPayload) {}
+                        if (ts <= 0L && row != null) ts = row.tsCreatedMs;
+                        if (ts <= 0L) ts = j.optLong("backup_ts", 0L);
                         syncedByTs.computeIfAbsent(ts, k -> new ArrayList<>()).add(ref);
-                        ref.ticketNo = tk;
+
+                        // Une livraison = #série + ticket_no. Sans ticket : le fichier compte
+                        // comme sa propre livraison (jamais un fichier "gratuit").
+                        ref.ticketNo = tk.isEmpty()
+                                ? ("sans-ticket#" + System.identityHashCode(ref))
+                                : (serial + "|" + tk);
                     } catch (Exception ignored) {}
                 }
             } finally {
