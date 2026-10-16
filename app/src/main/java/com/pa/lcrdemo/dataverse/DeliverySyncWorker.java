@@ -42,12 +42,15 @@ public class DeliverySyncWorker extends Worker {
 
     private Result doWorkInternal(Context ctx, DeliveryResultQueueDb db) {
         java.util.List<DeliveryResultQueueDb.QueueItem> pending = db.listPending(20);
-        if (pending.isEmpty()) {
-            Log.i(TAG, "Queue vide — rien à envoyer");
-            return Result.success();
+        // ✅ MODIFIÉ (16 oct 2026, demande Paul) — queue vide : on ne s'arrête plus avant le jeton,
+        // pour valider/nettoyer les JSON avec Dataverse au retour d'Internet (rien d'autre ne change :
+        // aucun envoi de queue, aucun pushPending dans ce cas, résultat toujours success).
+        final boolean queueVide = pending.isEmpty();
+        if (queueVide) {
+            Log.i(TAG, "Queue vide — rien à envoyer (nettoyage JSON validé Dataverse si jeton dispo)");
+        } else {
+            Log.i(TAG, "Queue: " + pending.size() + " livraisons à envoyer");
         }
-
-        Log.i(TAG, "Queue: " + pending.size() + " livraisons à envoyer");
 
         // ✅ Acquérir token MSAL — bloquant car on est dans un Worker thread
         // ✅ (fix 31 juillet 2026, découvert en validant l'exhaustivité du verrou global
@@ -63,7 +66,7 @@ public class DeliverySyncWorker extends Worker {
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             Log.w(TAG, "acquire() interrompu — reprogrammé au prochain cycle");
-            return Result.retry();
+            return queueVide ? Result.success() : Result.retry();
         }
         try {
             MsalTokenProvider tokenProvider = new MsalTokenProvider(ctx);
@@ -96,16 +99,21 @@ public class DeliverySyncWorker extends Worker {
             });
 
             try { latch.await(15, java.util.concurrent.TimeUnit.SECONDS); }
-            catch (InterruptedException e) { return Result.retry(); }
+            catch (InterruptedException e) { return queueVide ? Result.success() : Result.retry(); }
 
             if (tokenRef.get() == null) {
                 Log.w(TAG, "Token non disponible: " + (errRef.get() != null ? errRef.get().getMessage() : "timeout"));
-                return Result.retry();
+                return queueVide ? Result.success() : Result.retry();
             }
             token = tokenRef.get();
         } finally {
             MsalTokenProvider.MSAL_SERIAL_LOCK.release();
         } // fin verrou MSAL_SERIAL_LOCK — libéré avant la boucle d'envoi HTTP
+
+        if (queueVide) {
+            com.pa.lcrdemo.dataverse.LcrDeliverySync.nettoyerJsonVerifie(ctx, token, 0L);
+            return Result.success();
+        }
 
         boolean hadFailure = false;
 

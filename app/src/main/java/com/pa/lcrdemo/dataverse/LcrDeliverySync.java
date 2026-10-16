@@ -142,6 +142,9 @@ public class LcrDeliverySync {
 
         if (pending.isEmpty()) {
             Log.i(TAG, "pushPending: aucune transaction PENDING");
+            // ✅ AJOUTÉ (16 oct 2026, demande Paul) — Internet + jeton disponibles : valider avec
+            // Dataverse et nettoyer les JSON (rien à pousser ne veut pas dire rien à nettoyer).
+            nettoyerJsonVerifie(ctx, accessToken, 1000L);
             return;
         }
 
@@ -232,8 +235,91 @@ public class LcrDeliverySync {
         // JSON (restaure en BD tout PENDING manquant, supprime les SYNCED au-delà des 3 dernières).
         // Délai 4 s : les réécritures de JSON post-sync (backupDeliveryAsync) sont asynchrones.
         if (pousseesOk > 0) {
-            try { com.pa.lcr.lcp.storage.LocalDeliveryBackup.cleanupAutoAsync(ctx, 4000L); }
-            catch (Exception eCleanAuto) { Log.w(TAG, "cleanupAuto ERR (non-bloquant): " + eCleanAuto.getMessage()); }
+            nettoyerJsonVerifie(ctx, accessToken, 4000L);
+        }
+    }
+
+    // ✅ AJOUTÉ (16 oct 2026, demande Paul — "on valide aussi toujours avec Dataverse quand la
+    // connexion internet est disponible") — nettoyage automatique des JSON avec validation
+    // Dataverse : un JSON au-delà des 3 plus récents n'est supprimé que si la livraison
+    // (#série + ticket, sinon jobId) EXISTE dans Dataverse. Absente : JSON gardé, ligne remise en
+    // PENDING et repoussée. Inconnu (hors ligne) : JSON gardé jusqu'au prochain passage avec Internet.
+    public static void nettoyerJsonVerifie(Context ctx, String accessToken, long delaiMs) {
+        try {
+            if (accessToken == null || accessToken.isEmpty()) return;
+            final Context app = ctx.getApplicationContext();
+            final String token = accessToken;
+            com.pa.lcr.lcp.storage.LocalDeliveryBackup.cleanupAutoAsync(app, delaiMs,
+                new com.pa.lcr.lcp.storage.LocalDeliveryBackup.DataverseChecker() {
+                    @Override
+                    public Boolean existe(String serialId, int lcrnode, String ticketNo, String jobId) {
+                        return livraisonExisteDansDataverse(app, token, serialId, lcrnode, ticketNo, jobId);
+                    }
+                    @Override
+                    public void remisesEnPending(int n) {
+                        try { pushPending(app, token); }
+                        catch (Exception e) { Log.w(TAG, "nettoyerJsonVerifie: re-push ERR (non-bloquant): " + e.getMessage()); }
+                    }
+                });
+        } catch (Exception e) {
+            Log.w(TAG, "nettoyerJsonVerifie ERR (non-bloquant): " + e.getMessage());
+        }
+    }
+
+    /** TRUE = existe, FALSE = absente, null = inconnu (HTTP ≠ 200, hors ligne, erreur, rien à interroger). */
+    static Boolean livraisonExisteDansDataverse(Context ctx, String accessToken, String serialId,
+                                                int lcrnode, String ticketNo, String jobId) {
+        boolean inconnu = false;
+        boolean peutParTicket = serialId != null && !serialId.trim().isEmpty()
+                && ticketNo != null && !ticketNo.trim().isEmpty();
+        if (peutParTicket) {
+            String filter = "filgo_serial_id eq '" + odataEscape(serialId.trim()) + "'"
+                + (lcrnode > 0 ? " and filgo_lcrnode eq " + lcrnode : "")
+                + " and filgo_ticket_no eq '" + odataEscape(ticketNo) + "'";
+            Boolean r = interrogerExiste(ctx, accessToken, filter);
+            if (Boolean.TRUE.equals(r)) return Boolean.TRUE;
+            if (r == null) inconnu = true;
+        }
+        boolean peutParJob = jobId != null && !jobId.trim().isEmpty();
+        if (peutParJob) {
+            Boolean r = interrogerExiste(ctx, accessToken,
+                "contains(filgo_payload_json, '" + odataEscape(jobId) + "')");
+            if (Boolean.TRUE.equals(r)) return Boolean.TRUE;
+            if (r == null) inconnu = true;
+        }
+        if (!peutParTicket && !peutParJob) return null;
+        return inconnu ? null : Boolean.FALSE;
+    }
+
+    private static Boolean interrogerExiste(Context ctx, String accessToken, String filter) {
+        try {
+            String orgUrl = LcrConfig.getDataverseUrl(ctx);
+            String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY
+                + "?$filter=" + java.net.URLEncoder.encode(filter, "UTF-8").replace("+", "%20")
+                + "&$select=filgo_lcr_delivery_statusid&$top=1";
+            HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+            try {
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
+                conn.setRequestProperty("Authorization",    "Bearer " + accessToken);
+                conn.setRequestProperty("Accept",           "application/json");
+                conn.setRequestProperty("OData-MaxVersion", "4.0");
+                conn.setRequestProperty("OData-Version",    "4.0");
+                int code = conn.getResponseCode();
+                if (code != 200) {
+                    Log.w(TAG, "interrogerExiste: HTTP " + code);
+                    return null;
+                }
+                JSONObject resp = new JSONObject(new String(readStream(conn.getInputStream()), StandardCharsets.UTF_8));
+                JSONArray values = resp.optJSONArray("value");
+                return values != null && values.length() > 0;
+            } finally {
+                conn.disconnect();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "interrogerExiste ERR (inconnu): " + e.getMessage());
+            return null;
         }
     }
 

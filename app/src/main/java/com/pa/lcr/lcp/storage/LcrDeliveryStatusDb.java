@@ -566,6 +566,29 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     }
 
     /**
+     * ✅ AJOUTÉ (16 oct 2026, demande Paul) — ligne SYNCED localement mais ABSENTE de Dataverse :
+     * remise en PENDING pour être repoussée. Clé = ticket_no + #série (serial vide : ticket seul).
+     * @return nombre de lignes modifiées
+     */
+    public int remettreEnPending(String ticketNo, String serialId) {
+        if (ticketNo == null || ticketNo.trim().isEmpty()) return 0;
+        ContentValues cv = new ContentValues();
+        cv.put(COL_SYNC_STATUS, SYNC_PENDING);
+        cv.putNull(COL_DATAVERSE_ID);
+        cv.put(COL_TS_UPDATED_MS, System.currentTimeMillis());
+        try {
+            boolean avecSerie = serialId != null && !serialId.trim().isEmpty();
+            return getWritableDatabase().update(TABLE_DELIVERY, cv,
+                COL_TICKET_NO + "=?" + (avecSerie ? " AND " + COL_SERIAL_ID + "=?" : "") + " AND " + COL_SYNC_STATUS + "=?",
+                avecSerie ? new String[]{ticketNo, serialId.trim(), SYNC_SYNCED}
+                          : new String[]{ticketNo, SYNC_SYNCED});
+        } catch (Exception e) {
+            Log.e(TAG, "remettreEnPending ERR: " + e.getMessage());
+            return 0;
+        }
+    }
+
+    /**
      * Marque une transaction comme ERROR avec un message.
      */
     public void markError(long id, String errorMsg) {

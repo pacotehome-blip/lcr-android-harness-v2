@@ -301,6 +301,24 @@ public class LocalDeliveryBackup {
     // manqué par la récupération normale.
     // =========================================================
     public static void cleanupOldBackupsAsync(Context ctx, int keepDeliveries, CleanupCallback cb) {
+        // Bouton Support (action explicite de Paul) : comportement inchangé, règle locale seulement.
+        cleanupOldBackupsAsync(ctx, keepDeliveries, null, true, cb);
+    }
+
+    /**
+     * ✅ AJOUTÉ (16 oct 2026, demande Paul — "on valide aussi toujours avec Dataverse quand la
+     * connexion internet est disponible") — validation Dataverse d'une livraison avant de
+     * supprimer son JSON.
+     */
+    public interface DataverseChecker {
+        /** TRUE = la livraison existe dans Dataverse ; FALSE = absente ; null = inconnu (hors ligne, HTTP ≠ 200, erreur). */
+        Boolean existe(String serialId, int lcrnode, String ticketNo, String jobId);
+        /** Appelé quand des lignes locales ont été remises en PENDING (absentes de Dataverse) : relancer le push. */
+        void remisesEnPending(int n);
+    }
+
+    public static void cleanupOldBackupsAsync(Context ctx, int keepDeliveries, DataverseChecker checker,
+                                              boolean suppressionLocaleSiInconnu, CleanupCallback cb) {
         new Thread(() -> {
             List<String> messages = new ArrayList<>();
             List<BackupFileRef> refs = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
@@ -400,6 +418,10 @@ public class LocalDeliveryBackup {
 
                         // Une livraison = #série + ticket_no. Sans ticket : le fichier compte
                         // comme sa propre livraison (jamais un fichier "gratuit").
+                        ref.serialId = serial;
+                        ref.ticketReel = tk;
+                        ref.jobId = j.optString("job_id", "");
+                        ref.lcrnode = j.optInt("lcrnode", 0);
                         ref.ticketNo = tk.isEmpty()
                                 ? ("sans-ticket#" + System.identityHashCode(ref))
                                 : (serial + "|" + tk);
@@ -409,20 +431,56 @@ public class LocalDeliveryBackup {
                 try { lcrDb2.close(); } catch (Exception ignored) {}
             }
 
-            int kept = 0, deleted = 0;
+            int kept = 0, deleted = 0, requeued = 0, gardesInconnu = 0;
+            boolean dataverseIndispo = false; // dès qu'une réponse est "inconnu", on n'interroge plus (évite les délais en cascade hors ligne)
             for (java.util.Map.Entry<Long, List<BackupFileRef>> entry : syncedByTs.entrySet()) {
                 for (BackupFileRef ref : entry.getValue()) {
                     boolean dejaCompteAvant = ref.ticketNo != null && ticketsVus.contains(ref.ticketNo);
                     if (dejaCompteAvant || ticketsVus.size() < keepDeliveries) {
                         if (ref.ticketNo != null && !ref.ticketNo.isEmpty()) ticketsVus.add(ref.ticketNo);
                         kept++;
-                    } else {
+                        continue;
+                    }
+                    // Au-delà des N plus récents : validation Dataverse avant suppression.
+                    Boolean existe = null;
+                    if (checker != null && !dataverseIndispo) {
+                        try { existe = checker.existe(ref.serialId, ref.lcrnode, ref.ticketReel, ref.jobId); }
+                        catch (Exception eChk) { existe = null; }
+                        if (existe == null) dataverseIndispo = true;
+                    }
+                    if (Boolean.TRUE.equals(existe)) {
                         if (ref.delete(ctx)) {
                             deleted++;
-                            messages.add("Supprimé (déjà SYNCED, au-delà des " + keepDeliveries + " dernières) : ticket=" + ref.ticketNo);
+                            messages.add("Supprimé (confirmé dans Dataverse, au-delà des " + keepDeliveries + " dernières) : ticket=" + ref.ticketNo);
                         }
+                    } else if (Boolean.FALSE.equals(existe)) {
+                        // Marqué SYNCED localement mais ABSENT de Dataverse : fichier gardé, ligne remise en PENDING.
+                        LcrDeliveryStatusDb dRq = new LcrDeliveryStatusDb(ctx.getApplicationContext());
+                        try { if (dRq.remettreEnPending(ref.ticketReel, ref.serialId) > 0) requeued++; }
+                        finally { try { dRq.close(); } catch (Exception ignored) {} }
+                        kept++;
+                        messages.add("ABSENT de Dataverse — fichier gardé, remis en PENDING : serie=" + ref.serialId + " ticket=" + ref.ticketReel);
+                    } else if (suppressionLocaleSiInconnu) {
+                        if (ref.delete(ctx)) {
+                            deleted++;
+                            messages.add("Supprimé (règle locale SYNCED, au-delà des " + keepDeliveries + " dernières) : ticket=" + ref.ticketNo);
+                        }
+                    } else {
+                        // Dataverse non vérifiable maintenant (hors ligne / pas de jeton) : on garde,
+                        // le nettoyage reprendra au retour d'Internet.
+                        kept++;
+                        gardesInconnu++;
                     }
                 }
+            }
+            if (requeued > 0 && checker != null) {
+                try { checker.remisesEnPending(requeued); } catch (Exception ignoredRq) {}
+            }
+            if (gardesInconnu > 0) {
+                Log.i(TAG, "cleanup: " + gardesInconnu + " fichier(s) à supprimer gardés — Dataverse non vérifiable maintenant");
+            }
+            if (requeued > 0) {
+                Log.w(TAG, "cleanup: " + requeued + " livraison(s) SYNCED localement mais ABSENTES de Dataverse — remises en PENDING");
             }
 
             final int fRestored = restored, fKept = kept, fDeleted = deleted;
@@ -440,7 +498,12 @@ public class LocalDeliveryBackup {
     private static final java.util.concurrent.atomic.AtomicLong cleanupAutoDebutMs =
             new java.util.concurrent.atomic.AtomicLong(0L);
 
+    /** Sans validation Dataverse (pas de jeton) : restaure seulement, ne supprime rien. */
     public static void cleanupAutoAsync(Context ctx, long delaiMs) {
+        cleanupAutoAsync(ctx, delaiMs, null);
+    }
+
+    public static void cleanupAutoAsync(Context ctx, long delaiMs, DataverseChecker checker) {
         long maintenant = System.currentTimeMillis();
         long debut = cleanupAutoDebutMs.get();
         if (debut != 0L && maintenant - debut < 5L * 60L * 1000L) return;
@@ -449,7 +512,7 @@ public class LocalDeliveryBackup {
         new Thread(() -> {
             try {
                 try { Thread.sleep(delaiMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                cleanupOldBackupsAsync(app, 3, (restored, kept, deleted, messages) -> {
+                cleanupOldBackupsAsync(app, 3, checker, false, (restored, kept, deleted, messages) -> {
                     cleanupAutoDebutMs.set(0L);
                     Log.i(TAG, "cleanupAuto: restauré=" + restored + " gardé=" + kept + " supprimé=" + deleted);
                 });
@@ -466,6 +529,10 @@ public class LocalDeliveryBackup {
         final File file;    // legacy (Android 9-10)
         final byte[] content;
         String ticketNo;    // rempli après parsing, pour le regroupement
+        String serialId = "";   // champs lus du JSON, pour la validation Dataverse
+        String ticketReel = "";
+        String jobId = "";
+        int lcrnode = 0;
         BackupFileRef(Uri uri, File file, byte[] content) { this.uri = uri; this.file = file; this.content = content; }
         boolean delete(Context ctx) {
             try {
