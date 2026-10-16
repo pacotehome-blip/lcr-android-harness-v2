@@ -310,6 +310,7 @@ public class LocalDeliveryBackup {
             // Étape 1 — restaurer en BD locale tout PENDING pas encore présent,
             // avant de toucher à quoi que ce soit — jamais de perte.
             int restored = 0;
+            int restoredPending = 0;
             LcrDeliveryStatusDb lcrDb = new LcrDeliveryStatusDb(ctx.getApplicationContext());
             try {
                 for (BackupFileRef ref : refs) {
@@ -334,8 +335,13 @@ public class LocalDeliveryBackup {
                         cv.put(LcrDeliveryStatusDb.COL_TYPE, LcrDeliveryStatusDb.TYPE_ORIGINAL);
                         cv.put(LcrDeliveryStatusDb.COL_SOURCE, "RESTORE_CLEANUP");
                         cv.put(LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
-                        // Même prudence que restoreAllAsync : PENDING, jamais SYNCED supposé.
-                        cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, LcrDeliveryStatusDb.SYNC_PENDING);
+                        // ✅ CORRIGÉ (16 oct 2026, demande Paul) — respecte le sync_status du JSON
+                        // (comme restoreAllAsync) : un fichier SYNCED n'est pas re-poussé à
+                        // Dataverse ; tout le reste repart en PENDING pour être synchronisé.
+                        boolean jsonSynced = "SYNCED".equals(j.optString("sync_status", ""));
+                        cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS,
+                                jsonSynced ? LcrDeliveryStatusDb.SYNC_SYNCED : LcrDeliveryStatusDb.SYNC_PENDING);
+                        if (!jsonSynced) restoredPending++;
                         cv.put(LcrDeliveryStatusDb.COL_PAYLOAD_JSON, j.optString("payload_complet", ""));
                         lcrDb.insertDelivery(cv);
                         restored++;
@@ -346,18 +352,41 @@ public class LocalDeliveryBackup {
                 try { lcrDb.close(); } catch (Exception ignored) {}
             }
 
+            // ✅ AJOUTÉ (16 oct 2026, demande Paul) — des fichiers PENDING viennent d'être remis en
+            // BD locale : lancer la sync pour qu'ils partent vers Dataverse.
+            if (restoredPending > 0) {
+                try { com.pa.lcrdemo.dataverse.DeliverySyncScheduler.triggerNow(ctx.getApplicationContext()); }
+                catch (Exception ignoredTrig) {}
+            }
+
             // Étape 2 — ne garder, parmi les SYNCED seulement, que les N livraisons
-            // les plus récentes (par backup_ts). Jamais un fichier PENDING.
+            // les plus récentes. Jamais un fichier PENDING.
+            // ✅ CORRIGÉ (16 oct 2026, demande Paul) — un fichier compte comme SYNCED si son JSON
+            // le dit OU si la ligne BD du même wo_num + ticket_no est SYNCED (réécriture du JSON
+            // ratée). L'ordre de récence vient de ts_created_ms de la ligne BD quand elle existe
+            // (backup_ts est remis à "maintenant" à chaque réécriture post-sync, il ne reflète
+            // donc pas la date de la livraison).
             java.util.TreeMap<Long, List<BackupFileRef>> syncedByTs = new java.util.TreeMap<>(java.util.Collections.reverseOrder());
             java.util.Set<String> ticketsVus = new java.util.HashSet<>();
-            for (BackupFileRef ref : refs) {
-                try {
-                    JSONObject j = new JSONObject(new String(ref.content, StandardCharsets.UTF_8));
-                    if (!"SYNCED".equals(j.optString("sync_status", ""))) continue; // jamais touché
-                    long ts = j.optLong("backup_ts", 0L);
-                    syncedByTs.computeIfAbsent(ts, k -> new ArrayList<>()).add(ref);
-                    ref.ticketNo = j.optString("ticket_no", "");
-                } catch (Exception ignored) {}
+            LcrDeliveryStatusDb lcrDb2 = new LcrDeliveryStatusDb(ctx.getApplicationContext());
+            try {
+                for (BackupFileRef ref : refs) {
+                    try {
+                        JSONObject j = new JSONObject(new String(ref.content, StandardCharsets.UTF_8));
+                        String tk = j.optString("ticket_no", "");
+                        String wo = j.optString("wo_num", "");
+                        LcrDeliveryStatusDb.DeliveryRow row = tk.isEmpty() ? null : lcrDb2.getByTicketNo(tk);
+                        boolean dbSynced = row != null && wo.equals(row.woNum)
+                                && LcrDeliveryStatusDb.SYNC_SYNCED.equals(row.syncStatus);
+                        if (!"SYNCED".equals(j.optString("sync_status", "")) && !dbSynced) continue; // jamais touché
+                        long ts = (row != null && wo.equals(row.woNum) && row.tsCreatedMs > 0)
+                                ? row.tsCreatedMs : j.optLong("backup_ts", 0L);
+                        syncedByTs.computeIfAbsent(ts, k -> new ArrayList<>()).add(ref);
+                        ref.ticketNo = tk;
+                    } catch (Exception ignored) {}
+                }
+            } finally {
+                try { lcrDb2.close(); } catch (Exception ignored) {}
             }
 
             int kept = 0, deleted = 0;
@@ -380,6 +409,35 @@ public class LocalDeliveryBackup {
             Log.i(TAG, "cleanupOldBackupsAsync: restauré=" + fRestored + " gardé=" + fKept + " supprimé=" + fDeleted);
             if (cb != null) cb.onDone(fRestored, fKept, fDeleted, messages);
         }, "LocalDeliveryCleanup").start();
+    }
+
+    // ✅ AJOUTÉ (16 oct 2026, demande Paul — "garder les trois derniers fichiers JSON synchronisés,
+    // et si pas synchronisé s'assurer qu'il est dans la BD locale") — déclenchement AUTOMATIQUE de
+    // cleanupOldBackupsAsync(3) : après une sync réussie et au démarrage. Un seul à la fois ; délai
+    // pour laisser finir les réécritures de JSON post-sync (backupDeliveryAsync est asynchrone).
+    // Heure de démarrage du nettoyage auto en cours (0 = aucun). Au-delà de 5 min on considère le
+    // précédent perdu (thread mort avant son callback) et on autorise un nouveau nettoyage.
+    private static final java.util.concurrent.atomic.AtomicLong cleanupAutoDebutMs =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+
+    public static void cleanupAutoAsync(Context ctx, long delaiMs) {
+        long maintenant = System.currentTimeMillis();
+        long debut = cleanupAutoDebutMs.get();
+        if (debut != 0L && maintenant - debut < 5L * 60L * 1000L) return;
+        if (!cleanupAutoDebutMs.compareAndSet(debut, maintenant)) return;
+        final Context app = ctx.getApplicationContext();
+        new Thread(() -> {
+            try {
+                try { Thread.sleep(delaiMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                cleanupOldBackupsAsync(app, 3, (restored, kept, deleted, messages) -> {
+                    cleanupAutoDebutMs.set(0L);
+                    Log.i(TAG, "cleanupAuto: restauré=" + restored + " gardé=" + kept + " supprimé=" + deleted);
+                });
+            } catch (Exception e) {
+                cleanupAutoDebutMs.set(0L);
+                Log.w(TAG, "cleanupAuto ERR (non-bloquant): " + e.getMessage());
+            }
+        }, "LocalDeliveryCleanupAuto").start();
     }
 
     /** Référence à un fichier de backup — contenu + moyen de le supprimer, selon Android Q+ ou legacy. */

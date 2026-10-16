@@ -6426,6 +6426,17 @@ public class RegisterTabFragment extends Fragment {
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING);
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                         requireContext().getApplicationContext(), woNum, ticketNo, backupPayload);
+                    // ✅ AJOUTÉ (16 oct 2026, demande Paul — "dès que j'ai le JSON de fin de livraison,
+                    // celui du running_flowing est supprimé") — même règle que le deep link
+                    // (DeepLinkHandler) : le fichier nommé par jobId est redondant dès que le fichier
+                    // final (nommé par le ticket) est écrit. jobId lu dans le même payload.
+                    try {
+                        String jobIdRunning = new org.json.JSONObject(payloadCompletReel).optString("jobId", "");
+                        if (!jobIdRunning.isEmpty() && !jobIdRunning.equals(ticketNo)) {
+                            com.pa.lcr.lcp.storage.LocalDeliveryBackup.deleteArmementBackupAsync(
+                                requireContext().getApplicationContext(), woNum, jobIdRunning);
+                        }
+                    } catch (Exception ignoredJobIdRunning) {}
                 }
                 } catch (Exception e) {
                     android.util.Log.w("RetourWO", "Backup local ERR (non-bloquant): " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterTabFragment.Backup", e); } catch (Exception ignored) {}

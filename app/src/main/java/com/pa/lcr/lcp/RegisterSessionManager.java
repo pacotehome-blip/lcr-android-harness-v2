@@ -115,6 +115,11 @@ public final class RegisterSessionManager {
         try {
             com.pa.lcr.lcp.storage.LocalDeliveryBackup.purgeOldSyncedBackupsAsync(appCtx, 7);
         } catch (Exception ignored) {}
+        // ✅ AJOUTÉ (16 oct 2026, demande Paul) — au démarrage aussi : s'assure que tout JSON non
+        // synchronisé est présent en BD locale, et ne garde que les 3 derniers JSON SYNCED.
+        try {
+            com.pa.lcr.lcp.storage.LocalDeliveryBackup.cleanupAutoAsync(appCtx, 20000L);
+        } catch (Exception ignored) {}
         // ✅ AJOUTÉ (7 août 2026, demande Paul) — même politique de rétention 7 jours
         // pour les backups Support créés par le nouveau bouton "Vider (avec backup)".
         try {

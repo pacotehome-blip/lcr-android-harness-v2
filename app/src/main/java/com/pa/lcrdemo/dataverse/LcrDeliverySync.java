@@ -156,12 +156,14 @@ public class LcrDeliverySync {
         String orgUrl = LcrConfig.getDataverseUrl(ctx);
         com.pa.lcr.lcp.storage.ApiTraceStore apiTraceStore = apiTraceStore(ctx);
 
+        int pousseesOk = 0;
         for (DeliveryRow row : pending) {
             long startMs = System.currentTimeMillis();
             try {
                 String dataverseId = pushDeliveryRow(row, orgUrl, accessToken);
                 long durationMs = System.currentTimeMillis() - startMs;
                 db.markSynced(row.id, dataverseId);
+                pousseesOk++;
                 // ✅ AJOUTÉ (2 sept 2026, demande Paul — "le path doit
                 // fonctionner offline et online" / question sur
                 // sync_status BD vs JSON) — trouvé : la BD locale passait
@@ -224,6 +226,14 @@ public class LcrDeliverySync {
                     row.serialId, row.ticketNo, null,
                     "push ERR wo=" + row.woNum + " — " + e.getMessage());
             }
+        }
+        // ✅ AJOUTÉ (16 oct 2026, demande Paul — "garder que les trois derniers JSON synchronisés") —
+        // au moins une livraison vient d'être confirmée SYNCED : nettoyage automatique des backups
+        // JSON (restaure en BD tout PENDING manquant, supprime les SYNCED au-delà des 3 dernières).
+        // Délai 4 s : les réécritures de JSON post-sync (backupDeliveryAsync) sont asynchrones.
+        if (pousseesOk > 0) {
+            try { com.pa.lcr.lcp.storage.LocalDeliveryBackup.cleanupAutoAsync(ctx, 4000L); }
+            catch (Exception eCleanAuto) { Log.w(TAG, "cleanupAuto ERR (non-bloquant): " + eCleanAuto.getMessage()); }
         }
     }
 
