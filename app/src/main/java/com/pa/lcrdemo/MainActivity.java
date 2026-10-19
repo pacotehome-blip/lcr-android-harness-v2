@@ -1380,53 +1380,25 @@ public class MainActivity extends AppCompatActivity {
         if (btnSupportRestore != null) {
             btnSupportRestore.setOnClickListener(v -> {
                 com.pa.lcr.lcp.storage.DeliveryLogStore.listSupportBackupsAsync(getApplicationContext(), backups -> runOnUiThread(() -> {
-                    if (backups.isEmpty()) {
-                        Toast.makeText(this, "Aucun backup disponible dans Téléchargements", Toast.LENGTH_LONG).show();
-                        return;
-                    }
-                    String[] labels = new String[backups.size()];
+                    // ✅ MODIFIÉ (19 oct 2026, demande Paul — "je veux pouvoir importer la BD dans l'apk") —
+                    // la liste MediaStore ne montre que les fichiers créés par l'app elle-même : un
+                    // .db copié à la main dans Téléchargements n'y apparaît pas. Premier choix =
+                    // sélecteur de fichiers Android (n'importe quel .db), puis les backups listés.
+                    String[] labels = new String[backups.size() + 1];
+                    labels[0] = "\uD83D\uDCC2  Choisir un fichier .db\u2026";
                     for (int i = 0; i < backups.size(); i++) {
                         com.pa.lcr.lcp.storage.DeliveryLogStore.BackupInfo b = backups.get(i);
                         String dateStr = android.text.format.DateFormat.format("yyyy-MM-dd HH:mm:ss", b.dateAddedMs).toString();
-                        labels[i] = dateStr + "  —  " + b.displayLabel;
+                        labels[i + 1] = dateStr + "  \u2014  " + b.displayLabel;
                     }
                     new android.app.AlertDialog.Builder(this)
                         .setTitle("Restaurer depuis un backup")
                         .setItems(labels, (dlg, which) -> {
-                            com.pa.lcr.lcp.storage.DeliveryLogStore.BackupInfo chosen = backups.get(which);
-                            new android.app.AlertDialog.Builder(this)
-                                .setTitle("Confirmer la restauration")
-                                .setMessage("Ceci va REMPLACER complètement les données Support actuelles "
-                                    + "par le contenu de :\n\n" + chosen.displayLabel
-                                    + "\n\nL'app redémarrera automatiquement juste après. Continuer?")
-                                .setPositiveButton("Restaurer", (d2, w2) -> {
-                                    // Fermer toute connexion SQLite ouverte avant d'écraser le fichier.
-                                    try { if (deliveryStore != null) deliveryStore.close(); } catch (Exception ignored) {}
-                                    com.pa.lcr.lcp.storage.DeliveryLogStore.restoreFromBackupAsync(
-                                        getApplicationContext(), chosen, (success, errorMessage) -> runOnUiThread(() -> {
-                                        if (success) {
-                                            Toast.makeText(this, "Restauration réussie — redémarrage...", Toast.LENGTH_LONG).show();
-                                            ui.postDelayed(() -> {
-                                                try {
-                                                    android.content.Intent intent = getPackageManager()
-                                                        .getLaunchIntentForPackage(getPackageName());
-                                                    if (intent != null) {
-                                                        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
-                                                            | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-                                                        startActivity(intent);
-                                                    }
-                                                    android.os.Process.killProcess(android.os.Process.myPid());
-                                                } catch (Exception e) {
-                                                    android.util.Log.e("MainActivity", "Restart après restauration ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "MainActivity.Restart", e); } catch (Exception ignored) {}
-                                                }
-                                            }, 1200);
-                                        } else {
-                                            Toast.makeText(this, "Échec de la restauration : " + errorMessage, Toast.LENGTH_LONG).show();
-                                        }
-                                    }));
-                                })
-                                .setNegativeButton("Annuler", null)
-                                .show();
+                            if (which == 0) {
+                                ouvrirSelecteurRestaurationDb();
+                                return;
+                            }
+                            confirmerEtRestaurerBackup(backups.get(which - 1));
                         })
                         .setNegativeButton("Annuler", null)
                         .show();
@@ -5768,6 +5740,146 @@ private void scanUsb() {
     }
 
     // =========================
+    // Restauration depuis un fichier .db choisi (sélecteur Android)
+    // =========================
+    private static final int REQ_PICK_RESTORE_DB = 9103;
+
+    private void ouvrirSelecteurRestaurationDb() {
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            startActivityForResult(i, REQ_PICK_RESTORE_DB);
+        } catch (Exception e) {
+            toast("Sélecteur de fichiers indisponible: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Vérifie le fichier choisi AVANT d'écraser quoi que ce soit : copie en cache, ouverture en
+     * lecture seule, integrity_check, type de BD reconnu par ses tables (filgo_delivery_status ou
+     * delivery_summary), version compatible. Puis demande confirmation et restaure (même
+     * mécanisme + redémarrage que les backups Support).
+     */
+    private void preparerRestaurationDepuisFichier(final Uri uri) {
+        new Thread(() -> {
+            java.io.File tmp = new java.io.File(getCacheDir(), "restore_check.db");
+            String erreur = null;
+            boolean estStatus = false, estLcr = false;
+            long nbLignes = -1;
+            String nomFichier = "fichier choisi";
+            try {
+                try (android.database.Cursor cn = getContentResolver().query(uri, null, null, null, null)) {
+                    if (cn != null && cn.moveToFirst()) {
+                        int ix = cn.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                        if (ix >= 0 && cn.getString(ix) != null) nomFichier = cn.getString(ix);
+                    }
+                } catch (Exception ignored) {}
+                try (java.io.InputStream in = getContentResolver().openInputStream(uri);
+                     java.io.OutputStream out = new java.io.FileOutputStream(tmp)) {
+                    if (in == null) throw new java.io.IOException("lecture impossible");
+                    byte[] buf = new byte[64 * 1024];
+                    int r;
+                    while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+                }
+                android.database.sqlite.SQLiteDatabase chk = android.database.sqlite.SQLiteDatabase.openDatabase(
+                        tmp.getPath(), null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY);
+                try {
+                    try (android.database.Cursor c = chk.rawQuery("PRAGMA integrity_check", null)) {
+                        String res = (c != null && c.moveToFirst()) ? c.getString(0) : "?";
+                        if (!"ok".equalsIgnoreCase(res)) erreur = "integrity_check: " + res;
+                    }
+                    try (android.database.Cursor c = chk.rawQuery(
+                            "SELECT name FROM sqlite_master WHERE type='table'", null)) {
+                        while (c != null && c.moveToNext()) {
+                            String t = c.getString(0);
+                            if ("filgo_delivery_status".equals(t)) estStatus = true;
+                            if ("delivery_summary".equals(t)) estLcr = true;
+                        }
+                    }
+                    if (erreur == null && estStatus == estLcr) {
+                        erreur = "BD non reconnue (ni filgo_delivery_status, ni lcr_delivery)";
+                    }
+                    if (erreur == null && estStatus) {
+                        int ver = 0;
+                        try (android.database.Cursor c = chk.rawQuery("PRAGMA user_version", null)) {
+                            if (c != null && c.moveToFirst()) ver = c.getInt(0);
+                        }
+                        if (ver > com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DB_VERSION) {
+                            erreur = "version " + ver + " plus récente que l'app ("
+                                + com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DB_VERSION + ")";
+                        }
+                        try (android.database.Cursor c = chk.rawQuery(
+                                "SELECT COUNT(*) FROM filgo_delivery_status", null)) {
+                            if (c != null && c.moveToFirst()) nbLignes = c.getLong(0);
+                        }
+                    }
+                } finally {
+                    try { chk.close(); } catch (Exception ignored) {}
+                }
+            } catch (Exception e) {
+                erreur = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            } finally {
+                try { tmp.delete(); } catch (Exception ignored) {}
+            }
+
+            final String fErreur = erreur;
+            final boolean fStatus = estStatus;
+            final long fNb = nbLignes;
+            final String fNom = nomFichier;
+            runOnUiThread(() -> {
+                if (fErreur != null) {
+                    Toast.makeText(this, "Fichier refusé (" + fNom + ") : " + fErreur, Toast.LENGTH_LONG).show();
+                    return;
+                }
+                String label = fNom + (fStatus
+                    ? " \u2014 filgo_delivery_status.db (" + fNb + " ligne(s)); lcr_delivery.db inchangée"
+                    : " \u2014 lcr_delivery.db; filgo_delivery_status.db inchangée");
+                com.pa.lcr.lcp.storage.DeliveryLogStore.BackupInfo info =
+                    new com.pa.lcr.lcp.storage.DeliveryLogStore.BackupInfo(
+                        label, System.currentTimeMillis(), fStatus ? null : uri, fStatus ? uri : null);
+                confirmerEtRestaurerBackup(info);
+            });
+        }, "RestoreDbPick").start();
+    }
+
+    private void confirmerEtRestaurerBackup(final com.pa.lcr.lcp.storage.DeliveryLogStore.BackupInfo chosen) {
+        new android.app.AlertDialog.Builder(this)
+            .setTitle("Confirmer la restauration")
+            .setMessage("Ceci va REMPLACER complètement les données Support actuelles "
+                + "par le contenu de :\n\n" + chosen.displayLabel
+                + "\n\nL'app redémarrera automatiquement juste après. Continuer?")
+            .setPositiveButton("Restaurer", (d2, w2) -> {
+                // Fermer toute connexion SQLite ouverte avant d'écraser le fichier.
+                try { if (deliveryStore != null) deliveryStore.close(); } catch (Exception ignored) {}
+                com.pa.lcr.lcp.storage.DeliveryLogStore.restoreFromBackupAsync(
+                    getApplicationContext(), chosen, (success, errorMessage) -> runOnUiThread(() -> {
+                    if (success) {
+                        Toast.makeText(this, "Restauration réussie — redémarrage...", Toast.LENGTH_LONG).show();
+                        ui.postDelayed(() -> {
+                            try {
+                                android.content.Intent intent = getPackageManager()
+                                    .getLaunchIntentForPackage(getPackageName());
+                                if (intent != null) {
+                                    intent.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                        | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                                    startActivity(intent);
+                                }
+                                android.os.Process.killProcess(android.os.Process.myPid());
+                            } catch (Exception e) {
+                                android.util.Log.e("MainActivity", "Restart après restauration ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "MainActivity.Restart", e); } catch (Exception ignored) {}
+                            }
+                        }, 1200);
+                    } else {
+                        Toast.makeText(this, "Échec de la restauration : " + errorMessage, Toast.LENGTH_LONG).show();
+                    }
+                }));
+            })
+            .setNegativeButton("Annuler", null)
+            .show();
+    }
+
+    // =========================
     // Backup DB
     // =========================
     private static final int REQ_PICK_BACKUP_DIR = 9102;
@@ -5905,6 +6017,15 @@ private void scanUsb() {
 
         if (requestCode == REQ_ENABLE_BT) {
             refreshBondedBtList();
+            return;
+        }
+
+        if (requestCode == REQ_PICK_RESTORE_DB) {
+            if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+                toast("Restauration: sélection annulée");
+                return;
+            }
+            preparerRestaurationDepuisFichier(data.getData());
             return;
         }
 
