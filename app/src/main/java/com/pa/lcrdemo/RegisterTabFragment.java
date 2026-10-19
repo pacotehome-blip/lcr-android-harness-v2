@@ -4647,12 +4647,36 @@ public class RegisterTabFragment extends Fragment {
                         resultFin.put("fs_net_l", netFin);
                         resultFin.put("fs_gross_l", grossFin);
                         extraFin.put("result", resultFin);
+                        // ✅ AJOUTÉ (19 oct 2026, demande Paul — analyse tickets 61-65) — ce filet
+                        // n'envoyait AUCUN jobId : onDeliveryEnded faisait donc un INSERT simple,
+                        // refusé en silence par UNIQUE(wo_num,ticket_no) quand une ligne portait
+                        // déjà ce ticket (litres perdus : 546.2 L ticket 63). Même source que
+                        // [FILET-CONNECTED] : la ligne d'armement en cours, sinon le dernier jobId
+                        // actif du contrôleur.
+                        String jobIdFin = "";
+                        try {
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbJobFin =
+                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                            try {
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rowJobFin =
+                                    dbJobFin.getRunningFlowingSafetyNet(currentWoNum, serialFromArgs);
+                                if (rowJobFin != null && rowJobFin.jobId != null) jobIdFin = rowJobFin.jobId;
+                            } finally {
+                                try { dbJobFin.close(); } catch (Exception ignored) {}
+                            }
+                        } catch (Exception ignored) {}
+                        if (jobIdFin.isEmpty()) {
+                            String jLast = c.getLastActiveJobId();
+                            if (jLast != null) jobIdFin = jLast;
+                        }
+                        if (!jobIdFin.isEmpty()) extraFin.put("jobId", jobIdFin);
                         MainActivity main = (MainActivity) getActivity();
                         if (main != null) {
                             main.onDeliveryEnded(currentWoNum, currentWoIdGuid, extraFin.toString(),
                                 node, serialFromArgs, macFin);
                             LogBus.api(node, "[FILET-TERMINER] onDeliveryEnded appelé directement — ticket="
-                                + ticketFin + " net=" + netFin + " gross=" + grossFin);
+                                + ticketFin + " net=" + netFin + " gross=" + grossFin
+                                + " jobId=" + jobIdFin);
                         }
                     } catch (Exception e) {
                         android.util.Log.w("RegisterTabFragment", "Filet sécurité TERMINER ERR: " + e.getMessage());
@@ -6132,7 +6156,43 @@ public class RegisterTabFragment extends Fragment {
                 // fois le job VRAIMENT terminé. Repli ajouté ici, avant
                 // les TextViews (dernier recours le plus fragile).
                 if (ticketNo.isEmpty() && lastKnownTicketNo != null && !lastKnownTicketNo.trim().isEmpty()) {
-                    ticketNo = lastKnownTicketNo.trim();
+                    String ticketChoisi = lastKnownTicketNo.trim();
+                    // ✅ CORRIGÉ (19 oct 2026, demande Paul — analyse tickets 61-65) —
+                    // lastKnownTicketNo n'est mis à jour QUE par onTicketInfo() : il était resté à
+                    // 61 (lecture de 12:22) alors que le registre affichait 62 → la livraison de
+                    // 676.8 L a été enregistrée sous « 61 ». Confronte maintenant à la lecture
+                    // fraîche du registre : si elle diffère ET qu'une ligne de la BD porte déjà ce
+                    // ticket pour ce WO (deux lectures indépendantes concordent, ex. FILET-TERMINER
+                    // l'a déjà enregistré), la valeur de lastKnownTicketNo est périmée → on prend
+                    // la fraîche. Sinon on garde la règle du 27 août (méfiance d'une lecture
+                    // transitoire isolée, incident 93/94).
+                    try {
+                        String fraisRetour = (controller != null) ? controller.api_readTicketNo23Frais() : null;
+                        if (fraisRetour != null && !fraisRetour.trim().isEmpty()
+                                && !fraisRetour.trim().equals(ticketChoisi)) {
+                            boolean confirmeParBd = false;
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbConf =
+                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                            try {
+                                confirmeParBd = dbConf.getByWoAndTicket(woNum, fraisRetour.trim()) != null;
+                            } finally {
+                                try { dbConf.close(); } catch (Exception ignored) {}
+                            }
+                            if (confirmeParBd) {
+                                LogBus.api(node, "[RETOUR-WO] lastKnownTicketNo=" + ticketChoisi
+                                    + " périmé — lecture fraîche du registre=" + fraisRetour.trim()
+                                    + " confirmée par la BD locale, utilisée à la place");
+                                ticketChoisi = fraisRetour.trim();
+                            } else {
+                                LogBus.api(node, "[RETOUR-WO] lecture fraîche=" + fraisRetour.trim()
+                                    + " diffère de lastKnownTicketNo=" + ticketChoisi
+                                    + " sans confirmation BD — lastKnownTicketNo conservé (méfiance)");
+                            }
+                        }
+                    } catch (Exception eFraisRetour) {
+                        android.util.Log.w("RetourWO", "confrontation lecture fraîche ERR (non-bloquant): " + eFraisRetour.getMessage());
+                    }
+                    ticketNo = ticketChoisi;
                     if (saleNo.isEmpty()) saleNo = ticketNo;
                     LogBus.api(node, "[RETOUR-WO] repli lastKnownTicketNo — ticket=" + ticketNo);
                 }

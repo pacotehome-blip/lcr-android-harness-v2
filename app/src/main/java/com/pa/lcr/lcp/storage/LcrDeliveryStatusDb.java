@@ -402,7 +402,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     // lignes déjà en BD pour ce WO (peu importe quand/dans quel ordre
     // elles sont arrivées), plus la livraison courante — une vraie
     // somme, jamais un chaînage.
-    private void computeCumulativeFields(ContentValues cv, String woNum, String excludeJobId) {
+    private void computeCumulativeFields(ContentValues cv, String woNum, long excludeRowId) {
         if (woNum == null || woNum.isEmpty()) return;
         double newNet   = cv.getAsDouble(COL_NET_L)    != null ? cv.getAsDouble(COL_NET_L)    : 0;
         double newGross = cv.getAsDouble(COL_GROSS_L)  != null ? cv.getAsDouble(COL_GROSS_L)  : 0;
@@ -413,8 +413,10 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         DeliveryRow plusRecente = null;
 
         for (DeliveryRow r : getAllForWo(woNum)) {
-            if (excludeJobId != null && !excludeJobId.isEmpty()
-                    && excludeJobId.equals(r.jobId)) continue;
+            // ✅ CORRIGÉ (19 oct 2026) — exclut la ligne précise mise à jour (par id), plus
+            // TOUTES les lignes portant ce job_id : un même job_id peut maintenant servir
+            // plusieurs livraisons (lignes finales distinctes) qui doivent rester comptées.
+            if (excludeRowId > 0 && r.id == excludeRowId) continue;
             if (TYPE_ANNULATION.equals(r.type)) continue;
             totalNet   += r.netL;
             totalGross += r.grossL;
@@ -486,10 +488,11 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
 
         // Calculer les champs historique depuis la dernière ligne du même wo_num
         String woNum = cv.getAsString(COL_WO_NUM);
-        computeCumulativeFields(cv, woNum, null);
+        computeCumulativeFields(cv, woNum, -1);
 
         try {
             long id = getWritableDatabase().insertOrThrow(TABLE_DELIVERY, null, cv);
+            if (id == -1) logInsertIgnore("insertDelivery", cv);
             Log.i(TAG, "insertDelivery INSERT id=" + id + " wo=" + woNum
                 + " type=" + cv.getAsString(COL_TYPE)
                 + " ticket=" + cv.getAsString(COL_TICKET_NO)
@@ -750,7 +753,12 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         try (Cursor c = getReadableDatabase().query(
                 TABLE_DELIVERY, null,
                 COL_JOB_ID + "=?", new String[]{jobId},
-                null, null, null, "1")) {
+                // ✅ CORRIGÉ (19 oct 2026) — un même job_id peut porter plusieurs lignes
+                // (livraisons successives réutilisant le jobId) : la ligne EN COURS
+                // (RUNNING_FLOWING) d'abord, sinon la plus récente.
+                null, null,
+                "CASE WHEN " + COL_STOP_TYPE + "='RUNNING_FLOWING' THEN 0 ELSE 1 END, "
+                    + COL_TS_CREATED_MS + " DESC, " + COL_ID + " DESC", "1")) {
             if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
         } catch (Exception e) {
             Log.e(TAG, "getByJobId ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.getByJobId", e); } catch (Exception ignored) {}
@@ -1110,44 +1118,170 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         return STOP_TYPE_ORPHELIN.equals(s.stopType);
     }
 
+    /** Ligne portant exactement ce (wo_num, ticket_no) — la clé de la contrainte UNIQUE. */
+    public DeliveryRow getByWoAndTicket(String woNum, String ticketNo) {
+        if (woNum == null || woNum.isEmpty() || ticketNo == null || ticketNo.isEmpty()) return null;
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, null,
+                COL_WO_NUM + "=? AND " + COL_TICKET_NO + "=?", new String[]{woNum, ticketNo},
+                null, null, COL_ID + " DESC", "1")) {
+            if (c.moveToFirst()) return DeliveryRow.fromCursor(c);
+        } catch (Exception e) {
+            Log.e(TAG, "getByWoAndTicket ERR: " + e.getMessage());
+        }
+        return null;
+    }
+
+    private boolean existeTicketVidePourWo(String woNum) {
+        try (Cursor c = getReadableDatabase().query(
+                TABLE_DELIVERY, new String[]{COL_ID},
+                COL_WO_NUM + "=? AND " + COL_TICKET_NO + "=''", new String[]{woNum},
+                null, null, null, "1")) {
+            return c.moveToFirst();
+        } catch (Exception e) {
+            Log.e(TAG, "existeTicketVidePourWo ERR: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static boolean estLigneFinale(String stopType) {
+        return STOP_TYPE_LIVRAISON.equals(stopType) || "ANNULATION".equals(stopType);
+    }
+
+    // ✅ AJOUTÉ (19 oct 2026, demande Paul — analyse tickets 61-65) — un INSERT refusé par
+    // UNIQUE(wo_num, ticket_no) ON CONFLICT IGNORE retournait -1 sans aucune trace : les
+    // litres de la livraison étaient perdus en silence (ids AUTOINCREMENT manquants 2/4/5).
+    private void logInsertIgnore(String origine, ContentValues cv) {
+        try {
+            String wo = cv.getAsString(COL_WO_NUM);
+            String tk = cv.getAsString(COL_TICKET_NO);
+            DeliveryRow dup = getByWoAndTicket(wo, tk);
+            String msg = "[DB-INSERT-IGNORÉ] " + origine + " wo=" + wo + " ticket=" + tk
+                + " net=" + cv.getAsDouble(COL_NET_L) + " stop_type=" + cv.getAsString(COL_STOP_TYPE)
+                + " — refusé par UNIQUE(wo_num,ticket_no); ligne existante id="
+                + (dup != null ? dup.id + " net=" + dup.netL + " stop_type=" + dup.stopType : "?");
+            Log.w(TAG, msg);
+            com.pa.lcr.lcp.log.LogBus.api(0, msg);
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * ✅ AJOUTÉ (19 oct 2026) — faut-il écrire dans une NOUVELLE ligne plutôt que d'écraser
+     * la ligne existante portant ce job_id ? Oui si cette ligne est déjà finale
+     * (LIVRAISON / ANNULATION) et que l'écriture entrante ne la prolonge pas : nouvel
+     * armement (RUNNING_FLOWING) réutilisant le jobId, annulation d'une livraison faite,
+     * ou fin de livraison d'un AUTRE ticket.
+     */
+    private static boolean doitCreerNouvelleLigne(DeliveryRow existing, ContentValues cv) {
+        if (existing == null || !estLigneFinale(existing.stopType)) return false;
+        String inType = cv.getAsString(COL_STOP_TYPE);
+        if ("RUNNING_FLOWING".equals(inType)) return true;
+        if (STOP_TYPE_LIVRAISON.equals(existing.stopType)) {
+            if ("ANNULATION".equals(inType)) return true;
+        } else { // existante = ANNULATION
+            if (!"ANNULATION".equals(inType)) return true;
+        }
+        String inTicket = cv.getAsString(COL_TICKET_NO);
+        String exTicket = existing.ticketNo;
+        return inTicket != null && !inTicket.trim().isEmpty()
+            && exTicket != null && !exTicket.trim().isEmpty()
+            && !inTicket.trim().equals(exTicket.trim());
+    }
+
     public long upsertByJobId(ContentValues cv) {
         String jobId = cv.getAsString(COL_JOB_ID);
         String woNum = cv.getAsString(COL_WO_NUM);
         long now = System.currentTimeMillis();
         cv.put(COL_TS_UPDATED_MS, now);
-        // ✅ AJOUTÉ (28 août 2026, demande Paul — "on tient compte du
-        // cumul partout... on renforcit même avec une livraison en
-        // cours") — même calcul cumulatif qu'insertDelivery(), avec
-        // exclusion de sa PROPRE ligne (par job_id) — sinon, à la mise à
-        // jour finale, cette ligne se trouverait elle-même comme
-        // "précédente" (déjà insérée à l'armement), faussant le cumul.
-        // À l'armement (net=0), le total reste correctement égal au
-        // cumul déjà existant (aucun ajout réel encore) — à la fin,
-        // recalculé avec les vraies valeurs net/gross.
-        computeCumulativeFields(cv, woNum, jobId);
+
+        // Ligne cible à mettre à jour (par id) : celle du job_id, sauf si elle est déjà
+        // finale pour une autre livraison (voir doitCreerNouvelleLigne).
+        DeliveryRow cible = null;
         if (jobId != null && !jobId.isEmpty()) {
             DeliveryRow existing = getByJobId(jobId);
             if (existing != null) {
-                try {
-                    int rows = getWritableDatabase().update(
-                        TABLE_DELIVERY, cv, COL_JOB_ID + "=?", new String[]{jobId});
-                    if (rows > 0) {
-                        if (woNum != null) ALL_FOR_WO_CACHE.remove(woNum);
-                        return existing.id;
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "upsertByJobId UPDATE ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.upsertByJobId", e); } catch (Exception ignored) {}
-                    return -1;
+                if (doitCreerNouvelleLigne(existing, cv)) {
+                    String msg = "[DB-JOBID-REUTILISE] job_id=" + jobId + " ligne finale id=" + existing.id
+                        + " ticket=" + existing.ticketNo + " (" + existing.stopType + ", net="
+                        + existing.netL + ") conservée — écriture entrante stop_type="
+                        + cv.getAsString(COL_STOP_TYPE) + " ticket=" + cv.getAsString(COL_TICKET_NO)
+                        + " va dans une nouvelle ligne";
+                    Log.w(TAG, msg);
+                    try { com.pa.lcr.lcp.log.LogBus.api(0, msg); } catch (Exception ignored) {}
+                } else {
+                    cible = existing;
                 }
             }
         }
-        // Aucune ligne existante pour ce job_id — insertion fraîche
+        computeCumulativeFields(cv, woNum, cible != null ? cible.id : -1);
+
+        if (cible != null) {
+            try {
+                int rows = getWritableDatabase().update(
+                    TABLE_DELIVERY, cv, COL_ID + "=?", new String[]{String.valueOf(cible.id)});
+                if (rows > 0) {
+                    if (woNum != null) ALL_FOR_WO_CACHE.remove(woNum);
+                    return cible.id;
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "upsertByJobId UPDATE ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.upsertByJobId", e); } catch (Exception ignored) {}
+                return -1;
+            }
+        }
+
+        // Insertion fraîche — mais si (wo_num, ticket_no) existe déjà, l'INSERT serait
+        // ignoré en silence (UNIQUE ON CONFLICT IGNORE) et les litres perdus : on traite
+        // alors cette ligne existante explicitement.
+        String ticket = cv.getAsString(COL_TICKET_NO);
+        DeliveryRow dup = getByWoAndTicket(woNum, ticket);
+        if (dup != null) {
+            boolean entrantEnCours = "RUNNING_FLOWING".equals(cv.getAsString(COL_STOP_TYPE));
+            Double inNet = cv.getAsDouble(COL_NET_L);
+            boolean dupFinale = estLigneFinale(dup.stopType);
+            boolean peutRemplacer = !dupFinale
+                || (dup.netL == 0 && inNet != null && inNet > 0 && !entrantEnCours);
+            if (!peutRemplacer) {
+                String msg = "[DB-UPSERT-IGNORÉ] wo=" + woNum + " ticket=" + ticket + " stop_type="
+                    + cv.getAsString(COL_STOP_TYPE) + " net=" + inNet + " — ligne finale id=" + dup.id
+                    + " (net=" + dup.netL + ") conservée, écriture entrante non appliquée";
+                Log.w(TAG, msg);
+                try { com.pa.lcr.lcp.log.LogBus.api(0, msg); } catch (Exception ignored) {}
+                return dup.id;
+            }
+            try {
+                computeCumulativeFields(cv, woNum, dup.id);
+                int rows = getWritableDatabase().update(
+                    TABLE_DELIVERY, cv, COL_ID + "=?", new String[]{String.valueOf(dup.id)});
+                if (rows > 0) {
+                    if (woNum != null) ALL_FOR_WO_CACHE.remove(woNum);
+                    String msg = "[DB-UPSERT-FUSION] wo=" + woNum + " ticket=" + ticket
+                        + " — ligne id=" + dup.id + " (" + dup.stopType + ", net=" + dup.netL
+                        + ") mise à jour avec stop_type=" + cv.getAsString(COL_STOP_TYPE)
+                        + " net=" + inNet + " (l'INSERT aurait été ignoré par UNIQUE)";
+                    Log.w(TAG, msg);
+                    try { com.pa.lcr.lcp.log.LogBus.api(0, msg); } catch (Exception ignored) {}
+                    return dup.id;
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "upsertByJobId FUSION ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LcrDeliveryStatusDb.upsertByJobId", e); } catch (Exception ignored) {}
+                return -1;
+            }
+        }
+
+        // Ticket vide ("" à l'armement) : UNIQUE(wo_num, ticket_no) traite "" comme une valeur —
+        // une 2e ligne sans ticket pour ce WO serait refusée en silence. NULL, lui, n'entre
+        // jamais en conflit : on l'utilise seulement quand une ligne "" existe déjà.
+        if ((ticket == null || ticket.trim().isEmpty()) && woNum != null && !woNum.isEmpty()
+                && existeTicketVidePourWo(woNum)) {
+            cv.putNull(COL_TICKET_NO);
+        }
         cv.put(COL_TS_CREATED_MS, now);
         if (!cv.containsKey(COL_SYNC_STATUS)) {
             cv.put(COL_SYNC_STATUS, SYNC_PENDING);
         }
         try {
             long id = getWritableDatabase().insert(TABLE_DELIVERY, null, cv);
+            if (id == -1) logInsertIgnore("upsertByJobId", cv);
             if (woNum != null) ALL_FOR_WO_CACHE.remove(woNum);
             return id;
         } catch (Exception e) {

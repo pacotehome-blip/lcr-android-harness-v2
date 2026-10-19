@@ -701,7 +701,7 @@ public class LcrDeliverySync {
 
     /**
      * Pousse une seule transaction vers Dataverse.
-     * Si dataverse_id existe → PATCH, sinon → POST.
+     * dataverse_id local → PATCH ; sinon ligne trouvée par filgo_name → PATCH ; sinon → POST.
      * Retourne le GUID Dataverse créé ou mis à jour.
      */
     private static String pushDeliveryRow(DeliveryRow row, String orgUrl,
@@ -730,12 +730,39 @@ public class LcrDeliverySync {
         // plus besoin d'être cherché une fois la ligne marquée SYNCED
         // localement.
         String deliveryName = body.optString("filgo_name", "");
+        // ✅ CORRIGÉ (19 oct 2026, demande Paul) — le commentaire de cette méthode disait
+        // « dataverse_id existe → PATCH » mais le code ne faisait JAMAIS de PATCH : une ligne
+        // locale réécrite après son premier envoi (ex. ticket corrigé 61→62, ou ligne remise
+        // PENDING) laissait l'ancienne ligne Dataverse intacte (valeurs périmées) ou créait un
+        // doublon. Maintenant : 1) dataverse_id local connu → PATCH de cette ligne (met aussi à
+        // jour filgo_name si le ticket a changé) ; introuvable (404) → on retombe sur 2) ;
+        // 2) ligne trouvée par filgo_name → PATCH (au lieu de la réutiliser telle quelle) ;
+        // 3) sinon POST. Le GUID retourné est celui de la ligne mise à jour.
+        String localDvId = row.dataverseId != null ? row.dataverseId.trim() : "";
+        if (localDvId.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) {
+            try {
+                doJsonRequest("PATCH",
+                    orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY + "(" + localDvId + ")",
+                    accessToken, body);
+                Log.i(TAG, "pushDeliveryRow: PATCH OK dataverse_id local=" + localDvId
+                    + " filgo_name=" + deliveryName);
+                return localDvId;
+            } catch (RuntimeException ePatchLocal) {
+                String msgP = String.valueOf(ePatchLocal.getMessage());
+                if (!msgP.startsWith("HTTP 404")) throw ePatchLocal;
+                Log.w(TAG, "pushDeliveryRow: dataverse_id local=" + localDvId
+                    + " introuvable côté Dataverse (404) — recherche par filgo_name puis POST");
+            }
+        }
         if (!deliveryName.isEmpty()) {
             String existingId = findExistingDataverseId(deliveryName, orgUrl, accessToken);
             if (existingId != null) {
+                doJsonRequest("PATCH",
+                    orgUrl + "/api/data/v9.2/" + TABLE_DELIVERY + "(" + existingId + ")",
+                    accessToken, body);
                 Log.i(TAG, "pushDeliveryRow: filgo_name=" + deliveryName
                     + " déjà présent dans Dataverse (id=" + existingId
-                    + ") — POST sauté, réutilisation directe");
+                    + ") — PATCH avec les valeurs locales (pas de nouveau POST)");
                 return existingId;
             }
         }
