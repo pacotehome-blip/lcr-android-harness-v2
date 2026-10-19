@@ -7027,15 +7027,56 @@ private boolean ensureBtConnectPermission() {
     // (TF=300ms par node — voir finalizeTcpRegisterTab()/scan BT), pas
     // une nouvelle logique inventée. S'arrête au premier node qui répond.
     private NodeTrouve scannerNodePourSerie(com.pa.lcr.lcp.transport.TransportIo io) {
-        final int TF = 300;
+        return scannerNodePourSerie(io, SCAN_NODE_TIMEOUT_DEFAUT_MS, SCAN_NODE_ESSAIS_DEFAUT, SCAN_NODE_PAUSE_DEFAUT_MS);
+    }
+
+    // ✅ AJOUTÉ (19 oct 2026, demande Paul — "ajoute une config de délais et d'essais entre les
+    // nodes, car en manuel le registre est détecté mais la validation ne le trouve pas").
+    // Valeurs par défaut = comportement d'avant (300 ms, 1 essai, aucune pause). Réglables dans
+    // l'écran de validation (RegisterValidationActivity), lues par la validation manuelle seulement
+    // (validerUnCandidatLectureSeule avecProduits=true) ; les sondes automatiques gardent les défauts.
+    static final String PREF_VAL_SCAN_TIMEOUT_MS = "val_scan_timeout_ms";
+    static final String PREF_VAL_SCAN_ESSAIS     = "val_scan_essais";
+    static final String PREF_VAL_SCAN_PAUSE_MS   = "val_scan_pause_ms";
+    static final int SCAN_NODE_TIMEOUT_DEFAUT_MS = 300;
+    static final int SCAN_NODE_ESSAIS_DEFAUT     = 1;
+    static final int SCAN_NODE_PAUSE_DEFAUT_MS   = 0;
+
+    /** @return {délai de réponse par tentative (ms), essais par node, pause entre tentatives/nodes (ms)} */
+    int[] lireConfigScanNode() {
+        int t = SCAN_NODE_TIMEOUT_DEFAUT_MS, e = SCAN_NODE_ESSAIS_DEFAUT, p = SCAN_NODE_PAUSE_DEFAUT_MS;
+        try {
+            SharedPreferences sp = getSharedPreferences("prefs", MODE_PRIVATE);
+            t = sp.getInt(PREF_VAL_SCAN_TIMEOUT_MS, t);
+            e = sp.getInt(PREF_VAL_SCAN_ESSAIS, e);
+            p = sp.getInt(PREF_VAL_SCAN_PAUSE_MS, p);
+        } catch (Exception ignored) {}
+        return new int[]{ Math.max(100, Math.min(5000, t)), Math.max(1, Math.min(5, e)), Math.max(0, Math.min(2000, p)) };
+    }
+
+    private NodeTrouve scannerNodePourSerie(com.pa.lcr.lcp.transport.TransportIo io,
+                                            int timeoutMs, int essaisParNode, int pauseMs) {
         for (int node = 1; node <= 250; node++) {
-            try {
-                com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, node, 255, true);
-                byte[] raw = tmp.opGetField(80, TF);
-                String serial = decodeSerialBytes(raw);
-                if (serial != null && !serial.trim().isEmpty()) return new NodeTrouve(node, serial);
-            } catch (Exception ignored) {}
+            for (int essai = 1; essai <= essaisParNode; essai++) {
+                if (validationExterneAnnulee) return null;
+                try {
+                    com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, node, 255, true);
+                    byte[] raw = tmp.opGetField(80, timeoutMs);
+                    String serial = decodeSerialBytes(raw);
+                    if (serial != null && !serial.trim().isEmpty()) {
+                        logMedia1("[VALIDATION-SCAN] node=" + node + " trouvé à l'essai " + essai + "/" + essaisParNode
+                            + " (délai=" + timeoutMs + "ms, pause=" + pauseMs + "ms)");
+                        return new NodeTrouve(node, serial);
+                    }
+                } catch (Exception ignored) {}
+                // Pause entre deux tentatives (même node) et entre deux nodes.
+                if (pauseMs > 0 && !(node == 250 && essai == essaisParNode)) {
+                    try { Thread.sleep(pauseMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return null; }
+                }
+            }
         }
+        logMedia1("[VALIDATION-SCAN] aucun node n'a répondu (250 nodes, délai=" + timeoutMs
+            + "ms, essais=" + essaisParNode + ", pause=" + pauseMs + "ms)");
         return null;
     }
 
@@ -7052,6 +7093,11 @@ private boolean ensureBtConnectPermission() {
      */
     private String validerUnCandidatLectureSeule(String candidatKey, boolean avecProduits) {
         long t0 = System.currentTimeMillis();
+        // Config de balayage des nodes (délai / essais / pause) : validation manuelle seulement.
+        final int[] cfgScan = avecProduits
+            ? lireConfigScanNode()
+            : new int[]{SCAN_NODE_TIMEOUT_DEFAUT_MS, SCAN_NODE_ESSAIS_DEFAUT, SCAN_NODE_PAUSE_DEFAUT_MS};
+        final String cfgTxt = "délai=" + cfgScan[0] + "ms, essais=" + cfgScan[1] + ", pause=" + cfgScan[2] + "ms";
         if (candidatKey.equals("USB")) {
             // Réutilise le port déjà ouvert par l'app s'il existe — ne touche à
             // rien d'autre. Si aucun n'est ouvert, signale l'absence sans tenter
@@ -7062,7 +7108,7 @@ private boolean ensureBtConnectPermission() {
                 com.pa.lcr.lcp.transport.TransportIo io = (mediaTransportManager != null)
                     ? mediaTransportManager.getByKey("USB") : null;
                 if (io == null || !io.isOpen()) return "❌ Absent — port USB non ouvert";
-                NodeTrouve trouve = scannerNodePourSerie(io);
+                NodeTrouve trouve = scannerNodePourSerie(io, cfgScan[0], cfgScan[1], cfgScan[2]);
                 long ms = System.currentTimeMillis() - t0;
                 if (trouve != null) {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, trouve.node, 255, true);
@@ -7138,7 +7184,7 @@ private boolean ensureBtConnectPermission() {
                 com.pa.lcr.lcp.transport.BtSppTransportIo tmpIo = new com.pa.lcr.lcp.transport.BtSppTransportIo(
                     "BT:" + mac, sock, sock.getInputStream(), sock.getOutputStream(),
                     "Validation candidat BT:" + mac, System.currentTimeMillis());
-                NodeTrouve trouve = scannerNodePourSerie(tmpIo);
+                NodeTrouve trouve = scannerNodePourSerie(tmpIo, cfgScan[0], cfgScan[1], cfgScan[2]);
                 long ms = System.currentTimeMillis() - t0;
                 if (trouve != null) {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, trouve.node, 255, true);
@@ -7148,7 +7194,7 @@ private boolean ensureBtConnectPermission() {
                     String ligneProduitsBt = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
                     return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)") + ligneProduitsBt;
                 }
-                return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés) — débit du pont BT à vérifier séparément (voir guide)";
+                return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — débit du pont BT à vérifier séparément (voir guide)";
             } catch (Exception e) {
                 return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
             } finally {
@@ -7166,7 +7212,7 @@ private boolean ensureBtConnectPermission() {
                 com.pa.lcr.lcp.transport.TcpTransportIo tmpIo = new com.pa.lcr.lcp.transport.TcpTransportIo(
                     tcpKey, sock, sock.getInputStream(), sock.getOutputStream(),
                     "Validation candidat " + tcpKey, System.currentTimeMillis());
-                NodeTrouve trouve = scannerNodePourSerie(tmpIo);
+                NodeTrouve trouve = scannerNodePourSerie(tmpIo, cfgScan[0], cfgScan[1], cfgScan[2]);
                 long ms = System.currentTimeMillis() - t0;
                 if (trouve != null) {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, trouve.node, 255, true);
@@ -7176,7 +7222,7 @@ private boolean ensureBtConnectPermission() {
                     String ligneProduitsTcp = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
                     return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)") + ligneProduitsTcp;
                 }
-                return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés) — mauvais débit probable";
+                return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — mauvais débit probable";
             } catch (Exception e) {
                 return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
             } finally {

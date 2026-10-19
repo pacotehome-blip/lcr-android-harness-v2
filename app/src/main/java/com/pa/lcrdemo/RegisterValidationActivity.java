@@ -44,6 +44,7 @@ public class RegisterValidationActivity extends Activity {
     private final List<CheckBox> cases = new ArrayList<>();
     private final List<String[]> candidats = new ArrayList<>(); // {label, key}, même ordre que `cases`
     private boolean touteCocheState = true;
+    private android.widget.EditText edtScanTimeout, edtScanEssais, edtScanPause;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -70,8 +71,20 @@ public class RegisterValidationActivity extends Activity {
         sousTitre.setPadding(0, dp(4), 0, dp(12));
         root.addView(sousTitre);
 
+        // ✅ AJOUTÉ (19 oct 2026, demande Paul) — réglage du balayage des nodes (1 à 250).
+        TextView titreScan = new TextView(this);
+        titreScan.setText("Balayage des nodes");
+        titreScan.setTypeface(null, android.graphics.Typeface.BOLD);
+        root.addView(titreScan);
+        MainActivity mCfg = MainActivity.ACTIVE_INSTANCE;
+        int[] cfg = mCfg != null ? mCfg.lireConfigScanNode()
+            : new int[]{MainActivity.SCAN_NODE_TIMEOUT_DEFAUT_MS, MainActivity.SCAN_NODE_ESSAIS_DEFAUT, MainActivity.SCAN_NODE_PAUSE_DEFAUT_MS};
+        edtScanTimeout = ajouterChampNumerique(root, "Délai de réponse par tentative (ms, 100–5000)", cfg[0]);
+        edtScanEssais  = ajouterChampNumerique(root, "Essais par node (1–5)", cfg[1]);
+        edtScanPause   = ajouterChampNumerique(root, "Pause entre tentatives / nodes (ms, 0–2000)", cfg[2]);
+
         txtEtat = new TextView(this);
-        txtEtat.setPadding(0, 0, 0, dp(12));
+        txtEtat.setPadding(0, dp(8), 0, dp(12));
         root.addView(txtEtat);
 
         containerCandidats = new LinearLayout(this);
@@ -193,7 +206,44 @@ public class RegisterValidationActivity extends Activity {
         txtEtat.setText(found.size() + " candidat(s) disponible(s).");
     }
 
+    private android.widget.EditText ajouterChampNumerique(LinearLayout root, String libelle, int valeur) {
+        TextView l = new TextView(this);
+        l.setText(libelle);
+        l.setTextColor(Color.DKGRAY);
+        root.addView(l);
+        android.widget.EditText e = new android.widget.EditText(this);
+        e.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        e.setText(String.valueOf(valeur));
+        root.addView(e);
+        return e;
+    }
+
+    private int lireChamp(android.widget.EditText e, int defaut, int min, int max) {
+        try {
+            int v = Integer.parseInt(e.getText().toString().trim());
+            return Math.max(min, Math.min(max, v));
+        } catch (Exception ex) { return defaut; }
+    }
+
+    /** Valide, borne et enregistre les trois réglages ; remet dans les champs les valeurs retenues. */
+    private void enregistrerConfigScan() {
+        int t = lireChamp(edtScanTimeout, MainActivity.SCAN_NODE_TIMEOUT_DEFAUT_MS, 100, 5000);
+        int e = lireChamp(edtScanEssais, MainActivity.SCAN_NODE_ESSAIS_DEFAUT, 1, 5);
+        int p = lireChamp(edtScanPause, MainActivity.SCAN_NODE_PAUSE_DEFAUT_MS, 0, 2000);
+        edtScanTimeout.setText(String.valueOf(t));
+        edtScanEssais.setText(String.valueOf(e));
+        edtScanPause.setText(String.valueOf(p));
+        try {
+            getSharedPreferences("prefs", MODE_PRIVATE).edit()
+                .putInt(MainActivity.PREF_VAL_SCAN_TIMEOUT_MS, t)
+                .putInt(MainActivity.PREF_VAL_SCAN_ESSAIS, e)
+                .putInt(MainActivity.PREF_VAL_SCAN_PAUSE_MS, p)
+                .apply();
+        } catch (Exception ignored) {}
+    }
+
     private void demarrerValidation() {
+        enregistrerConfigScan();
         MainActivity m = MainActivity.ACTIVE_INSTANCE;
         if (m == null) {
             Toast.makeText(this, "MainActivity non disponible", Toast.LENGTH_SHORT).show();
