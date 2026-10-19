@@ -5742,7 +5742,7 @@ private void scanUsb() {
     // =========================
     // Restauration depuis un fichier .db choisi (sélecteur Android)
     // =========================
-    private static final int REQ_PICK_RESTORE_DB = 9103;
+    private static final int REQ_PICK_RESTORE_DB = 9110; // (9103 = REQ_ENABLE_BT, 9104 = REQ_STORAGE_LEGACY, 9105 = REQ_LOCATION_BT_SIGNAL)
 
     private void ouvrirSelecteurRestaurationDb() {
         try {
