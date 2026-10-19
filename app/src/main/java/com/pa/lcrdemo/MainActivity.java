@@ -7157,7 +7157,20 @@ private boolean ensureBtConnectPermission() {
             final android.bluetooth.BluetoothSocket[] sockHolder = {null};
             try {
                 java.util.UUID sppUuid = java.util.UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
-                sockHolder[0] = dev.createRfcommSocketToServiceRecord(sppUuid);
+                // ✅ ALIGNÉ SUR LA CONNEXION MANUELLE (19 oct 2026, demande Paul — "manuellement ça
+                // fonctionne, la validation ne trouve pas le registre") : même ouverture que
+                // btConnectSelected() — cancelDiscovery() d'abord (la discovery casse le RFCOMM),
+                // puis socket RFCOMM NON sécurisé, avec repli sur le socket sécurisé seulement si
+                // le non sécurisé n'est pas supporté. Avant : socket sécurisé, sans cancelDiscovery().
+                try {
+                    android.bluetooth.BluetoothAdapter adBt = android.bluetooth.BluetoothAdapter.getDefaultAdapter();
+                    if (adBt != null) adBt.cancelDiscovery();
+                } catch (Exception ignoredDisc) {}
+                try {
+                    sockHolder[0] = dev.createInsecureRfcommSocketToServiceRecord(sppUuid);
+                } catch (Exception insecureNotSupported) {
+                    sockHolder[0] = dev.createRfcommSocketToServiceRecord(sppUuid);
+                }
                 // ✅ CORRIGÉ (20 août 2026, demande Paul — "il arrête au
                 // premier bt pourquoi ne continue-t-il pas") — trouvé :
                 // BluetoothSocket.connect() n'a AUCUNE limite de temps
