@@ -1666,6 +1666,8 @@ tabRegisters = findViewById(R.id.tabRegisters);
                 if (!ensureLocationPermissionForBtScan(true)) {
                     if (txtBtSignalResult != null)
                         txtBtSignalResult.setText("Permission localisation requise pour le scan RSSI");
+                    // ✅ AJOUTÉ (19 oct 2026, demande Paul) — trace dans le journal du support
+                    try { com.pa.lcr.lcp.log.LogBus.api(0, "[BT-RSSI] scan non lancé — permission localisation/BLUETOOTH_SCAN requise (mac=" + lastBtMac + ")"); } catch (Exception ignoredLog) {}
                     return;
                 }
                 if (txtBtSignalResult != null) txtBtSignalResult.setText("Scan RSSI en cours...");
@@ -1691,8 +1693,29 @@ tabRegisters = findViewById(R.id.tabRegisters);
                                 }
                             }
                             txt = sb.toString().trim();
+                            // ✅ AJOUTÉ (19 oct 2026, demande Paul — « sinon il faut l'avoir dans le
+                            // log du support ») — le résultat du scan RSSI n'allait qu'à l'écran :
+                            // une ligne par appareil trouvé, dans le journal du support.
+                            try {
+                                int nbScan = (scanned != null) ? scanned.length() : 0;
+                                if (nbScan == 0) {
+                                    com.pa.lcr.lcp.log.LogBus.api(0, "[BT-RSSI] scan terminé — aucun appareil trouvé (mac visée=" + lastBtMac + ") — " + r.msg);
+                                }
+                                for (int i = 0; i < nbScan; i++) {
+                                    JSONObject rowLog = scanned.optJSONObject(i);
+                                    if (rowLog == null) continue;
+                                    com.pa.lcr.lcp.log.LogBus.api(0, "[BT-RSSI] mac=" + rowLog.optString("mac", "?")
+                                        + " nom=" + rowLog.optString("name", "?")
+                                        + " rssi=" + rowLog.optInt("rssi", 0) + " dBm ("
+                                        + rowLog.optString("rssi_quality", "?") + ")");
+                                }
+                            } catch (Exception ignoredLog) {}
                         } else {
                             txt = "Scan RSSI: " + (r != null ? r.msg : "null");
+                            try {
+                                com.pa.lcr.lcp.log.LogBus.api(0, "[BT-RSSI] scan sans résultat — " + (r != null ? r.msg : "null")
+                                    + (r != null && r.data != null ? " " + r.data.toString() : ""));
+                            } catch (Exception ignoredLog) {}
                         }
                         final String fTxt = txt;
                         ui.post(() -> {
@@ -1701,6 +1724,7 @@ tabRegisters = findViewById(R.id.tabRegisters);
                         });
                     } catch (Exception e) {
                         ui.post(() -> {
+                            try { com.pa.lcr.lcp.log.LogBus.api(0, "[BT-RSSI] scan ERR — " + safeMsg(e)); } catch (Exception ignoredLog) {}
                             if (txtBtSignalResult != null) txtBtSignalResult.setText("Scan RSSI ERR: " + safeMsg(e));
                             btnBtSignalScan.setEnabled(true);
                         });
