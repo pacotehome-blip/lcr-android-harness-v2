@@ -1571,7 +1571,8 @@ public class DeepLinkHandler {
 
             if (!produitValideAvantArmement) {
                 android.util.Log.w(TAG, "lancerLivraison: REFUS armement — initialisation (7 étapes) jamais approuvée après 30s");
-                logError(serialId, woNum, "INIT_NON_APPROUVEE", "Initialisation jamais complétée avant armement (registre/produit/preset/live/retour_wo) — livraison refusée par sécurité");
+                logError(serialId, woNum, "INIT_NON_APPROUVEE", "Initialisation jamais complétée avant armement (registre/produit/preset/live/retour_wo) — livraison refusée par sécurité | "
+                    + (tabArmRef != null ? tabArmRef.diagnosticPorteArmement() : "[ARMEMENT-PORTE] onglet introuvable"));
                 retournerFieldService(woNum, woIdGuid, "erreur_init_non_approuvee",
                     buildErrorJson("INIT_NON_APPROUVEE", "L'initialisation n'a pas pu se compléter avant l'armement — livraison refusée par sécurité. Réessayez, ou vérifiez le registre."));
                 return;
@@ -4199,7 +4200,8 @@ public class DeepLinkHandler {
         } catch (Exception ignored) {}
         if (!attendreInitApprouvee(tab)) {
             android.util.Log.w(TAG, "connectBtByMacAndOpenTab: REFUS armement — initialisation (7 étapes) jamais approuvée après 30s");
-            logError(serialId, woNum, "INIT_NON_APPROUVEE", "Initialisation jamais complétée avant armement (registre/produit/preset/live/retour_wo) — livraison refusée par sécurité");
+            logError(serialId, woNum, "INIT_NON_APPROUVEE", "Initialisation jamais complétée avant armement (registre/produit/preset/live/retour_wo) — livraison refusée par sécurité | "
+                + (tab != null ? tab.diagnosticPorteArmement() : "[ARMEMENT-PORTE] onglet introuvable"));
             retournerFieldService(woNum, woIdGuid, "erreur_init_non_approuvee",
                 buildErrorJson("INIT_NON_APPROUVEE", "L'initialisation n'a pas pu se compléter avant l'armement — livraison refusée par sécurité. Réessayez, ou vérifiez le registre."));
             return null;

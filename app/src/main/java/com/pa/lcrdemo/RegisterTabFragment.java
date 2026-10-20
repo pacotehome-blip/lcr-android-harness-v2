@@ -809,6 +809,25 @@ public class RegisterTabFragment extends Fragment {
         return true;
     }
 
+    // ✅ AJOUTÉ (20 oct 2026, demande Paul — refus erreur_init_non_approuvee sans qu'on sache quelle
+    // condition de isPeutDemarrerLivraison() restait fausse : aucune n'était journalisée). Lecture seule,
+    // ne change aucune décision : reprend exactement les mêmes conditions et les nomme.
+    public String diagnosticPorteArmement() {
+        try {
+            StringBuilder sb = new StringBuilder("[ARMEMENT-PORTE] ");
+            sb.append("initEnCours=").append(initSequenceRunning.get());
+            for (InitSection sec : InitSection.values()) sb.append(' ').append(sec).append('=').append(initSectionStatus.get(sec));
+            sb.append(" produitVerificationTerminee=").append(produitVerificationTerminee);
+            sb.append(" peutDemarrer=").append(peutDemarrerLivraison());
+            sb.append(" currentWoNum=").append(currentWoNum);
+            sb.append(" currentWoIdGuid=").append(currentWoIdGuid);
+            sb.append(" produitSectionWoGuid=").append(produitSectionWoGuid);
+            return sb.toString();
+        } catch (Exception e) {
+            return "[ARMEMENT-PORTE] diagnostic indisponible: " + e.getMessage();
+        }
+    }
+
     private void signalerFinScanProduit(java.util.concurrent.CountDownLatch doneSignal) {
         produitVerificationTerminee = true;
         if (doneSignal != null) doneSignal.countDown();
@@ -5664,8 +5683,19 @@ public class RegisterTabFragment extends Fragment {
                                 android.util.Log.i("RegisterTabFragment", "btnRetourWO: currentWoNum vide — WO récupéré depuis dernière livraison serial="
                                         + serialForFallback + " -> wo=" + fWoRecovered);
                                 ui.post(() -> {
+                                    // ✅ CORRIGÉ (20 oct 2026, demande Paul — deep link refusé erreur_init_non_approuvee) :
+                                    // ce filet (7 août) écrasait sans condition le WO et le woIdGuid par ceux de la
+                                    // DERNIÈRE livraison du registre, même si un deep link venait de les poser (la porte
+                                    // d'armement compare currentWoIdGuid au woIdGuid validé à l'étape PRODUIT). On ne
+                                    // remplit plus que ce qui est encore vide au moment d'appliquer.
+                                    if (currentWoNum != null && !currentWoNum.isEmpty()) {
+                                        android.util.Log.i("RegisterTabFragment", "btnRetourWO: filet ignoré — currentWoNum déjà posé ("
+                                                + currentWoNum + "), pas écrasé par " + fWoRecovered);
+                                        return;
+                                    }
                                     currentWoNum = fWoRecovered;
-                                    if (fWoIdRecovered != null && !fWoIdRecovered.isEmpty()) currentWoIdGuid = fWoIdRecovered;
+                                    if (fWoIdRecovered != null && !fWoIdRecovered.isEmpty()
+                                            && (currentWoIdGuid == null || currentWoIdGuid.isEmpty())) currentWoIdGuid = fWoIdRecovered;
                                     poserGuidsFs(fWoRecovered, fStopRecovered, fProductRecovered);
                                 });
                             }
