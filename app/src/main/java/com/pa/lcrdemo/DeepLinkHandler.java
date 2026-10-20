@@ -1582,6 +1582,22 @@ public class DeepLinkHandler {
                     && reconnexionDirecteAutorisee(woNum, woIdGuid)) {
                 com.pa.lcr.lcp.log.LogBus.api(node, "[ARMEMENT] " + (tabArmRef == null ? "onglet introuvable" : "étape REGISTRE en échec")
                     + " — reconnexion directe BT " + mac.trim() + " avant de refuser (wo=" + woNum + ")");
+                // ✅ AJOUTÉ (20 oct 2026, demande Paul — "la partie diagnostique a demandé le pin") : log du
+                // 20 oct 23:18Z — registre désappairé, ce chemin (reconnexion directe) n'appelait pas
+                // l'appairage automatique (aucune ligne [APPAIRAGE], ~9,5 s d'attente 23:18:05 → 23:18:15) :
+                // le système a donc demandé le PIN à l'utilisateur. Même appairage automatique (PIN 0000)
+                // que le chemin principal du deep link ; sans effet si la MAC est déjà appairée.
+                try {
+                    BtAutoPairing.Resultat rPairRetry = BtAutoPairing.assurerAppairage(
+                        activity, mac.trim(), node,
+                        () -> activity.runOnUiThread(() -> activity.toast("🔗 Appairage du registre...")));
+                    if (!rPairRetry.ok) {
+                        logError(serialId, woNum, "BT_PAIRING", rPairRetry.raison);
+                    }
+                } catch (Exception ePairRetry) {
+                    try { com.pa.lcr.lcp.log.LogBus.err(node, "DeepLinkHandler.appairageReconnexion", ePairRetry); }
+                    catch (Exception ignoredPairRetry) {}
+                }
                 connectBtByMacAndOpenTab(mac.trim(), node, serialId, woNum, woIdGuid, fProduit, fPresetStr);
                 return;
             }
@@ -3784,6 +3800,35 @@ public class DeepLinkHandler {
                         android.util.Log.w(TAG, "onDeliveryEnded: relecture ticket_no (result absent) ERR (non-bloquant): " + eTicketFinVide.getMessage());
                     }
                 }
+                // ✅ CORRIGÉ (20 oct 2026, demande Paul — ticket 351 : fin par le bouton Terminer pendant la pause) :
+                // FILET-TERMINER n'envoie ni produit ni preset (produitNo=0, preset_requested=0). Comme cette
+                // fin passe par upsertByJobId(), la ligne de CETTE livraison (créée à 23:15:33Z avec son produit
+                // et son preset) était mise à jour avec produit_no=0 / preset_l=0 / description vide : litres
+                // justes, produit et preset perdus, puis poussés ainsi à Dataverse. Même principe que la garde
+                // du ticket plus bas : une valeur déjà connue pour ce job_id n'est jamais remplacée par du vide.
+                double presetExistantFin = 0;
+                try {
+                    String jobIdGardeProd = d.optString("jobId", "");
+                    if (!jobIdGardeProd.isEmpty() && (produitNo <= 0 || d.optDouble("preset_requested", 0) <= 0)) {
+                        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbGardeProd =
+                            new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                        try {
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow exGardeProd =
+                                dbGardeProd.getByJobId(jobIdGardeProd);
+                            if (exGardeProd != null) {
+                                if (produitNo <= 0 && exGardeProd.produitNo > 0) {
+                                    produitNo = exGardeProd.produitNo;
+                                    android.util.Log.w(TAG, "onDeliveryEnded: produit absent de la fin — produit_no existant conservé=" + produitNo);
+                                }
+                                if (exGardeProd.presetL > 0) presetExistantFin = exGardeProd.presetL;
+                            }
+                        } finally {
+                            try { dbGardeProd.close(); } catch (Exception ignoredGp) {}
+                        }
+                    }
+                } catch (Exception eGardeProd) {
+                    android.util.Log.w(TAG, "onDeliveryEnded: garde produit/preset ERR (non-bloquant): " + eGardeProd.getMessage());
+                }
                 if (produitNo > 0) {
                     try {
                         com.pa.lcr.lcp.storage.RegisterProductStore prodStoreFin =
@@ -3813,6 +3858,10 @@ public class DeepLinkHandler {
 
                 // preset_status
                 double presetL = d.optDouble("preset_requested", 0);
+                if (presetL <= 0 && presetExistantFin > 0) {
+                    presetL = presetExistantFin;
+                    android.util.Log.w(TAG, "onDeliveryEnded: preset absent de la fin — preset_l existant conservé=" + presetL);
+                }
                 if (presetL > 0) {
                     if (Math.abs(netL - presetL) < 0.2)       presetStatus = "EXACT";
                     else if (netL < presetL)                   presetStatus = "UNDER";
