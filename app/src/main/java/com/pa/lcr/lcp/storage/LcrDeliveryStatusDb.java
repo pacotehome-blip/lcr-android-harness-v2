@@ -1151,15 +1151,40 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
     // ✅ AJOUTÉ (19 oct 2026, demande Paul — analyse tickets 61-65) — un INSERT refusé par
     // UNIQUE(wo_num, ticket_no) ON CONFLICT IGNORE retournait -1 sans aucune trace : les
     // litres de la livraison étaient perdus en silence (ids AUTOINCREMENT manquants 2/4/5).
+    // ✅ CORRIGÉ (20 oct 2026, demande Paul — log du 20 oct : 307 lignes identiques en ~1 min pendant
+    // un débit, séquence AUTOINCREMENT à 336 pour 29 lignes) : (1) l'APPELANT est maintenant journalisé
+    // (première frame hors de cette classe) pour identifier qui réécrit sans arrêt ; (2) un seul message
+    // par (wo, ticket, appelant) toutes les 10 s, avec le nombre de répétitions supprimées entre-temps.
+    private static final java.util.Map<String, long[]> INSERT_IGNORE_VU = new java.util.HashMap<>();
+
     private void logInsertIgnore(String origine, ContentValues cv) {
         try {
             String wo = cv.getAsString(COL_WO_NUM);
             String tk = cv.getAsString(COL_TICKET_NO);
+            String appelant = "?";
+            for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
+                String cn = el.getClassName();
+                if (cn.startsWith("java.") || cn.startsWith("dalvik.") || cn.startsWith("android.")) continue;
+                if (cn.equals(LcrDeliveryStatusDb.class.getName())) continue;
+                appelant = cn.substring(cn.lastIndexOf('.') + 1) + "." + el.getMethodName() + ":" + el.getLineNumber();
+                break;
+            }
+            String cle = wo + "|" + tk + "|" + appelant;
+            long now = System.currentTimeMillis();
+            long supprimes = 0;
+            synchronized (INSERT_IGNORE_VU) {
+                long[] st = INSERT_IGNORE_VU.get(cle); // {dernier log (ms), répétitions supprimées}
+                if (st != null && now - st[0] < 10000L) { st[1]++; return; }
+                if (st != null) supprimes = st[1];
+                INSERT_IGNORE_VU.put(cle, new long[]{now, 0});
+            }
             DeliveryRow dup = getByWoAndTicket(wo, tk);
             String msg = "[DB-INSERT-IGNORÉ] " + origine + " wo=" + wo + " ticket=" + tk
                 + " net=" + cv.getAsDouble(COL_NET_L) + " stop_type=" + cv.getAsString(COL_STOP_TYPE)
                 + " — refusé par UNIQUE(wo_num,ticket_no); ligne existante id="
-                + (dup != null ? dup.id + " net=" + dup.netL + " stop_type=" + dup.stopType : "?");
+                + (dup != null ? dup.id + " net=" + dup.netL + " stop_type=" + dup.stopType : "?")
+                + " | appelant=" + appelant
+                + (supprimes > 0 ? " | " + supprimes + " répétition(s) identique(s) non journalisée(s) depuis le dernier message" : "");
             Log.w(TAG, msg);
             com.pa.lcr.lcp.log.LogBus.api(0, msg);
         } catch (Exception ignored) {}

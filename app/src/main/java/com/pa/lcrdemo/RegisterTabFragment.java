@@ -809,6 +809,12 @@ public class RegisterTabFragment extends Fragment {
         return true;
     }
 
+    /** Vrai si l'étape REGISTRE (1/7) du dernier cycle d'init a échoué (contrôleur arrêté / registre injoignable). */
+    public boolean isRegistreInitEchec() {
+        try { return initSectionStatus.get(InitSection.REGISTRE) == InitSectionStatus.ECHEC; }
+        catch (Exception e) { return false; }
+    }
+
     // ✅ AJOUTÉ (20 oct 2026, demande Paul — refus erreur_init_non_approuvee sans qu'on sache quelle
     // condition de isPeutDemarrerLivraison() restait fausse : aucune n'était journalisée). Lecture seule,
     // ne change aucune décision : reprend exactement les mêmes conditions et les nomme.

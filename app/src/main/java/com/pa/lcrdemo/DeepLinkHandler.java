@@ -1569,6 +1569,23 @@ public class DeepLinkHandler {
                 }
             } catch (Exception ignored) {}
 
+            // ✅ AJOUTÉ (20 oct 2026, demande Paul — BT désappairé alors que l'app croit le BT bon) :
+            // log du 20 oct 22:12Z — socket mort (Broken pipe) → contrôleur arrêté → INIT 1/7 REGISTRE
+            // ÉCHEC → l'écran de diagnostic "Réessayer" supprime l'onglet → ici l'onglet est introuvable
+            // → refus immédiat (erreur_init_non_approuvee), sans jamais tenter la MAC du deep link. La 2e
+            // tentative, passée par la connexion BT directe sur cette MAC, a réussi. Avant de refuser :
+            // UNE tentative de connexion directe par MAC (même chemin que le repli "Auto-connect échoué"),
+            // seulement si l'onglet est introuvable ou si son étape REGISTRE a échoué (pas pour un autre
+            // motif de refus), et au plus une fois par bon (woNum + woIdGuid) sur 2 minutes.
+            if (!produitValideAvantArmement && mac != null && !mac.trim().isEmpty()
+                    && (tabArmRef == null || tabArmRef.isRegistreInitEchec())
+                    && reconnexionDirecteAutorisee(woNum, woIdGuid)) {
+                com.pa.lcr.lcp.log.LogBus.api(node, "[ARMEMENT] " + (tabArmRef == null ? "onglet introuvable" : "étape REGISTRE en échec")
+                    + " — reconnexion directe BT " + mac.trim() + " avant de refuser (wo=" + woNum + ")");
+                connectBtByMacAndOpenTab(mac.trim(), node, serialId, woNum, woIdGuid, fProduit, fPresetStr);
+                return;
+            }
+
             if (!produitValideAvantArmement) {
                 android.util.Log.w(TAG, "lancerLivraison: REFUS armement — initialisation (7 étapes) jamais approuvée après 30s");
                 logError(serialId, woNum, "INIT_NON_APPROUVEE", "Initialisation jamais complétée avant armement (registre/produit/preset/live/retour_wo) — livraison refusée par sécurité | "
@@ -2100,6 +2117,19 @@ public class DeepLinkHandler {
     // =========================================================
     // Connexion BT + oneshot/start (fallback si pas de transport actif)
     // =========================================================
+
+    // ✅ AJOUTÉ (20 oct 2026) — au plus une reconnexion directe BT par bon (woNum + woIdGuid) sur 2 minutes,
+    // pour ne jamais boucler lancerLivraison → connectBtByMacAndOpenTab → refus → …
+    private String reconnexionDirecteCle = null;
+    private long reconnexionDirecteMs = 0L;
+    private synchronized boolean reconnexionDirecteAutorisee(String woNum, String woIdGuid) {
+        String cle = (woNum != null ? woNum : "") + "|" + (woIdGuid != null ? woIdGuid : "");
+        long now = System.currentTimeMillis();
+        if (cle.equals(reconnexionDirecteCle) && now - reconnexionDirecteMs < 120000L) return false;
+        reconnexionDirecteCle = cle;
+        reconnexionDirecteMs = now;
+        return true;
+    }
 
     private void connectBtByMacAndOpenTab(String btMac, int node, String serialId,
                                            String woNum, String woIdGuid,
