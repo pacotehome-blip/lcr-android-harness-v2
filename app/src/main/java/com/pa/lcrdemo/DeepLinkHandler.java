@@ -44,6 +44,15 @@ public class DeepLinkHandler {
     private static final String FS_FORM_URL =
         "https://dev-filgo-sonic.crm3.dynamics.com/WebResources/filgo_lcr_form";
 
+    // ✅ AJOUTÉ (20 oct 2026) — nombre de questions posées au chauffeur (Bon déjà complété / Preset déjà
+    // atteint) actuellement ouvertes : l'écran de diagnostic ne s'affiche jamais par-dessus (voir
+    // RegisterConnectionHelper.quandChauffeurLibre).
+    private static final java.util.concurrent.atomic.AtomicInteger DIALOGUES_CHAUFFEUR =
+        new java.util.concurrent.atomic.AtomicInteger(0);
+    public static boolean dialogueChauffeurOuvert() { return DIALOGUES_CHAUFFEUR.get() > 0; }
+    private static void chauffeurOuvre() { DIALOGUES_CHAUFFEUR.incrementAndGet(); }
+    private static void chauffeurFerme() { if (DIALOGUES_CHAUFFEUR.decrementAndGet() < 0) DIALOGUES_CHAUFFEUR.set(0); }
+
     private final MainActivity activity;
     private final DeliveryLogStore deliveryStore;
     private final ExecutorService btExec;
@@ -472,6 +481,31 @@ public class DeepLinkHandler {
                         try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] média actif " + activeMatch
                             + " ignoré — le deep link vise " + btCleCible + " et rien d'autre"); } catch (Exception ignoredLb) {}
                         activeMatch = null;
+                    }
+                    // ✅ AJOUTÉ (20 oct 2026, demande Paul — "il faut solidifier ça", BT désappairé alors que l'app
+                    // croit le BT bon) : resolveIfActiveMatches() se fie à l'existence d'une session ("session
+                    // survivante … probable recréation d'Activity"), pas à un lien vivant. Log du 20 oct 19:53 :
+                    // registre désappairé → "média actif correspond déjà" → aucun appairage, aucune connexion par
+                    // MAC → ~90 s de boucles de diagnostic / [BT-RECHERCHE] sur le mauvais appareil avant la
+                    // reconnexion de secours. Si le deep link vise une MAC, on vérifie l'appairage AVANT ce raccourci
+                    // (sans effet si déjà appairé). S'il a fallu réappairer, la session "active" est périmée : on
+                    // l'ignore et on suit le chemin normal (même chemin que la livraison 354 : appairage → connexion).
+                    if (activeMatch != null && btCibleDL != null) {
+                        try {
+                            BtAutoPairing.Resultat rPairActif = BtAutoPairing.assurerAppairage(
+                                activity, fBtMac, fNode,
+                                () -> activity.runOnUiThread(
+                                    () -> activity.toast("🔗 Appairage du registre...")));
+                            if (!rPairActif.ok) {
+                                logError(fSerialId, woNum, "BT_PAIRING", rPairActif.raison);
+                            } else if (!rPairActif.dejaAppaire) {
+                                try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] média actif " + activeMatch
+                                    + " ignoré — le registre n'était plus appairé, session périmée : connexion neuve"); } catch (Exception ignoredLb2) {}
+                                activeMatch = null;
+                            }
+                        } catch (Exception ePairActif) {
+                            try { com.pa.lcr.lcp.log.LogBus.err(fNode, "DeepLinkHandler.appairageMediaActif", ePairActif); } catch (Exception ignoredErr) {}
+                        }
                     }
                     if (activeMatch != null) {
                         android.util.Log.i(TAG, "Deep link: média actif correspond déjà (" + activeMatch
@@ -1209,6 +1243,7 @@ public class DeepLinkHandler {
                     final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fExisting = existing;
 
                     activity.runOnUiThread(() -> {
+                        chauffeurOuvre();
                         new android.app.AlertDialog.Builder(activity)
                             .setTitle("Bon déjà complété")
                             .setMessage("Le bon " + woNum + " a déjà été livré"
@@ -1217,10 +1252,12 @@ public class DeepLinkHandler {
                                 + "Voulez-vous créer une nouvelle livraison sur ce même bon ?")
                             .setPositiveButton("Continuer", (d, w) -> {
                                 continuer[0] = true;
+                                chauffeurFerme();
                                 latch.countDown();
                             })
                             .setNegativeButton("Annuler", (d, w) -> {
                                 continuer[0] = false;
+                                chauffeurFerme();
                                 latch.countDown();
                             })
                             .setCancelable(false)
@@ -1388,6 +1425,7 @@ public class DeepLinkHandler {
                         final int dcFinalDeepLink = dcDeepLink;
                         activity.runOnUiThread(() -> {
                             try {
+                                chauffeurOuvre();
                                 new android.app.AlertDialog.Builder(activity)
                                     .setTitle("Preset déjà atteint")
                                     .setMessage("Le registre indique que le preset est déjà atteint"
@@ -1395,12 +1433,14 @@ public class DeepLinkHandler {
                                         + "Voulez-vous quand même armer une nouvelle livraison ?")
                                     .setPositiveButton("Continuer", (d, w) -> {
                                         continuerDeepLink[0] = true;
+                                        chauffeurFerme();
                                         com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] deep link — chauffeur a choisi CONTINUER (delCode=0x"
                                             + Integer.toHexString(dcFinalDeepLink) + ")");
                                         presetLatch.countDown();
                                     })
                                     .setNegativeButton("Annuler", (d, w) -> {
                                         continuerDeepLink[0] = false;
+                                        chauffeurFerme();
                                         com.pa.lcr.lcp.log.LogBus.api(node, "[PRESET-CHECK] deep link — chauffeur a choisi ANNULER (delCode=0x"
                                             + Integer.toHexString(dcFinalDeepLink) + ")");
                                         presetLatch.countDown();
@@ -1408,6 +1448,7 @@ public class DeepLinkHandler {
                                     .setCancelable(false)
                                     .show();
                             } catch (Exception eDialogDeepLink) {
+                                chauffeurFerme();
                                 android.util.Log.w(TAG, "[PRESET-CHECK] deep link — dialogue ERR (non-bloquant): " + eDialogDeepLink.getMessage());
                                 presetLatch.countDown();
                             }

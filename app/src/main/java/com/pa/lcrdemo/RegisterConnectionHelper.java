@@ -70,6 +70,66 @@ public class RegisterConnectionHelper {
      *  dépasser 60s sur Android 9. */
     private static final long DIAGNOSTIC_STALE_MS = 90_000L;
 
+    // ✅ AJOUTÉ (20 oct 2026, demande Paul — "j'ai eu l'écran diagnostique par dessus le bouton continuer ; si
+    // le registre est détecté par le BT, il faut faire disparaître l'écran diagnostique si on en a plus besoin").
+    // (1) Les écrans de diagnostic (progression + échec) sont suivis ici ; dès que le registre passe CONNECTED
+    //     (RegisterSessionManager → notifierEtatRegistre), ils sont fermés.
+    // (2) Un écran de diagnostic n'est jamais affiché PAR-DESSUS une question posée au chauffeur (Preset déjà
+    //     atteint / Bon déjà complété, DeepLinkHandler.dialogueChauffeurOuvert()) : il attend qu'elle soit
+    //     répondue (120 s max) et n'apparaît pas du tout si le diagnostic est déjà fini entre-temps.
+    private static final java.util.List<java.lang.ref.WeakReference<android.app.AlertDialog>> DIALOGUES_DIAG =
+        new java.util.ArrayList<>();
+    private static final java.util.concurrent.ConcurrentHashMap<Integer, Long> CONNECTE_DEPUIS =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    static void enregistrerDialogueDiag(android.app.AlertDialog d) {
+        if (d == null) return;
+        synchronized (DIALOGUES_DIAG) { DIALOGUES_DIAG.add(new java.lang.ref.WeakReference<>(d)); }
+    }
+
+    /** Appelé par RegisterSessionManager à chaque passage CONNECTED / DISCONNECTED d'un node. */
+    public static void notifierEtatRegistre(int node, boolean connecte) {
+        if (connecte) {
+            CONNECTE_DEPUIS.put(node, System.currentTimeMillis());
+            fermerDialoguesDiagnostic("registre connecté (node=" + node + ")");
+        } else {
+            CONNECTE_DEPUIS.remove(node);
+        }
+    }
+
+    public static void fermerDialoguesDiagnostic(final String raison) {
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            int fermes = 0;
+            synchronized (DIALOGUES_DIAG) {
+                for (java.lang.ref.WeakReference<android.app.AlertDialog> ref : DIALOGUES_DIAG) {
+                    android.app.AlertDialog d = ref.get();
+                    try {
+                        if (d != null && d.isShowing()) { d.dismiss(); fermes++; }
+                    } catch (Exception ignored) {}
+                }
+                DIALOGUES_DIAG.clear();
+            }
+            if (fermes > 0) {
+                try { com.pa.lcr.lcp.log.LogBus.api(0, "[DIAGNOSTIC] écran fermé (" + fermes + ") — " + raison); } catch (Exception ignored) {}
+            }
+        });
+    }
+
+    /** À appeler depuis le thread UI : exécute r maintenant, ou dès qu'aucune question chauffeur n'est ouverte. */
+    private static void quandChauffeurLibre(final Runnable r) {
+        final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        final long fin = System.currentTimeMillis() + 120_000L;
+        final Runnable[] poll = new Runnable[1];
+        poll[0] = () -> {
+            if (!com.pa.lcrdemo.DeepLinkHandler.dialogueChauffeurOuvert() || System.currentTimeMillis() > fin) {
+                r.run();
+            } else {
+                h.postDelayed(poll[0], 300);
+            }
+        };
+        poll[0].run();
+    }
+
     /** Réinitialise le guard — appeler au démarrage APK ou si bloqué */
     public static void resetDiagnostic() {
         diagnosticEnCours = false;
@@ -488,10 +548,16 @@ public class RegisterConnectionHelper {
         dlgBuilder.setView(txtProgress);
         final android.app.AlertDialog[] dlg = {null};
         final Object dlgLock = new Object();
-        activity.runOnUiThread(() -> {
+        activity.runOnUiThread(() -> quandChauffeurLibre(() -> {
+            // Diagnostic déjà terminé pendant l'attente d'une réponse du chauffeur : rien à afficher.
+            if (!diagnosticEnCours || annule[0] || activity.isFinishing() || activity.isDestroyed()) {
+                synchronized (dlgLock) { dlgLock.notifyAll(); }
+                return;
+            }
             dlg[0] = dlgBuilder.show();
+            enregistrerDialogueDiag(dlg[0]);
             synchronized (dlgLock) { dlgLock.notifyAll(); }
-        });
+        }));
         synchronized (dlgLock) {
             try { if (dlg[0] == null) dlgLock.wait(2000); } catch (Exception ignored) {}
         }
@@ -934,7 +1000,12 @@ public class RegisterConnectionHelper {
                 + (woNum != null && !woNum.isEmpty() ? "WO:" + woNum : "Livraison manuelle");
             final String corps = resumeComplet + "\n\nTimestamp: " + new java.util.Date();
 
-            new android.app.AlertDialog.Builder(activity)
+            // Registre déjà revenu CONNECTED : l'écran d'échec n'a plus de raison d'être.
+            if (CONNECTE_DEPUIS.containsKey(node)) {
+                try { com.pa.lcr.lcp.log.LogBus.api(node, "[DIAGNOSTIC] écran d'échec non affiché — registre déjà connecté"); } catch (Exception ignored) {}
+                return;
+            }
+            final android.app.AlertDialog.Builder dlgEchecB = new android.app.AlertDialog.Builder(activity)
                 .setTitle("⛔ Registre non joignable  ✕")
                 .setMessage(resumeComplet)
                 .setCancelable(true)
@@ -1007,8 +1078,11 @@ public class RegisterConnectionHelper {
                         try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterConnectionHelper.emailSupport", e); } catch (Exception ignored) {}
                     }
                     d.dismiss();
-                })
-                .show();
+                });
+            quandChauffeurLibre(() -> {
+                if (CONNECTE_DEPUIS.containsKey(node) || activity.isFinishing() || activity.isDestroyed()) return;
+                enregistrerDialogueDiag(dlgEchecB.show());
+            });
         });
     }
 

@@ -1605,10 +1605,13 @@ public final class RegisterSessionManager {
                     source = "";
                 }
                 LogBus.ui(node, "[CONNEXION] Registre connecté (node=" + node + ")" + source);
+                // ✅ AJOUTÉ (20 oct 2026) — registre joignable : les écrans de diagnostic ouverts n'ont plus lieu d'être.
+                try { com.pa.lcrdemo.RegisterConnectionHelper.notifierEtatRegistre(node, true); } catch (Throwable ignoredDiag) {}
             } else if (state == DeliveryState.DISCONNECTED) {
                 lastDisconnectTs = System.currentTimeMillis();
                 LogBus.ui(node, "[DÉCONNEXION] Registre déconnecté (node=" + node + ")"
                     + (lastErrorMessage != null ? " — cause probable: " + lastErrorMessage : ""));
+                try { com.pa.lcrdemo.RegisterConnectionHelper.notifierEtatRegistre(node, false); } catch (Throwable ignoredDiag) {}
             } else if (state == DeliveryState.RUNNING_FLOWING
                     && lastKnownState != DeliveryState.RUNNING_FLOWING
                     && lastKnownState != DeliveryState.RUNNING_PAUSED) {
