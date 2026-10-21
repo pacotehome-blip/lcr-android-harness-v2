@@ -700,6 +700,53 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         return null;
     }
 
+    /** Résultat de {@link #cumulPourPreset}. */
+    public static final class CumulPreset {
+        public double totalNet = 0;
+        public int nbLivraisons = 0;
+        /** Ex. « 50,1 + 17,4 » — litres nets de chaque livraison comptée, de la plus ancienne à la plus récente. */
+        public String detail = "";
+    }
+
+    /**
+     * ✅ AJOUTÉ (21 oct 2026, demande Paul — « le dépassement du preset tient compte que de la livraison
+     * précédente ») — somme des litres NETS de toutes les livraisons déjà faites sur ce bon (et ce
+     * stop/produit si fournis), pour le comparer au preset avant d'en armer une nouvelle.
+     * Ne compte pas : les ANNULATION, les lignes encore en cours (RUNNING_FLOWING), les livraisons à 0 L.
+     * stopId/productId vides = tout le bon. Une ligne sans stopid/productid (ancienne, ou tirée de
+     * Dataverse sans) est comptée quand même : mieux vaut un avertissement de trop qu'un oublié.
+     */
+    public CumulPreset cumulPourPreset(String woNum, String stopId, String productId) {
+        CumulPreset out = new CumulPreset();
+        if (woNum == null || woNum.isEmpty()) return out;
+        List<DeliveryRow> rows = new ArrayList<>();
+        for (DeliveryRow r : getAllForWo(woNum)) {
+            if (r == null) continue;
+            if (TYPE_ANNULATION.equals(r.type)) continue;
+            if (!STOP_TYPE_LIVRAISON.equals(r.stopType)) continue;
+            if (r.netL <= 0) continue;
+            if (stopId != null && !stopId.isEmpty() && r.stopid != null && !r.stopid.isEmpty()
+                    && !stopId.equalsIgnoreCase(r.stopid)) continue;
+            if (productId != null && !productId.isEmpty() && r.productid != null && !r.productid.isEmpty()
+                    && !productId.equalsIgnoreCase(r.productid)) continue;
+            rows.add(r);
+        }
+        java.util.Collections.sort(rows, (a, b) -> {
+            String ea = a.endUtc == null ? "" : a.endUtc, eb = b.endUtc == null ? "" : b.endUtc;
+            int c = ea.compareTo(eb);
+            return c != 0 ? c : Long.compare(a.id, b.id);
+        });
+        StringBuilder sb = new StringBuilder();
+        for (DeliveryRow r : rows) {
+            out.totalNet += r.netL;
+            out.nbLivraisons++;
+            if (sb.length() > 0) sb.append(" + ");
+            sb.append(String.format(java.util.Locale.CANADA_FRENCH, "%.1f", r.netL));
+        }
+        out.detail = sb.toString();
+        return out;
+    }
+
     /**
      * Retourne la dernière transaction pour un WO donné.
      */
@@ -1328,6 +1375,29 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         // alors cette ligne existante explicitement.
         String ticket = cv.getAsString(COL_TICKET_NO);
         DeliveryRow dup = getByWoAndTicket(woNum, ticket);
+        // ✅ CORRIGÉ (21 oct 2026, demande Paul — « leak » / ligne fantôme 386) — à l'armement, le ticket
+        // utilisé est le dernier connu (ex. 385) : il appartient à la livraison PRÉCÉDENTE, déjà finale.
+        // L'écriture RUNNING_FLOWING de ce nouveau job était alors refusée ([DB-UPSERT-IGNORÉ]) et AUCUNE
+        // ligne n'existait pour lui. Plus tard (ticket 386 lu après CMD_RUN) une écriture partielle
+        // (job_id + ticket seulement) créait une ligne finale LIVRAISON vide (id 22), poussée vers
+        // Dataverse, et l'ANNULATION était ensuite refusée. Maintenant : si la ligne en conflit est finale
+        // et appartient à un AUTRE job, la ligne RUNNING_FLOWING du nouveau job est insérée avec ticket
+        // NULL (jamais en conflit avec UNIQUE) ; le ticket réel est posé plus tard par job_id.
+        boolean armementSansTicket = dup != null
+            && "RUNNING_FLOWING".equals(cv.getAsString(COL_STOP_TYPE))
+            && estLigneFinale(dup.stopType)
+            && jobId != null && !jobId.isEmpty()
+            && (dup.jobId == null || !jobId.equals(dup.jobId));
+        if (armementSansTicket) {
+            String msgArm = "[DB-ARMEMENT-SANS-TICKET] wo=" + woNum + " job_id=" + jobId + " — le ticket " + ticket
+                + " appartient déjà à la livraison finale id=" + dup.id + " (job " + dup.jobId
+                + ") : ligne RUNNING_FLOWING insérée avec ticket vide (le vrai ticket sera posé après CMD_RUN)";
+            Log.i(TAG, msgArm);
+            try { com.pa.lcr.lcp.log.LogBus.api(0, msgArm); } catch (Exception ignored) {}
+            cv.putNull(COL_TICKET_NO);
+            ticket = null;
+            dup = null;
+        }
         if (dup != null) {
             boolean entrantEnCours = "RUNNING_FLOWING".equals(cv.getAsString(COL_STOP_TYPE));
             Double inNet = cv.getAsDouble(COL_NET_L);

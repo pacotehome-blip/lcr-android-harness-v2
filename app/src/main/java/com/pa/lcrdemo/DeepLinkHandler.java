@@ -1296,14 +1296,31 @@ public class DeepLinkHandler {
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb statusDb =
                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existing;
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.CumulPreset cumulBon = null;
             try {
                 existing = statusDb.getLatestForWo(woNum);
+                // ✅ CORRIGÉ (21 oct 2026, demande Paul — « le dépassement du preset tient compte que de la
+                // livraison précédente… si on a un total net qui dépasse le preset il faut demander si on
+                // annule ou on continue ») — comparait seulement le net de la DERNIÈRE livraison au preset
+                // (50, puis 17, puis nouvelle de 50 : le premier 50 était ignoré). Compare maintenant la
+                // SOMME des litres nets de toutes les livraisons déjà faites sur ce bon (même stop/produit
+                // que le deep link quand il les a fournis), sans les annulations ni les lignes en cours.
+                String stopCumul = "", prodCumul = "";
+                try {
+                    com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery adCumul =
+                        new com.pa.lcr.lcp.storage.ActiveDeliveryStore(activity).load();
+                    if (adCumul != null && woNum != null && woNum.equals(adCumul.woNum)) {
+                        if (adCumul.stopid != null) stopCumul = adCumul.stopid;
+                        if (adCumul.productid != null) prodCumul = adCumul.productid;
+                    }
+                } catch (Exception ignoredAdCumul) {}
+                cumulBon = statusDb.cumulPourPreset(woNum, stopCumul, prodCumul);
             } finally {
                 try { statusDb.close(); } catch (Exception ignored) {}
             }
 
-            if (existing != null && existing.type != null && !"ANNULATION".equals(existing.type)) {
-                boolean livraisonComplete = (fPresetD <= 0 || existing.netL >= fPresetD);
+            if (cumulBon != null && cumulBon.nbLivraisons > 0) {
+                boolean livraisonComplete = (fPresetD <= 0 || cumulBon.totalNet >= fPresetD);
                 // ✅ AJOUTÉ (21 sept 2026, demande Paul — "si je suis en
                 // running_flowing sur la tablette, je ne devrais même pas
                 // voir l'avertissement que le bon est déjà complété car
@@ -1343,29 +1360,35 @@ public class DeepLinkHandler {
                 }
                 if (livraisonComplete) {
                     android.util.Log.w(TAG, "lancerLivraison: bon " + woNum
-                        + " déjà complété (ticket #" + existing.ticketNo
-                        + ", " + existing.netL + "L net, preset=" + fPresetD + "L) — confirmation requise");
+                        + " déjà complété (cumul " + cumulBon.detail + " = " + cumulBon.totalNet
+                        + "L net, preset=" + fPresetD + "L) — confirmation requise");
                     // ✅ AJOUTÉ (23 sept 2026, demande Paul — "est-ce que tu
                     // vois ces demandes dans logtab et support") — trouvé :
                     // ce dialogue n'écrivait que dans logcat, invisible
                     // dans Support/le tab, contrairement à "Preset déjà
                     // atteint" (déjà visible via [PRESET-CHECK]).
                     try { com.pa.lcr.lcp.log.LogBus.api(node, "[BON-COMPLETE] wo=" + woNum
-                        + " déjà complété (ticket #" + existing.ticketNo
-                        + ", " + existing.netL + "L net, preset=" + fPresetD + "L) — confirmation requise"); } catch (Exception ignoredTraceBonComplete) {}
+                        + " déjà complété — cumul " + cumulBon.nbLivraisons + " livraison(s) : " + cumulBon.detail
+                        + " = " + cumulBon.totalNet + "L net, preset demandé=" + fPresetD
+                        + "L (dernier ticket #" + (existing != null ? existing.ticketNo : "?") + ") — confirmation requise"); } catch (Exception ignoredTraceBonComplete) {}
 
                     final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
                     final boolean[] continuer = {false};
-                    final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fExisting = existing;
+                    final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.CumulPreset fCumul = cumulBon;
+                    final double fPresetAff = fPresetD;
 
                     activity.runOnUiThread(() -> {
                         chauffeurOuvre();
                         new android.app.AlertDialog.Builder(activity)
                             .setTitle("Bon déjà complété")
-                            .setMessage("Le bon " + woNum + " a déjà été livré"
-                                + " (ticket #" + fExisting.ticketNo
-                                + ", " + fExisting.netL + "L net).\n\n"
-                                + "Voulez-vous créer une nouvelle livraison sur ce même bon ?")
+                            .setMessage("Le bon " + woNum + " a déjà été livré : "
+                                + (fCumul.nbLivraisons > 1 ? fCumul.detail + " = " : "")
+                                + String.format(java.util.Locale.CANADA_FRENCH, "%.1f", fCumul.totalNet) + " L net"
+                                + (fPresetAff > 0
+                                    ? " pour un preset de " + String.format(java.util.Locale.CANADA_FRENCH, "%.1f", fPresetAff) + " L"
+                                    : "")
+                                + ".\n\n"
+                                + "Le preset est déjà atteint. Voulez-vous quand même créer une nouvelle livraison sur ce même bon ?")
                             .setPositiveButton("Continuer", (d, w) -> {
                                 continuer[0] = true;
                                 chauffeurFerme();
@@ -1387,8 +1410,8 @@ public class DeepLinkHandler {
                     logEvent(fSerialId, woNum,
                         continuer[0] ? DeliveryLogStore.LEVEL_INFO : DeliveryLogStore.LEVEL_WARN,
                         continuer[0] ? "BON_DEJA_COMPLETE_CONTINUE" : "BON_DEJA_COMPLETE_ANNULE",
-                        "ticket=" + fExisting.ticketNo + " net=" + fExisting.netL
-                            + "L preset=" + fPresetD + "L — chauffeur a choisi "
+                        "cumul=" + fCumul.detail + " = " + fCumul.totalNet
+                            + "L net preset=" + fPresetD + "L — chauffeur a choisi "
                             + (continuer[0] ? "CONTINUER" : "ANNULER"),
                         null);
 
@@ -3306,6 +3329,13 @@ public class DeepLinkHandler {
                                                 cvStab.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_NUM, woNum);
                                                 cvStab.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TICKET_NO, fTicketStab);
                                                 cvStab.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SALE_NO, fTicketStab);
+                                                // ✅ CORRIGÉ (21 oct 2026, demande Paul — ligne fantôme 386) — si aucune ligne n'existe
+                                                // encore pour ce job, l'INSERT recevait le stop_type par défaut du schéma (LIVRAISON,
+                                                // donc ligne « finale » vide poussée à Dataverse). Marqué RUNNING_FLOWING : jamais poussé
+                                                // tant que la vraie fin n'a pas écrit les vraies valeurs, et l'ANNULATION peut le remplacer.
+                                                cvStab.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_STOP_TYPE, "RUNNING_FLOWING");
+                                                cvStab.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SERIAL_ID, serialId != null ? serialId : "");
+                                                cvStab.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_LCRNODE, node);
                                                 dbStab.upsertByJobId(cvStab);
                                             } finally {
                                                 try { dbStab.close(); } catch (Exception ignored) {}

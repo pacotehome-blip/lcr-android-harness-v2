@@ -361,9 +361,18 @@ public class LocalDeliveryBackup {
                         boolean jsonSynced = "SYNCED".equals(j.optString("sync_status", ""));
                         cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS,
                                 jsonSynced ? LcrDeliveryStatusDb.SYNC_SYNCED : LcrDeliveryStatusDb.SYNC_PENDING);
-                        if (!jsonSynced) restoredPending++;
                         cv.put(LcrDeliveryStatusDb.COL_PAYLOAD_JSON, j.optString("payload_complet", ""));
-                        lcrDb.insertDelivery(cv);
+                        // ✅ CORRIGÉ (21 oct 2026, demande Paul — boucle sans fin dans le logcat : 75 cycles en
+                        // 27 s) — l'INSERT refusé par UNIQUE(wo_num, ticket_no) retourne -1 (ON CONFLICT IGNORE)
+                        // mais était quand même compté « restauré » et « PENDING restauré » : triggerNow()
+                        // relançait la sync, qui relançait ce nettoyage, qui retentait le même JSON, etc.
+                        // Maintenant on ne compte et on ne relance la sync QUE si une ligne a vraiment été créée.
+                        long idRestaure = lcrDb.insertDelivery(cv);
+                        if (idRestaure <= 0) {
+                            messages.add("Restauration ignorée (ticket déjà pris dans la BD) : ticket=" + ticketNo + " wo=" + woNum);
+                            continue;
+                        }
+                        if (!jsonSynced) restoredPending++;
                         restored++;
                         messages.add("Restauré avant nettoyage : ticket=" + ticketNo + " wo=" + woNum);
                     } catch (Exception ignored) {}
@@ -503,8 +512,28 @@ public class LocalDeliveryBackup {
         cleanupAutoAsync(ctx, delaiMs, null);
     }
 
+    // ✅ AJOUTÉ (21 oct 2026, demande Paul — boucle sans fin) — garde-fou : au moins 30 s entre la FIN
+    // d'un nettoyage auto et le suivant, quoi qu'il arrive (sync, restauration, etc.). Même si une autre
+    // cause relançait un jour la chaîne sync → nettoyage → sync, elle ne pourrait plus tourner en rafale.
+    private static final long CLEANUP_AUTO_INTERVALLE_MIN_MS = 30_000L;
+    private static final java.util.concurrent.atomic.AtomicLong cleanupAutoFinMs =
+            new java.util.concurrent.atomic.AtomicLong(0L);
+    private static final java.util.concurrent.atomic.AtomicInteger cleanupAutoRefusesConsecutifs =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+
     public static void cleanupAutoAsync(Context ctx, long delaiMs, DataverseChecker checker) {
         long maintenant = System.currentTimeMillis();
+        long fin = cleanupAutoFinMs.get();
+        if (fin != 0L && maintenant - fin < CLEANUP_AUTO_INTERVALLE_MIN_MS) {
+            int n = cleanupAutoRefusesConsecutifs.incrementAndGet();
+            // Une seule trace par rafale (au 1er refus puis tous les 50), pour ne pas inonder Support.
+            if (n == 1 || n % 50 == 0) {
+                try { com.pa.lcr.lcp.log.LogBus.api(0, "[BOUCLE-NETTOYAGE] nettoyage JSON auto demandé moins de "
+                    + (CLEANUP_AUTO_INTERVALLE_MIN_MS / 1000) + " s après le précédent — ignoré (" + n + " demande(s) ignorée(s))"); }
+                catch (Exception ignoredLb) {}
+            }
+            return;
+        }
         long debut = cleanupAutoDebutMs.get();
         if (debut != 0L && maintenant - debut < 5L * 60L * 1000L) return;
         if (!cleanupAutoDebutMs.compareAndSet(debut, maintenant)) return;
@@ -514,10 +543,13 @@ public class LocalDeliveryBackup {
                 try { Thread.sleep(delaiMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                 cleanupOldBackupsAsync(app, 3, checker, false, (restored, kept, deleted, messages) -> {
                     cleanupAutoDebutMs.set(0L);
+                    cleanupAutoFinMs.set(System.currentTimeMillis());
+                    cleanupAutoRefusesConsecutifs.set(0);
                     Log.i(TAG, "cleanupAuto: restauré=" + restored + " gardé=" + kept + " supprimé=" + deleted);
                 });
             } catch (Exception e) {
                 cleanupAutoDebutMs.set(0L);
+                cleanupAutoFinMs.set(System.currentTimeMillis());
                 Log.w(TAG, "cleanupAuto ERR (non-bloquant): " + e.getMessage());
             }
         }, "LocalDeliveryCleanupAuto").start();

@@ -4543,6 +4543,7 @@ public class RegisterTabFragment extends Fragment {
                     boolean showDialog = false;
                     String curWoNumBg = "";
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow existingBg = null;
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.CumulPreset cumulBg = null;
                     double presetValBg = 0;
                     try {
                         com.pa.lcr.lcp.storage.ActiveDeliveryStore ads4 =
@@ -4554,15 +4555,18 @@ public class RegisterTabFragment extends Fragment {
                                 new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
                             try {
                                 existingBg = statusDb.getLatestForWo(curWoNumBg);
+                                // ✅ CORRIGÉ (21 oct 2026, demande Paul) — cumul de TOUTES les livraisons du bon
+                                // (même stop/produit que la livraison active), pas seulement la dernière.
+                                cumulBg = statusDb.cumulPourPreset(curWoNumBg,
+                                    ad4 != null ? ad4.stopid : "", ad4 != null ? ad4.productid : "");
                             } finally {
                                 try { statusDb.close(); } catch (Exception ignored) {}
                             }
-                            if (existingBg != null && existingBg.type != null
-                                    && !"ANNULATION".equals(existingBg.type)) {
+                            if (cumulBg != null && cumulBg.nbLivraisons > 0) {
                                 try {
                                     if (!presetTxtUi.isEmpty()) presetValBg = Double.parseDouble(presetTxtUi);
                                 } catch (Exception ignored) {}
-                                boolean livraisonComplete = (presetValBg <= 0 || existingBg.netL >= presetValBg);
+                                boolean livraisonComplete = (presetValBg <= 0 || cumulBg.totalNet >= presetValBg);
                                 // ✅ CORRIGÉ (23 sept 2026, demande Paul —
                                 // "regarde donc encore dans le code je suis
                                 // certain que oui") — trouvé : cette
@@ -4591,17 +4595,25 @@ public class RegisterTabFragment extends Fragment {
 
                     final boolean fShowDialog = showDialog;
                     final String fCurWoNum = curWoNumBg;
-                    final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow fExisting = existingBg;
+                    final com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.CumulPreset fCumulBg = cumulBg;
+                    final double fPresetBg = presetValBg;
 
                     ui.post(() -> {
                         if (!isAdded()) return;
-                        if (fShowDialog && fExisting != null) {
+                        if (fShowDialog && fCumulBg != null) {
+                            try { LogBus.api(node, "[BON-COMPLETE] wo=" + fCurWoNum + " déjà complété — cumul "
+                                + fCumulBg.nbLivraisons + " livraison(s) : " + fCumulBg.detail + " = " + fCumulBg.totalNet
+                                + "L net, preset=" + fPresetBg + "L — confirmation requise (bouton C)"); } catch (Exception ignoredLb) {}
                             new android.app.AlertDialog.Builder(requireContext())
                                 .setTitle("Bon déjà complété")
-                                .setMessage("Le bon " + fCurWoNum + " a déjà été livré"
-                                    + " (ticket #" + fExisting.ticketNo
-                                    + ", " + fExisting.netL + "L net).\n\n"
-                                    + "Voulez-vous créer une nouvelle livraison sur ce même bon ?")
+                                .setMessage("Le bon " + fCurWoNum + " a déjà été livré : "
+                                    + (fCumulBg.nbLivraisons > 1 ? fCumulBg.detail + " = " : "")
+                                    + String.format(java.util.Locale.CANADA_FRENCH, "%.1f", fCumulBg.totalNet) + " L net"
+                                    + (fPresetBg > 0
+                                        ? " pour un preset de " + String.format(java.util.Locale.CANADA_FRENCH, "%.1f", fPresetBg) + " L"
+                                        : "")
+                                    + ".\n\n"
+                                    + "Le preset est déjà atteint. Voulez-vous quand même créer une nouvelle livraison sur ce même bon ?")
                                 .setPositiveButton("Continuer", (d, w) -> startNewDeliveryC())
                                 .setNegativeButton("Annuler", null)
                                 .show();
