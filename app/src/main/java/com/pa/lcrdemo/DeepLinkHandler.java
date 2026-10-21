@@ -476,6 +476,59 @@ public class DeepLinkHandler {
                     final String btCibleDL = (fBtMac != null && !fBtMac.trim().isEmpty()) ? fBtMac.trim() : null;
                     final String btCleCible = (btCibleDL != null)
                         ? com.pa.lcr.lcp.transport.MediaTransportManager.btKey(btCibleDL) : null;
+                    // ✅ AJOUTÉ (21 oct 2026, demande Paul — "quand nous devons appairer un BT car inexistant ou disparu,
+                    // qu'on puisse le faire attendre le résultat, ensuite repartir comme si on arrivait du deeplink ...
+                    // juste un processus qui confirme si le bt manque") — UN seul processus, avant tout le reste :
+                    //   1) BT appairé ? (le deep link fournit MAC + #série + lcrnode)
+                    //   2) sinon : appairer (PIN 0000), attendre la fin, puis attendre que le registre soit connecté
+                    //      (par l'onglet/diagnostic) ou qu'aucune connexion ne soit plus en cours
+                    //   3) repartir du DÉBUT du deep link (handleDeepLink), maintenant sur le chemin normal (BT appairé).
+                    // Une seule relance par WO (120 s) pour ne jamais boucler. Si le diagnostic a lui-même réussi et
+                    // relancé la livraison pendant l'attente, on ne relance pas en double.
+                    if (btCibleDL != null) {
+                        try {
+                            BtAutoPairing.Resultat rPairDL = BtAutoPairing.assurerAppairage(
+                                activity, fBtMac, fNode,
+                                () -> activity.runOnUiThread(
+                                    () -> activity.toast("🔗 Appairage du registre...")));
+                            if (!rPairDL.ok) {
+                                logError(fSerialId, woNum, "BT_PAIRING", rPairDL.raison);
+                            } else if (!rPairDL.dejaAppaire && relanceApresAppairageAutorisee(woNum, woIdGuid)) {
+                                try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] registre réappairé (" + fBtMac
+                                    + ") — attente de la connexion puis relance du deep link depuis le début"); } catch (Exception ignoredLb) {}
+                                activity.runOnUiThread(() -> activity.toast("✅ Registre réappairé — connexion en cours..."));
+                                final long debutAttenteRel = System.currentTimeMillis();
+                                final long finAttenteRel = debutAttenteRel + 60_000L;
+                                long inactifDepuis = 0L;
+                                while (System.currentTimeMillis() < finAttenteRel) {
+                                    boolean effortEnCours = com.pa.lcrdemo.RegisterConnectionHelper.isDiagnosticEnCours()
+                                        || MultiRegisterApiFacadeImpl.isConnectAutoEnCours();
+                                    com.pa.lcr.lcp.DeliveryController dcRel = rsm.findLiveControllerByNodeAndSerial(fNode, fSerialId);
+                                    boolean connecteRel = dcRel != null && dcRel.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED;
+                                    if (effortEnCours) {
+                                        inactifDepuis = 0L;
+                                    } else {
+                                        if (connecteRel) break;
+                                        // rien ne se connecte (ex. jamais appairé avant) : 2 s de grâce, puis on relance
+                                        // et la 2e passe fait la résolution/connexion normale.
+                                        if (inactifDepuis == 0L) inactifDepuis = System.currentTimeMillis();
+                                        else if (System.currentTimeMillis() - inactifDepuis >= 2000L) break;
+                                    }
+                                    try { Thread.sleep(300); } catch (Exception ignored) {}
+                                }
+                                if (com.pa.lcrdemo.RegisterConnectionHelper.getDiagnosticSuccesMs() >= debutAttenteRel) {
+                                    try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] registre connecté par le diagnostic — "
+                                        + "la reprise de la livraison est gérée par le diagnostic, pas de relance du deep link"); } catch (Exception ignoredLb) {}
+                                    return;
+                                }
+                                try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] relance du deep link depuis le début (BT désormais appairé)"); } catch (Exception ignoredLb) {}
+                                activity.runOnUiThread(() -> handleDeepLink(intent));
+                                return;
+                            }
+                        } catch (Exception ePairDL) {
+                            try { com.pa.lcr.lcp.log.LogBus.err(fNode, "DeepLinkHandler.appairageAvantDeepLink", ePairDL); } catch (Exception ignoredErr) {}
+                        }
+                    }
                     String activeMatch = activity.resolveIfActiveMatches(fNode, fSerialId);
                     if (activeMatch != null && btCleCible != null && !btCleCible.equalsIgnoreCase(activeMatch.trim())) {
                         try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] média actif " + activeMatch
@@ -2241,6 +2294,18 @@ public class DeepLinkHandler {
     // pour ne jamais boucler lancerLivraison → connectBtByMacAndOpenTab → refus → …
     private String reconnexionDirecteCle = null;
     private long reconnexionDirecteMs = 0L;
+    // ✅ AJOUTÉ (21 oct 2026) — une seule relance du deep link après réappairage, par WO, sur 120 s.
+    private String relanceAppairageCle;
+    private long relanceAppairageMs;
+    private synchronized boolean relanceApresAppairageAutorisee(String woNum, String woIdGuid) {
+        String cle = (woNum == null ? "" : woNum) + "|" + (woIdGuid == null ? "" : woIdGuid);
+        long now = System.currentTimeMillis();
+        if (cle.equals(relanceAppairageCle) && (now - relanceAppairageMs) < 120_000L) return false;
+        relanceAppairageCle = cle;
+        relanceAppairageMs = now;
+        return true;
+    }
+
     private synchronized boolean reconnexionDirecteAutorisee(String woNum, String woIdGuid) {
         String cle = (woNum != null ? woNum : "") + "|" + (woIdGuid != null ? woIdGuid : "");
         long now = System.currentTimeMillis();
