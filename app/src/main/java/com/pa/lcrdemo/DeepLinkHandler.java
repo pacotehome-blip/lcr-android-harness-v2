@@ -108,6 +108,7 @@ public class DeepLinkHandler {
         if (data == null) return;
         if (!"lcrdemo".equals(data.getScheme())) return;
 
+        dernierIntentDeepLink = intent;
         String host = data.getHost();
         android.util.Log.i(TAG, "Deep link reçu: " + data.toString());
 
@@ -2297,6 +2298,50 @@ public class DeepLinkHandler {
     // ✅ AJOUTÉ (21 oct 2026) — une seule relance du deep link après réappairage, par WO, sur 120 s.
     private String relanceAppairageCle;
     private long relanceAppairageMs;
+    // ✅ AJOUTÉ (21 oct 2026, demande Paul — app totalement fermée, deep link : l'APK démarre puis est renvoyé
+    // dans FieldService "systématiquement", log 14:07:46-14:07:50) — l'auto-connect ouvre le socket RFCOMM (OK en 1,1 s)
+    // mais la sonde LCP ne reçoit rien 264 ms plus tard ("Registre non trouvé"), la 2e ouverture du socket 1,5 s après
+    // est refusée ("read failed, socket might closed or timeout, read ret: -1") → erreur_bt → retour FS en 3,5 s.
+    // Même principe que le réappairage : au lieu de renvoyer le chauffeur dans FieldService, on attend puis on relance
+    // le deep link depuis le début, UNE seule fois par WO sur 120 s (la 2e passe refait tout le chemin normal).
+    private volatile Intent dernierIntentDeepLink;
+    private String relanceEchecBtCle;
+    private long relanceEchecBtMs;
+    private synchronized boolean relanceApresEchecBtAutorisee(String woNum, String woIdGuid) {
+        String cle = (woNum == null ? "" : woNum) + "|" + (woIdGuid == null ? "" : woIdGuid);
+        long now = System.currentTimeMillis();
+        if (cle.equals(relanceEchecBtCle) && (now - relanceEchecBtMs) < 120_000L) return false;
+        relanceEchecBtCle = cle;
+        relanceEchecBtMs = now;
+        return true;
+    }
+
+    private boolean relancerApresEchecBt(String woNum, String woIdGuid, int node, String serialId, String raison) {
+        final Intent it = dernierIntentDeepLink;
+        if (it == null || !relanceApresEchecBtAutorisee(woNum, woIdGuid)) return false;
+        try {
+            com.pa.lcr.lcp.log.LogBus.api(node, "[BT-RECHERCHE] connexion BT échouée (" + raison
+                + ") — pas de retour FieldService : attente puis relance du deep link depuis le début (une seule fois)");
+            activity.runOnUiThread(() -> activity.toast("⏳ Connexion BT en cours — nouvelle tentative..."));
+            final long debut = System.currentTimeMillis();
+            while (System.currentTimeMillis() - debut < 10_000L) {
+                try { Thread.sleep(300); } catch (Exception ignored) {}
+                if (System.currentTimeMillis() - debut < 3_000L) continue; // laisse le pont BT libérer l'ancien socket
+                try {
+                    com.pa.lcr.lcp.DeliveryController dc = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                        .findLiveControllerByNodeAndSerial(node, serialId);
+                    if (dc != null && dc.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                } catch (Exception ignored) {}
+            }
+            com.pa.lcr.lcp.log.LogBus.api(node, "[BT-RECHERCHE] relance du deep link depuis le début (après échec BT, "
+                + ((System.currentTimeMillis() - debut) / 1000) + " s d'attente)");
+            activity.runOnUiThread(() -> handleDeepLink(it));
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private synchronized boolean relanceApresAppairageAutorisee(String woNum, String woIdGuid) {
         String cle = (woNum == null ? "" : woNum) + "|" + (woIdGuid == null ? "" : woIdGuid);
         long now = System.currentTimeMillis();
@@ -2847,9 +2892,9 @@ public class DeepLinkHandler {
 
             } catch (Exception e) {
                 android.util.Log.e(TAG, "BT connect ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "DeepLinkHandler.BT", e); } catch (Exception ignored) {}
+                logError(serialId != null ? serialId : "", woNum, "BT_CONNECT_ERROR", e.getMessage());
+                if (relancerApresEchecBt(woNum, woIdGuid, node, serialId != null ? serialId : "", String.valueOf(e.getMessage()))) return;
                 activity.runOnUiThread(() -> activity.toast("BT ERR: " + e.getMessage()));
-                logError(serialId != null ? serialId : "", woNum,
-                    "BT_CONNECT_ERROR", e.getMessage());
                 retournerFieldService(woNum, woIdGuid, "erreur_bt",
                     buildErrorJson("BT_CONNECT_ERROR", e.getMessage()));
             }
