@@ -415,6 +415,12 @@ public class RegisterConnectionHelper {
         return true;
     }
 
+    // ✅ AJOUTÉ (21 oct 2026) — horodatage du dernier diagnostic ayant réussi (lcpOk). Le deep link s'en sert pour
+    // savoir si le diagnostic a pris en charge la reprise de la livraison (preuve DB 21 oct 08:22 : diagnostic
+    // en ÉCHEC, registre connecté plus tard par l'onglet, deep link parti sans relancer la livraison).
+    private static volatile long diagnosticSuccesMs = 0L;
+    public static long getDiagnosticSuccesMs() { return diagnosticSuccesMs; }
+
     /** ✅ AJOUTÉ (20 oct 2026) — vrai si un diagnostic est en cours (verrou non périmé). */
     public static boolean isDiagnosticEnCours() {
         return diagnosticEnCours && (System.currentTimeMillis() - diagnosticStartMs) < DIAGNOSTIC_STALE_MS;
@@ -856,6 +862,7 @@ public class RegisterConnectionHelper {
         }
 
         // Succès — fermer dialog et basculer vers le tab
+        diagnosticSuccesMs = System.currentTimeMillis();
         Log.i(TAG, "diagnostic: registre joignable — node=" + fNodeFinal + " serial=" + fSerialIdFinal);
         activity.runOnUiThread(() -> {
             // ✅ CORRIGÉ (9 sept 2026, demande Paul — vrai FATAL EXCEPTION

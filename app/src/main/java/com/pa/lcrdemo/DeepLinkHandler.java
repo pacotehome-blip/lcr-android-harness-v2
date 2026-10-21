@@ -707,7 +707,8 @@ public class DeepLinkHandler {
                                 try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] connexion déjà en cours ailleurs ("
                                     + (diagAvant ? "diagnostic" : "connect-auto") + ") — attente du résultat avant toute connexion directe"); } catch (Exception ignoredLb) {}
                                 activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre en cours..."));
-                                long finAttente = System.currentTimeMillis() + 60_000L;
+                                final long debutAttente = System.currentTimeMillis();
+                                long finAttente = debutAttente + 60_000L;
                                 while (System.currentTimeMillis() < finAttente
                                     && (com.pa.lcrdemo.RegisterConnectionHelper.isDiagnosticEnCours()
                                         || MultiRegisterApiFacadeImpl.isConnectAutoEnCours())) {
@@ -718,7 +719,9 @@ public class DeepLinkHandler {
                                 }
                                 com.pa.lcr.lcp.DeliveryController dcApres = rsm.findLiveControllerByNodeAndSerial(fNode, fSerialId);
                                 if (dcApres != null && dcApres.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) {
-                                    if (diagAvant) {
+                                    // Le diagnostic ne gère la reprise QUE s'il a réussi pendant l'attente ; s'il a échoué et que le
+                                    // registre a été connecté ensuite par autre chose (onglet), c'est ce deep link qui reprend.
+                                    if (diagAvant && com.pa.lcrdemo.RegisterConnectionHelper.getDiagnosticSuccesMs() >= debutAttente) {
                                         // Le diagnostic relance lui-même la livraison à son succès (ou décide de ne pas
                                         // la relancer : livraison déjà faite / en cours) — ne pas la lancer en double.
                                         try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] registre connecté par le diagnostic — la reprise de la livraison est gérée par le diagnostic"); } catch (Exception ignoredLb) {}
