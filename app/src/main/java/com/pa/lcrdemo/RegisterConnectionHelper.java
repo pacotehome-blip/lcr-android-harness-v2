@@ -98,7 +98,7 @@ public class RegisterConnectionHelper {
     }
 
     public static void fermerDialoguesDiagnostic(final String raison) {
-        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+        final Runnable fermer = () -> {
             int fermes = 0;
             synchronized (DIALOGUES_DIAG) {
                 for (java.lang.ref.WeakReference<android.app.AlertDialog> ref : DIALOGUES_DIAG) {
@@ -112,7 +112,10 @@ public class RegisterConnectionHelper {
             if (fermes > 0) {
                 try { com.pa.lcr.lcp.log.LogBus.api(0, "[DIAGNOSTIC] écran fermé (" + fermes + ") — " + raison); } catch (Exception ignored) {}
             }
-        });
+        };
+        // Sur le thread UI : immédiat (indispensable avant activity.finish(), sinon WindowLeaked).
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) fermer.run();
+        else new android.os.Handler(android.os.Looper.getMainLooper()).post(fermer);
     }
 
     /** À appeler depuis le thread UI : exécute r maintenant, ou dès qu'aucune question chauffeur n'est ouverte. */
@@ -410,6 +413,11 @@ public class RegisterConnectionHelper {
         diagnosticStartMs = now;
         Log.i(TAG, origine + ": verrou diagnostic pris");
         return true;
+    }
+
+    /** ✅ AJOUTÉ (20 oct 2026) — vrai si un diagnostic est en cours (verrou non périmé). */
+    public static boolean isDiagnosticEnCours() {
+        return diagnosticEnCours && (System.currentTimeMillis() - diagnosticStartMs) < DIAGNOSTIC_STALE_MS;
     }
 
     private static synchronized void libererLeVerrouDiagnostic() {

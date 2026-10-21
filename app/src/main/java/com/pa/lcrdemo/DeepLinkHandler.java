@@ -694,6 +694,65 @@ public class DeepLinkHandler {
                             lancerLivraison(foundKey2 != null ? foundKey2 : "", fNode,
                                 fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
                         } else if (fBtMac != null && !fBtMac.trim().isEmpty()) {
+                            // ✅ AJOUTÉ (20 oct 2026, demande Paul — "avant que le deep link parte il doit avoir le
+                            // ok pour valider que le BT est connecté") — preuve logcat 20:23:51–59 : le registre
+                            // venait d'être réappairé, l'onglet/diagnostic avaient DÉJÀ une connexion en cours
+                            // (api_registerConnectAuto → "Connexion déjà en cours"), et le deep link a lancé en
+                            // parallèle sa propre connexion directe vers le même appareil → erreur_bt + retour FS.
+                            // Si une connexion est déjà en cours ailleurs (verrou connectAuto ou diagnostic), on
+                            // ATTEND son résultat (60 s max) au lieu de se connecter en double.
+                            final boolean diagAvant = com.pa.lcrdemo.RegisterConnectionHelper.isDiagnosticEnCours();
+                            final boolean occupe = ra != null && "ERR_CONNECT_AUTO_BUSY".equals(ra.err);
+                            if (diagAvant || occupe) {
+                                try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] connexion déjà en cours ailleurs ("
+                                    + (diagAvant ? "diagnostic" : "connect-auto") + ") — attente du résultat avant toute connexion directe"); } catch (Exception ignoredLb) {}
+                                activity.runOnUiThread(() -> activity.toast("🔌 Connexion au registre en cours..."));
+                                long finAttente = System.currentTimeMillis() + 60_000L;
+                                while (System.currentTimeMillis() < finAttente
+                                    && (com.pa.lcrdemo.RegisterConnectionHelper.isDiagnosticEnCours()
+                                        || MultiRegisterApiFacadeImpl.isConnectAutoEnCours())) {
+                                    com.pa.lcr.lcp.DeliveryController dcAtt = rsm.findLiveControllerByNodeAndSerial(fNode, fSerialId);
+                                    if (dcAtt != null && dcAtt.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED
+                                        && !com.pa.lcrdemo.RegisterConnectionHelper.isDiagnosticEnCours()) break;
+                                    try { Thread.sleep(300); } catch (Exception ignored) {}
+                                }
+                                com.pa.lcr.lcp.DeliveryController dcApres = rsm.findLiveControllerByNodeAndSerial(fNode, fSerialId);
+                                if (dcApres != null && dcApres.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                                    if (diagAvant) {
+                                        // Le diagnostic relance lui-même la livraison à son succès (ou décide de ne pas
+                                        // la relancer : livraison déjà faite / en cours) — ne pas la lancer en double.
+                                        try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] registre connecté par le diagnostic — la reprise de la livraison est gérée par le diagnostic"); } catch (Exception ignoredLb) {}
+                                        return;
+                                    }
+                                    String kApres = rsm.findTransportKeyForController(dcApres);
+                                    try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] registre connecté ailleurs — reprise du deep link"); } catch (Exception ignoredLb) {}
+                                    lancerLivraison(kApres != null ? kApres : "", fNode,
+                                        fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                                    return;
+                                }
+                                // Pas connecté après l'attente : une seule reprise de connect-auto, puis repli direct.
+                                com.pa.lcr.lcp.ApiResult raRep = facadeAuto.api_registerConnectAuto(
+                                    fSerialId.isEmpty() ? null : fSerialId, fNode, btCibleDL);
+                                try { com.pa.lcr.lcp.log.LogBus.api(fNode, "[BT-RECHERCHE] auto-connect (après attente) : code="
+                                    + (raRep != null ? raRep.code : "null") + " msg=" + (raRep != null ? raRep.msg : "null")); } catch (Exception ignoredLb) {}
+                                if (raRep != null && raRep.code == 1) {
+                                    com.pa.lcr.lcp.DeliveryController dcR = (btCleCible != null)
+                                        ? rsm.resolveOrCreateForNodeOnTransport(fNode, 255, btCleCible)
+                                        : rsm.resolveOrCreateForNode(fNode, 255);
+                                    if (dcR != null) {
+                                        for (int w = 0; w < 75; w++) {
+                                            if (dcR.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) break;
+                                            try { Thread.sleep(200); } catch (Exception ignored) {}
+                                        }
+                                        if (dcR.getState() == com.pa.lcr.lcp.DeliveryState.CONNECTED) {
+                                            String kR = rsm.findTransportKeyForController(dcR);
+                                            lancerLivraison(kR != null ? kR : "", fNode,
+                                                fSerialId, woNum, woIdGuid, fProduit, fPresetStr, fBtMac);
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
                             // Fallback BT explicite
                             android.util.Log.i(TAG, "Auto-connect échoué — connexion BT: " + fBtMac);
                             connectBtByMacAndOpenTab(fBtMac, fNode, serialId, woNum, woIdGuid,
@@ -4494,6 +4553,8 @@ public class DeepLinkHandler {
                 }
 
                 android.util.Log.i(TAG, "Retour FS — finish()");
+                // ✅ AJOUTÉ (20 oct 2026) — fermer les écrans de diagnostic AVANT finish() (WindowLeaked au logcat 20:24).
+                try { com.pa.lcrdemo.RegisterConnectionHelper.fermerDialoguesDiagnostic("retour Field Service"); } catch (Throwable ignoredDiag) {}
                 try {
                     activity.finish();
                 } catch (Exception e) {

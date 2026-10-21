@@ -110,6 +110,11 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         return true;
     }
 
+    /** ✅ AJOUTÉ (20 oct 2026) — vrai si un api_registerConnectAuto est en cours (verrou non périmé). */
+    public static boolean isConnectAutoEnCours() {
+        return connectAutoEnCours && (System.currentTimeMillis() - connectAutoStartMs) < CONNECT_AUTO_STALE_MS;
+    }
+
     private static synchronized void libererLeVerrouConnectAuto() {
         connectAutoEnCours = false;
         connectAutoStartMs = 0L;
