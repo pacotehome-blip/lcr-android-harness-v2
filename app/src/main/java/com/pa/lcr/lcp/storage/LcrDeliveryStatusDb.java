@@ -1113,6 +1113,75 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         return marquees;
     }
 
+    // 21 oct 2026 — livraisons 368/369/372 : le registre a reçu CMD_RUN mais n'a jamais
+    // démarré (jamais « livraison active ») puis a annoncé « preset atteint » à 0 L. La
+    // ligne d'armement (RUNNING_FLOWING) ne doit NI être finalisée à 0 L NI poussée vers
+    // Dataverse. Elle devient ORPHELIN avec sync_status=ABANDONNE (hors du filtre
+    // PENDING/ERROR de getPendingDeliveries -> jamais poussée), raison dans le payload.
+    public static final String SYNC_ABANDONNE = "ABANDONNE";
+
+    public boolean marquerRunNonDemarre(Context ctx, String jobId, String raison) {
+        if (jobId == null || jobId.isEmpty()) return false;
+        DeliveryRow r = getByJobId(jobId);
+        if (r == null) return false;
+        if (!"RUNNING_FLOWING".equals(r.stopType)) return false; // déjà finalisée : ne jamais y toucher
+        try {
+            org.json.JSONObject pj;
+            try { pj = new org.json.JSONObject(r.payloadJson != null && !r.payloadJson.isEmpty() ? r.payloadJson : "{}"); }
+            catch (Exception ePj) { pj = new org.json.JSONObject(); }
+            pj.put("run_non_demarre", true);
+            pj.put("run_non_demarre_raison", raison);
+            pj.put("run_non_demarre_ts", System.currentTimeMillis());
+            String pjStr = pj.toString().replace("RUNNING_FLOWING", "RUN_NON_DEMARRE");
+            ContentValues cv = new ContentValues();
+            cv.put(COL_STOP_TYPE, STOP_TYPE_ORPHELIN);
+            cv.put(COL_SYNC_STATUS, SYNC_ABANDONNE);
+            cv.put(COL_PAYLOAD_JSON, pjStr);
+            cv.put(COL_TS_UPDATED_MS, System.currentTimeMillis());
+            int n = getWritableDatabase().update(TABLE_DELIVERY, cv, COL_JOB_ID + "=? AND " + COL_STOP_TYPE + "=?",
+                new String[]{jobId, "RUNNING_FLOWING"});
+            if (n <= 0) return false;
+            if (r.woNum != null) ALL_FOR_WO_CACHE.remove(r.woNum);
+            try { com.pa.lcr.lcp.log.LogBus.api(r.lcrnode, "[RUN-NON-DÉMARRÉ] ligne d'armement mise de côté (ORPHELIN/ABANDONNE, jamais poussée) — jobId="
+                + jobId + " ticket=" + r.ticketNo + " wo=" + r.woNum); } catch (Exception ignoredLb) {}
+            if (ctx != null) {
+                try {
+                    org.json.JSONObject jf = new org.json.JSONObject();
+                    jf.put("job_id", r.jobId);
+                    jf.put("wo_num", r.woNum != null ? r.woNum : "");
+                    jf.put("wo_id_guid", r.woIdGuid != null ? r.woIdGuid : "");
+                    jf.put("stopid", r.stopid != null ? r.stopid : "");
+                    jf.put("productid", r.productid != null ? r.productid : "");
+                    jf.put("ticket_no", r.ticketNo != null ? r.ticketNo : "");
+                    jf.put("sale_no", r.saleNo != null ? r.saleNo : "");
+                    jf.put("net_l", r.netL);
+                    jf.put("gross_l", r.grossL);
+                    jf.put("serial_id", r.serialId != null ? r.serialId : "");
+                    jf.put("lcrnode", r.lcrnode);
+                    jf.put("btmac", r.btmac != null ? r.btmac : "");
+                    jf.put("type", r.type != null ? r.type : TYPE_ORIGINAL);
+                    jf.put("backup_ts", System.currentTimeMillis());
+                    jf.put("payload_complet", pjStr);
+                    jf.put("sync_status", SYNC_ABANDONNE);
+                    LocalDeliveryBackup.backupDeliveryAsync(ctx, r.woNum, r.jobId, jf);
+                } catch (Exception eJf) {
+                    Log.w(TAG, "marquerRunNonDemarre: copie JSON ERR (non-bloquant): " + eJf.getMessage());
+                }
+                try {
+                    ActiveDeliveryStore ads = new ActiveDeliveryStore(ctx);
+                    ActiveDeliveryStore.ActiveDelivery ad = ads.load();
+                    if (ad != null && r.jobId.equals(ad.jobId)) ads.clear();
+                } catch (Exception eAds) {
+                    Log.w(TAG, "marquerRunNonDemarre: ActiveDeliveryStore ERR (non-bloquant): " + eAds.getMessage());
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "marquerRunNonDemarre ERR jobId=" + jobId + ": " + e.getMessage());
+            return false;
+        }
+    }
+
     // Une ligne déjà orpheline ne peut pas "remplacer" une autre.
     private static boolean estOrphelin(DeliveryRow s) {
         return STOP_TYPE_ORPHELIN.equals(s.stopType);

@@ -3666,6 +3666,14 @@ public class DeepLinkHandler {
                         if ("DONE".equals(state) || "TERMINATED".equals(state)) {
                             if (deliveryDone[0]) return;
                             deliveryDone[0] = true;
+                            if (!terminateSent) {
+                                try {
+                                    com.pa.lcr.lcp.DeliveryController dcRnd2 =
+                                        com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                                    if (traiterRunNonDemarre(dcRnd2, jobId, serialId, woNum, node)) return;
+                                } catch (Exception ignoredRnd2) {}
+                            }
+                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[ÉTAPE 4/5 FIN] livraison terminée (" + state + ") — jobId=" + jobId); } catch (Exception ignoredEt4b) {}
                             // ✅ AJOUTÉ (23 sept 2026, demande Paul —
                             // "déclencheur juste avant running_flowing et
                             // à la fin qui valide l'information") — force
@@ -3743,6 +3751,12 @@ public class DeepLinkHandler {
                         if ("CONNECTED".equals(state) && hasSeenFlowing && !terminateSent) {
                             if (deliveryDone[0]) return;
                             deliveryDone[0] = true;
+                            try {
+                                com.pa.lcr.lcp.DeliveryController dcRnd =
+                                    com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
+                                if (traiterRunNonDemarre(dcRnd, jobId, serialId, woNum, node)) return;
+                            } catch (Exception ignoredRnd) {}
+                            try { com.pa.lcr.lcp.log.LogBus.api(node, "[ÉTAPE 4/5 FIN] le registre a terminé la livraison (preset atteint) — jobId=" + jobId); } catch (Exception ignoredEt4) {}
                             try {
                                 com.pa.lcr.lcp.DeliveryController dcFinForce4 =
                                     com.pa.lcr.lcp.RegisterSessionManager.get(activity).getController(transportKey, node);
@@ -4825,6 +4839,44 @@ public class DeepLinkHandler {
                     deliveryStore.addEventAsync(
                         attemptId, level, type, message, dataJson));
         } catch (Exception ignored) {}
+    }
+
+    // 21 oct 2026 — livraisons 368/369/372 : CMD_RUN accepté mais le registre n'a jamais
+    // démarré (jamais « livraison active ») puis « preset atteint » à 0 L. Retourne true si
+    // le cas est détecté ET traité (ligne d'armement mise de côté, rien envoyé à Dataverse,
+    // chauffeur averti) : l'appelant ne doit alors PAS finaliser.
+    private boolean traiterRunNonDemarre(com.pa.lcr.lcp.DeliveryController dc, String jobId,
+                                         String serialId, String woNum, int node) {
+        try {
+            if (dc == null || dc.registreADemarreApresRun(jobId)) return false;
+            final String detail = "CMD_RUN envoyé il y a " + (dc.msDepuisRun() / 1000) + " s, le registre n'a jamais indiqué « livraison active » — "
+                + dc.resumeDernierTick();
+            com.pa.lcr.lcp.log.LogBus.api(node, "[ÉTAPE 3/5 ⚠ NON DÉMARRÉE] " + detail
+                + " — livraison NON finalisée, rien envoyé à Dataverse — jobId=" + jobId);
+            logError(serialId, woNum, "RUN_NON_DEMARRE", detail);
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbRnd = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+            try {
+                dbRnd.marquerRunNonDemarre(activity, jobId, detail);
+            } finally {
+                try { dbRnd.close(); } catch (Exception ignoredClose) {}
+            }
+            try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredAds) {}
+            activity.runOnUiThread(() -> {
+                try {
+                    if (activity.isFinishing()) return;
+                    new android.app.AlertDialog.Builder(activity)
+                        .setTitle("Le registre n'a pas démarré")
+                        .setMessage("Le registre a reçu l'ordre de démarrer mais n'a pas lancé la livraison. "
+                            + "Aucun volume n'a été enregistré ni envoyé.\n\nRelancez la livraison.")
+                        .setPositiveButton("OK", null)
+                        .show();
+                } catch (Exception ignoredDlg) {}
+            });
+            return true;
+        } catch (Exception e) {
+            android.util.Log.w(TAG, "traiterRunNonDemarre ERR (non-bloquant): " + e.getMessage());
+            return false;
+        }
     }
 
     private void logError(String serialId, String woNum, String code, String message) {

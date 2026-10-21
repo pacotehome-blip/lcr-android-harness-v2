@@ -2498,6 +2498,11 @@ public class RegisterTabFragment extends Fragment {
                             // preset n'est pas vraiment atteint, reprend
                             // le suivi au lieu de déclarer la livraison
                             // terminée.
+                            if (!cFiletFin.registreADemarreApresRun(safetyNetFin.jobId)) {
+                                LogBus.api(node, "[FILET-CONNECTED] CMD_RUN envoyé mais le registre n'a jamais démarré (aucun « livraison active ») — "
+                                    + "pas de finalisation, traité par le suivi du deep link — jobId=" + safetyNetFin.jobId);
+                                return;
+                            }
                             int dcVerifFilet = cFiletFin.getLastDelCode();
                             boolean presetVraimentAtteint =
                                 (dcVerifFilet & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0

@@ -892,6 +892,21 @@ private void reproEvent(String level, String type, String message, JSONObject da
 
         LastTick prev = lastTick;
 
+        // ÉTAPE 3 — le registre a-t-il VRAIMENT démarré la livraison après CMD_RUN ?
+        // Seul signe fiable : le bit "livraison active" (0x08). Le net/gross lu juste
+        // après le RUN est un reliquat de la livraison précédente (jusqu'à ~3 s) et
+        // l'état RUNNING_FLOWING est posé par l'APK dès l'envoi du RUN : aucun des deux
+        // ne prouve que le registre a démarré.
+        if (runJobIdSuivi != null && !runDemarrageVu && delCode >= 0
+                && (delCode & DC_DELIVERY_ACTIVE) != 0) {
+            runDemarrageVu = true;
+            try {
+                com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(), String.format(
+                    "[ÉTAPE 3/5 DÉMARRÉE] le registre a démarré la livraison (+%d ms après CMD_RUN, ds=0x%04X dc=0x%04X) — jobId=%s",
+                    System.currentTimeMillis() - runEnvoyeMs, Math.max(delStatus, 0), delCode, runJobIdSuivi));
+            } catch (Throwable ignoredEtape3) {}
+        }
+
         // Normaliser dev/prn si inconnus
         if (devStatus < 0) {
             if (prev != null) devStatus = prev.devStatus;
@@ -3297,6 +3312,33 @@ softResync("retry/" + step);
         if (job != null) job.cancelledByOperator = true;
     }
 
+    // ---- Suivi "le registre a-t-il démarré après CMD_RUN ?" (21 oct 2026) ----
+    private volatile String runJobIdSuivi = null;
+    private volatile boolean runDemarrageVu = false;
+    private volatile long runEnvoyeMs = 0L;
+
+    /**
+     * false UNIQUEMENT si ce contrôleur a envoyé CMD_RUN pour ce job et n'a jamais vu
+     * « livraison active » depuis. Pour tout autre cas (autre job, contrôleur recréé,
+     * reprise après coupure) renvoie true : comportement historique inchangé.
+     */
+    public boolean registreADemarreApresRun(String jobId) {
+        if (jobId == null || jobId.isEmpty()) return true;
+        String suivi = runJobIdSuivi;
+        if (suivi == null || !suivi.equals(jobId)) return true;
+        return runDemarrageVu;
+    }
+
+    public long msDepuisRun() {
+        return runEnvoyeMs > 0 ? System.currentTimeMillis() - runEnvoyeMs : -1L;
+    }
+
+    public String resumeDernierTick() {
+        LastTick lt = lastTick;
+        if (lt == null) return "aucun tick";
+        return String.format("ds=0x%04X dc=0x%04X net=%.1f gross=%.1f", lt.delStatus, lt.delCode, lt.net, lt.gross);
+    }
+
     public boolean isJobCancelledByOperator(String jobId) {
         if (jobId == null || jobId.isEmpty()) return false;
         ApiJob job;
@@ -4640,6 +4682,11 @@ job.presetNetL_requested = presetNetL;
             safeJsonPut(data, "live_status", liveStatusArmed());
             safeJsonPut(data, "available_actions", actionsContinueTerminate());
 
+            try {
+                com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(), String.format(
+                    "[ÉTAPE 1/5 ARMÉ] produit=%d preset demandé=%.1f appliqué=%.1f ticket(sale)=%s — en attente de CONTINUER — jobId=%s",
+                    product1to16, presetNetL, presetApplied, (ticketNo == null || ticketNo.isEmpty()) ? "?" : ticketNo, jobId));
+            } catch (Throwable ignoredEtape1) {}
             return ApiResult.ok("Delivery OneShot: 1 - ARMED (preset OK, waiting)", data);
 
         } catch (Exception e) {
@@ -4668,7 +4715,14 @@ job.presetNetL_requested = presetNetL;
                     "[RUN-AVANT] jobId=%s preset #6 brut=%d ds=0x%04X dc=0x%04X (lecture juste avant CMD_RUN)",
                     jobId, presetRawAvant, dsAvant[0], dsAvant[1]));
             } catch (Throwable ignoreDiag) {}
+            runDemarrageVu = false;
+            runEnvoyeMs = System.currentTimeMillis();
+            runJobIdSuivi = jobId;
             lcpIssueCommand(CMD_RUN);
+            try {
+                com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(),
+                    "[ÉTAPE 2/5 RUN ENVOYÉ] CMD_RUN transmis au registre — attente du démarrage (bit « livraison active ») — jobId=" + jobId);
+            } catch (Throwable ignoredEtape2) {}
             long now = System.currentTimeMillis();
             continueGraceUntilMs = now + CONTINUE_GRACE_MS;
             job.continueGraceUntilMs = now + CONTINUE_GRACE_MS;
@@ -4697,6 +4751,13 @@ job.presetNetL_requested = presetNetL;
                         }
                     } catch (Throwable ignoreDiag) {}
                 }
+                try {
+                    if (!registreADemarreApresRun(jobIdDiag)) {
+                        com.pa.lcr.lcp.log.LogBus.api(nodeDiag, "[ÉTAPE 3/5 ⚠ NON DÉMARRÉE] +" + cumul
+                            + " ms après CMD_RUN le registre n'a toujours pas indiqué « livraison active » — " + resumeDernierTick()
+                            + " — jobId=" + jobIdDiag);
+                    }
+                } catch (Throwable ignoredWd) {}
             }, "run-suivi-diag");
             diagT.setDaemon(true);
             diagT.start();
