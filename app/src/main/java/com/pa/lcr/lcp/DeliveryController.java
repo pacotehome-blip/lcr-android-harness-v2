@@ -4734,7 +4734,7 @@ job.presetNetL_requested = presetNetL;
             final String jobIdDiag = jobId;
             final int nodeDiag = resolveLcpNode();
             Thread diagT = new Thread(() -> {
-                final long[] pausesMs = {300, 700, 1000, 2000, 2000};
+                final long[] pausesMs = {300, 700, 1000, 2000, 2000, 2000, 2000}; // démarrage observé entre +4,9 s et +6,0 s : avertir seulement à +10 s
                 long cumul = 0;
                 for (long pause : pausesMs) {
                     try { Thread.sleep(pause); } catch (InterruptedException ie) { return; }
