@@ -654,7 +654,11 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // ticket a dû retomber sur sale_number (Field #23=0). Exposé via
     // getter pour que le tab sache directement quoi souligner, sans avoir
     // à comparer les deux valeurs lui-même.
-    public volatile boolean dernierTicketEstSaleNumberFallback = false;
+    // ✅ CORRIGÉ (21 oct 2026, demande Paul — "la règle du souligné devrait déjà être présent") — vrai PAR DÉFAUT :
+    // la règle du registre est ticket_number = sale_number tant qu'aucune lecture n'a trouvé un #23 réellement
+    // non nul (impression). Faux par défaut, un nouveau contrôleur (après dépairage/reconnexion) faisait souligner
+    // "Ticket Number" et afficher lastKnownTicketNo (périmé) tant qu'aucune lecture n'avait traversé le repli.
+    public volatile boolean dernierTicketEstSaleNumberFallback = true;
     // ✅ AJOUTÉ (4 sept 2026, demande Paul — "si on a une erreur là, le
     // reste ne peut pas continuer") — true seulement si le dernier appel
     // à readTicketNo23() (via requestStatus) a vraiment réussi, sans
@@ -3208,7 +3212,16 @@ softResync("retry/" + step);
 
     // -------- U32 helpers --------
     private String readU32FieldAsDecString(int field) throws Exception {
-        long u = beI32(lcpGetField(field)) & 0xFFFFFFFFL;
+        byte[] raw = lcpGetField(field);
+        // ✅ AJOUTÉ (21 oct 2026) — diagnostic seulement (comportement inchangé) : beI32() transforme une réponse
+        // vide/courte en 0, indiscernable d'un vrai 0. Trace la vraie cause quand une lecture #22/#23 est ratée.
+        if (raw == null || raw.length < 4) {
+            android.util.Log.w("DeliveryController", "readU32FieldAsDecString: champ #" + field
+                + " — réponse " + (raw == null ? "null" : ("courte (" + raw.length + " octets)")) + " lue comme 0");
+            try { com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(), "[LCP-LECTURE] champ #" + field + " — réponse "
+                + (raw == null ? "null" : ("courte (" + raw.length + " octets)")) + " lue comme 0 (lecture probablement ratée)"); } catch (Exception ignored) {}
+        }
+        long u = beI32(raw) & 0xFFFFFFFFL;
         return String.valueOf(u);
     }
 
@@ -3425,23 +3438,28 @@ softResync("retry/" + step);
                 // Cas 2/3 — les deux compteurs sont à zéro.
                 boolean ticketRequiredNeverPrint = false;
                 try { ticketRequiredNeverPrint = isTicketRequiredNeverPrint(); } catch (Exception ignored) {}
-                String horodatageFallback = String.valueOf(System.currentTimeMillis() / 1000L);
+                // ✅ CORRIGÉ (21 oct 2026, demande Paul — "on invente pas... l'heure à la place n'a jamais été
+                // demandé") — AUCUN numéro inventé : ni heure, ni 0. Sale number illisible (ou à 0) = valeur
+                // INCONNUE, retournée vide. L'appelant continue la livraison ; le vrai sale_number est relu à la fin.
+                // (Preuve base 21 oct : tickets "1792586373"/"1792586535" = heure en secondes, lignes parasites
+                // poussées à Dataverse pour les livraisons 358 et 359.)
                 if (!ticketRequiredNeverPrint) {
                     android.util.Log.w("DeliveryController", "readTicketNo23: ticket=0 ET sale=0 avec "
-                        + "TicketRequired≠2 — REGISTRE RÉINITIALISÉ probable. Repli horodatage="
-                        + horodatageFallback + " (jamais 0, pour éviter un delivery_uid dégénéré)");
+                        + "TicketRequired≠2 — REGISTRE RÉINITIALISÉ probable. Aucun numéro inventé (valeur inconnue).");
                     try { com.pa.lcr.lcp.log.LogBus.err(resolveLcpNode(), "DeliveryController.readTicketNo23",
                             new Exception("Registre réinitialisé probable — ticket=0 et sale=0 simultanément")); } catch (Exception ignored) {}
                 } else {
-                    android.util.Log.i("DeliveryController", "readTicketNo23: ticket=0 et sale=0 "
-                        + "(TicketRequired=2, comportement attendu) — repli horodatage=" + horodatageFallback);
+                    android.util.Log.w("DeliveryController", "readTicketNo23: ticket=0 et sale=0 "
+                        + "(TicketRequired=2) — sale_number illisible à cet instant, aucun numéro inventé (valeur inconnue)");
                 }
-                return horodatageFallback;
+                try { com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(), "[TICKET-SOURCE] sale_number illisible (#22=0 et #23=0) — "
+                        + "aucun numéro inventé, la valeur sera relue à la fin de la livraison"); } catch (Exception ignored) {}
+                return "";
             } catch (Exception e) {
-                // Repli impossible à vérifier — retourne le "0" original plutôt
-                // que de risquer une valeur incorrecte sur une supposition.
+                // Lecture du sale_number en échec : valeur INCONNUE (pas "0", qui serait écrit comme un vrai ticket).
                 android.util.Log.w("DeliveryController", "readTicketNo23: vérification du repli SaleNumber ERR: " + e.getMessage());
                 try { com.pa.lcr.lcp.log.LogBus.err(resolveLcpNode(), "DeliveryController.readTicketNo23", e); } catch (Exception ignored) {}
+                return "";
             }
         } else {
             dernierTicketEstSaleNumberFallback = false; // ✅ AJOUTÉ (27 août 2026) — vrai ticket direct, pas de repli
@@ -4330,7 +4348,7 @@ public ApiResult api_registerValidate(
                 String saleNoEarly = readSaleNo22();
                 String serialIdEarly = decodeAzString(lcpGetField(FIELD_SERIAL_ID));
                 boolean ticketPendingEarly = (delCodeEarly & DC_TICKET_PENDING) != 0;
-                String deliveryUidEarly = (numero_livraison == null ? "" : numero_livraison) + "-" + ticketNoEarly;
+                String deliveryUidEarly = (numero_livraison == null ? "" : numero_livraison) + "-" + (ticketNoEarly == null || ticketNoEarly.isEmpty() ? "?" : ticketNoEarly);
                 JSONObject data = new JSONObject();
                 safeJsonPut(data, "numero_livraison", numero_livraison);
                 safeJsonPut(data, "ticket_no", ticketNoEarly);
@@ -4398,7 +4416,7 @@ try {
             String ticketNo = readTicketNo23();
             String saleNo = readSaleNo22();
             String serialId = decodeAzString(lcpGetField(FIELD_SERIAL_ID));
-            String deliveryUid = (numero_livraison == null ? "" : numero_livraison) + "-" + ticketNo;
+            String deliveryUid = (numero_livraison == null ? "" : numero_livraison) + "-" + (ticketNo == null || ticketNo.isEmpty() ? "?" : ticketNo);
 
             // ✅ FIX : pousser immédiatement ticket_no/delivery_uid à l'UI du tab.
             // Avant ce fix, seul requestStatus() (poll périodique) appelait
