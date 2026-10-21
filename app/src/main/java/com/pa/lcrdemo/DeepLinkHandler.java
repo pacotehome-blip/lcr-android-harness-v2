@@ -3158,8 +3158,27 @@ public class DeepLinkHandler {
                                         String ticketStabilise = "";
                                         try {
                                             dcApresContinue.forceRefreshTicketEtSaleNoPourJob(jobId);
-                                            String lectureUnique = dcApresContinue.api_readTicketNo23Frais();
-                                            if (lectureUnique != null) ticketStabilise = lectureUnique;
+                                            // ✅ AJOUTÉ (21 oct 2026, demande Paul — "le but est d'avoir le ticket_number
+                                            // (sales_number) dans le JSON running_flowing, pour reconstruire la livraison
+                                            // dans l'apk") — preuve base 358/359 : cette lecture unique a renvoyé #22=0 alors
+                                            // que 360/361 ont lu le bon numéro. Au plus 3 tentatives, ~1 s d'écart, SEULEMENT
+                                            // si la valeur est vide ou 0. Lecture réussie du premier coup : aucune lecture en
+                                            // plus. Jamais de numéro inventé : si les 3 échouent, le JSON reste celui du jobId
+                                            // et le vrai numéro est relu à la fin de la livraison.
+                                            for (int tentLect = 1; tentLect <= 3; tentLect++) {
+                                                String lectureUnique = dcApresContinue.api_readTicketNo23Frais();
+                                                if (lectureUnique != null && !lectureUnique.trim().isEmpty() && !"0".equals(lectureUnique.trim())) {
+                                                    ticketStabilise = lectureUnique;
+                                                    if (tentLect > 1) {
+                                                        try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] lecture avant RUNNING_FLOWING — réussie à la tentative "
+                                                            + tentLect + "/3 — jobId=" + jobId + " valeur=" + lectureUnique); } catch (Exception ignoredLbT) {}
+                                                    }
+                                                    break;
+                                                }
+                                                try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] lecture avant RUNNING_FLOWING — tentative "
+                                                    + tentLect + "/3 sans sale_number (valeur=\"" + (lectureUnique == null ? "null" : lectureUnique) + "\") — jobId=" + jobId); } catch (Exception ignoredLbT) {}
+                                                if (tentLect < 3) { try { Thread.sleep(1000); } catch (Exception ignoredSl) {} }
+                                            }
                                         } catch (Exception ignoredRefresh) {}
                                         try { com.pa.lcr.lcp.log.LogBus.api(node, "[LIVRAISON] lecture avant RUNNING_FLOWING — jobId="
                                             + jobId + " valeur=" + ticketStabilise
