@@ -4656,11 +4656,50 @@ job.presetNetL_requested = presetNetL;
         synchronized (apiJobs) { job = apiJobs.get(jobId); }
         if (job == null) return ApiResult.fail("Continue: 0 - Job unknown", "JOB_NOT_FOUND");
         try {
+            // DIAGNOSTIC (21 oct 2026) — livraisons 368/369 : le registre a
+            // annoncé "preset net atteint + fin demandée" ~7 s après CMD_RUN,
+            // sans aucun litre. Cause non établie. Une seule lecture AVANT le
+            // RUN (le registre ne coule pas encore, aucune contention avec le
+            // tick rapide) pour garder la preuve de l'état de départ.
+            try {
+                long presetRawAvant = beI32(lcpGetField(FIELD_PRESET_NET)) & 0xFFFFFFFFL;
+                int[] dsAvant = lcpDeliveryStatus();
+                com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(), String.format(
+                    "[RUN-AVANT] jobId=%s preset #6 brut=%d ds=0x%04X dc=0x%04X (lecture juste avant CMD_RUN)",
+                    jobId, presetRawAvant, dsAvant[0], dsAvant[1]));
+            } catch (Throwable ignoreDiag) {}
             lcpIssueCommand(CMD_RUN);
             long now = System.currentTimeMillis();
             continueGraceUntilMs = now + CONTINUE_GRACE_MS;
             job.continueGraceUntilMs = now + CONTINUE_GRACE_MS;
             setState(DeliveryState.RUNNING_FLOWING);
+            // DIAGNOSTIC — suivi après RUN SANS aucune lecture au registre :
+            // recopie seulement le dernier tick déjà publié par le tick rapide
+            // (aucun trafic ajouté pendant la livraison).
+            final long runMsDiag = now;
+            final String jobIdDiag = jobId;
+            final int nodeDiag = resolveLcpNode();
+            Thread diagT = new Thread(() -> {
+                final long[] pausesMs = {300, 700, 1000, 2000, 2000};
+                long cumul = 0;
+                for (long pause : pausesMs) {
+                    try { Thread.sleep(pause); } catch (InterruptedException ie) { return; }
+                    cumul += pause;
+                    try {
+                        LastTick lt = lastTick;
+                        if (lt == null) {
+                            com.pa.lcr.lcp.log.LogBus.api(nodeDiag, "[RUN-SUIVI] +" + cumul + "ms jobId=" + jobIdDiag + " aucun tick");
+                        } else {
+                            com.pa.lcr.lcp.log.LogBus.api(nodeDiag, String.format(
+                                "[RUN-SUIVI] +%dms jobId=%s état=%s ds=0x%04X dc=0x%04X net=%.1f gross=%.1f (âge tick %dms)",
+                                cumul, jobIdDiag, state.name(), lt.delStatus, lt.delCode, lt.net, lt.gross,
+                                System.currentTimeMillis() - lt.tsMs));
+                        }
+                    } catch (Throwable ignoreDiag) {}
+                }
+            }, "run-suivi-diag");
+            diagT.setDaemon(true);
+            diagT.start();
 
             // ✅ La détection négatif ad-hoc qui était ici a été retirée — remplacée
             // par la détection officielle du Delivery Status bit 0x0040 dans
