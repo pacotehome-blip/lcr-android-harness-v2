@@ -110,6 +110,11 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         return true;
     }
 
+    /** ✅ AJOUTÉ (20 oct 2026) — vrai si un api_registerConnectAuto est en cours (verrou non périmé). */
+    public static boolean isConnectAutoEnCours() {
+        return connectAutoEnCours && (System.currentTimeMillis() - connectAutoStartMs) < CONNECT_AUTO_STALE_MS;
+    }
+
     private static synchronized void libererLeVerrouConnectAuto() {
         connectAutoEnCours = false;
         connectAutoStartMs = 0L;
@@ -2147,58 +2152,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         DeliveryController dc = requireSession(node, from);
         if (dc == null) return ApiResult.fail("Printer: 0 - USB non prêt", "ERR_USB_PORT_NOT_READY");
         return dc.api_printerStatus();
-    }
-
-    /**
-     * Texte ligne par ligne vers l'imprimante du registre (MSG_PRINT_TEXT), meme
-     * resolution de session que api_ticketReprintCurrent (media auto = BT si le
-     * transport actif est BT, sinon USB). Une ligne a la fois, 150 ms entre les
-     * lignes (comme "Impression custom" de RegisterTabFragment).
-     */
-    @Override
-    public ApiResult api_printTextLines(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac,
-                                        java.util.List<String> lines) {
-        if (lines == null || lines.isEmpty()) {
-            return ApiResult.fail("PrintText: 0 - aucune ligne", "ERR_NO_LINES");
-        }
-        int node = normNode(lcrnode_dec); int from = normFrom(from_dec);
-        String m = (media == null) ? "" : media.trim().toLowerCase(Locale.ROOT);
-        if (m.isEmpty() || "auto".equals(m)) {
-            String activeKey = MediaTransportManager.getActiveKeyStatic();
-            m = (activeKey != null && activeKey.startsWith("BT:")) ? "bt" : "usb";
-        }
-        DeliveryController dc;
-        if ("usb".equals(m)) {
-            dc = requireSession(node, from);
-            if (dc == null) return ApiResult.fail("PrintText: 0 - USB non prêt.", "ERR_USB_PORT_NOT_READY");
-        } else if ("bt".equals(m) || "bluetooth".equals(m)) {
-            String key = resolveBtKeyOrActive(bt_mac);
-            if (key == null) return ApiResult.fail("PrintText: 0 - Aucun BT actif", "ERR_NO_ACTIVE_BT");
-            TransportIo io = (mediaMgr != null) ? mediaMgr.getByKey(key) : null;
-            if (io == null || !io.isOpen()) return ApiResult.fail("PrintText: 0 - BT non connecté", "ERR_BT_NOT_CONNECTED");
-            dc = sessions.getOrCreate(key, node, from, io);
-            if (dc == null) return ApiResult.fail("PrintText: 0 - Controller introuvable", "NO_CONTROLLER");
-        } else {
-            return ApiResult.fail("PrintText: 0 - media invalide", "ERR_MEDIA_INVALID");
-        }
-        dc.printInProgress = true;
-        try {
-            int total = lines.size();
-            for (int i = 0; i < total; i++) {
-                ApiResult r = dc.api_printTextLine(lines.get(i));
-                if (r == null || r.code != 1) {
-                    String why = (r == null) ? "null" : r.msg;
-                    return ApiResult.fail("PrintText: ligne " + (i + 1) + "/" + total + " en erreur — " + why, "PRINT_ERR");
-                }
-                try { Thread.sleep(150); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
-            }
-            org.json.JSONObject d = new org.json.JSONObject();
-            try { d.put("lines", total); } catch (Exception ignored) {}
-            return ApiResult.ok("PrintText: " + total + " ligne(s) envoyée(s)", d);
-        } finally {
-            dc.printInProgress = false;
-        }
-    }
+    }    
     
     @Override
     public ApiResult api_deliveryAlignA(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac) {
