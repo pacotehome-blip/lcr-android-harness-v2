@@ -1159,6 +1159,36 @@ public synchronized void start() throws Exception {
             });
         }
 
+        // ✅ Impression texte ligne par ligne (MSG_PRINT_TEXT) -- appelee par le
+        // service d'impression filgoprint. Corps : lcrnode, [from], [media],
+        // [bt_mac], [expected_serial_id], lines[] (chaines).
+        if ("POST".equals(req.method) && "/v1/print/text".equals(req.path)) {
+            JSONObject body = safeBody(req.jsonBody());
+            Integer node = parseNodeDec(body);
+            Integer from = parseFromDec(body);
+            JSONArray arr = body.optJSONArray("lines");
+            final java.util.List<String> lines = new java.util.ArrayList<>();
+            if (arr != null) {
+                for (int i = 0; i < arr.length(); i++) lines.add(arr.optString(i, ""));
+            }
+            return withAutoConnectRetry(body, () -> {
+                String media = resolveMediaDefault(body);
+                String btMac = resolveBtMacDefault(body);
+                ApiResult c = facade.api_connectLcp(node, from, media, btMac);
+                if (c == null || c.code != 1) return c;
+                String expSerial = body.optString("expected_serial_id", "").trim();
+                if (!expSerial.isEmpty() && c.data != null) {
+                    String actualSerial = c.data.optString("serialId", c.data.optString("serial_id", "")).trim();
+                    if (!actualSerial.isEmpty() && !expSerial.equalsIgnoreCase(actualSerial)) {
+                        JSONObject ed = new JSONObject();
+                        try { ed.put("expected_serial_id", expSerial); ed.put("actual_serial_id", actualSerial); } catch (Exception ignored) {}
+                        return ApiResult.fail("Serial mismatch: attendu=" + expSerial + " réel=" + actualSerial, "ERR_SERIAL_MISMATCH", ed);
+                    }
+                }
+                return facade.api_printTextLines(node, from, media, btMac, lines);
+            });
+        }
+
         // ✅ /v1/register/connect-auto — EXCLU de l'auto-heal (sinon récursion)
         if ("POST".equals(req.method) && "/v1/register/connect-auto".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
@@ -1373,4 +1403,4 @@ public synchronized void start() throws Exception {
         String m = e.getMessage();
         return (m == null) ? e.getClass().getSimpleName() : m;
     }
-}
+}
