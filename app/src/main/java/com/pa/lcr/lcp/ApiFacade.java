@@ -399,4 +399,13 @@ public interface ApiFacade {
         return ApiResult.fail("api_profileDelete: not supported", "NOT_SUPPORTED");
     }
     
+    /**
+     * Impression de texte ligne par ligne sur l'imprimante du registre (LCR-II),
+     * via MSG_PRINT_TEXT -- meme chemin que "Impression custom". Utilise par le
+     * service d'impression (filgoprint) pour passer par la liaison deja ouverte.
+     */
+    default ApiResult api_printTextLines(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac,
+                                         java.util.List<String> lines) {
+        return ApiResult.fail("api_printTextLines: not supported", "NOT_SUPPORTED");
+    }
 }
