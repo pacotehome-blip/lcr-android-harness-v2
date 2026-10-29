@@ -213,12 +213,13 @@ public class PrinterConfigActivity extends Activity {
         etFmt.setFocusable(false);
         f.addView(etFmt);
 
-        f.addView(label("BT-MAC de l'imprimante (ou adresse IP si Wi-Fi)"));
+        final TextView lblMac = label("BT-MAC de l'imprimante (ou adresse IP si Wi-Fi)");
+        f.addView(lblMac);
         final EditText etMac = new EditText(this);
         etMac.setSingleLine(true);
         etMac.setHint("AA:BB:CC:DD:EE:FF");
         f.addView(etMac);
-        Button btnBonded = new Button(this);
+        final Button btnBonded = new Button(this);
         btnBonded.setText("Choisir parmi les appareils déjà appairés");
         f.addView(btnBonded);
 
@@ -233,7 +234,21 @@ public class PrinterConfigActivity extends Activity {
 
         spDrv.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> a, View v, int pos, long id) {
-                etFmt.setText(PrinterCatalog.formatLabel(PrinterCatalog.formatFor(PrinterCatalog.DRIVERS[pos].name)));
+                String dn = PrinterCatalog.DRIVERS[pos].name;
+                etFmt.setText(PrinterCatalog.formatLabel(PrinterCatalog.formatFor(dn)));
+                // Imprimante branchée au registre (ex. Epson TM-T88VII) : pas de MAC, cible fixe 127.0.0.1.
+                String cur = etMac.getText().toString().trim();
+                boolean reg = PrinterCatalog.isRegistre(dn);
+                if (reg) {
+                    etMac.setText(PrinterCatalog.REGISTRE_TARGET);
+                } else if (PrinterCatalog.REGISTRE_TARGET.equals(cur)) {
+                    etMac.setText("");
+                }
+                // Registre = HTTP seulement : aucun Bluetooth, on cache le champ MAC et le choix d'appareil appairé.
+                lblMac.setText(reg ? "Cible : relais HTTP du registre (aucun Bluetooth)"
+                                   : "BT-MAC de l'imprimante (ou adresse IP si Wi-Fi)");
+                etMac.setVisibility(reg ? View.GONE : View.VISIBLE);
+                btnBonded.setVisibility(reg ? View.GONE : View.VISIBLE);
             }
             @Override public void onNothingSelected(AdapterView<?> a) {}
         });
