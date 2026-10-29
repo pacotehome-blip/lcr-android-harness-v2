@@ -35,14 +35,19 @@ public final class PrinterCatalog {
         new Driver("ZPL_COGNITIVE",          "Cognitive ZPL",                             true),
         new Driver("ZPL_COGNITIVE_9600",     "Cognitive ZPL (9600 bauds)",                true),
         new Driver("ZPL_COGNITIVE_TEXTE",    "Cognitive DLXi texte (9600 bauds)",         true),
-        new Driver("ZPL_COGNITIVE_USB",      "Cognitive DLXi (USB-série)",                false),
-        new Driver("ZPL_COGNITIVE_REGISTRE", "Cognitive via registre (texte)",            false),
-        new Driver("REGISTRE_COGNITIVE_CPL", "Cognitive 4 po via registre (CPL)",         false),
+        new Driver("ZPL_COGNITIVE_REGISTRE", "Epson TM-T88VII registre 3\" (http)", false),
+        new Driver("REGISTRE_COGNITIVE_CPL", "Cognitive registre 4\" (http)", false),
         new Driver("ONEIL_MF4TE_DPL",        "O'Neil microFlash MF4te (DPL)",             true),
     };
 
     public static final String[] COMPANIES = { "", "TEG_PROPANE", "TEG_PETROLE", "AUTRE" };
     public static final String[] COMPANY_LABELS = { "(aucune)", "TEG Propane", "TEG Pétrole", "Autre" };
+
+    /** Pilotes d'une imprimante branchée au registre : la cible est toujours 127.0.0.1 (relais HTTP du registre). */
+    public static boolean isRegistre(String driverName) {
+        return "ZPL_COGNITIVE_REGISTRE".equals(driverName) || "REGISTRE_COGNITIVE_CPL".equals(driverName);
+    }
+    public static final String REGISTRE_TARGET = "127.0.0.1";
 
     public static Driver find(String name) {
         if (name == null) return null;
