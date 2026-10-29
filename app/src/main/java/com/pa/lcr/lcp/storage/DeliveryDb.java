@@ -46,7 +46,9 @@ public class DeliveryDb extends SQLiteOpenHelper {
     // v29 (29 oct 2026, demande Paul) — imprimantes par citerne : table imprimante_citerne (citerne +
     //      format GRAND/PETIT + pilote + BT MAC, poussée au service d'impression) et colonnes
     //      citerne_guid / citerne_nom sur la fiche registre (lues dans Dataverse, jamais repoussées).
-    public static final int DB_VERSION = 29;
+    // v30 (29 oct 2026) -- imprimante_citerne : une ligne par (citerne, cible) au lieu de (citerne, format) :
+    //      autant d'imprimantes Bluetooth que voulu par citerne, une seule imprimante HTTP (registre).
+    public static final int DB_VERSION = 30;
 
     private static final String TAG = "DeliveryDb";
 
@@ -271,6 +273,19 @@ public class DeliveryDb extends SQLiteOpenHelper {
             addColumnIfMissing(db, "registre", "citerne_guid", "TEXT");
             addColumnIfMissing(db, "registre", "citerne_nom",  "TEXT");
             createImprimanteCiterneTable(db);
+        }
+        // v30 : la cle unique passe de (citerne, format) a (citerne, cible). SQLite ne change pas une
+        // contrainte UNIQUE en place : on recree la table et on recopie les lignes existantes.
+        if (oldVersion < 30 && oldVersion >= 29) {
+            db.execSQL("ALTER TABLE imprimante_citerne RENAME TO imprimante_citerne_v29");
+            createImprimanteCiterneTable(db);
+            db.execSQL("INSERT OR REPLACE INTO imprimante_citerne (truck_key, truck_id, format, company, driver_type, bt_mac, "
+                + "printer_name, citerne_source, registre_serial, registre_nud, registre_guid, service_sync, service_msg, "
+                + "service_ts_ms, dataverse_id, dataverse_version, ts_created_ms, ts_updated_ms) "
+                + "SELECT truck_key, truck_id, format, company, driver_type, UPPER(COALESCE(bt_mac,'')), printer_name, "
+                + "citerne_source, registre_serial, registre_nud, registre_guid, service_sync, service_msg, "
+                + "service_ts_ms, dataverse_id, dataverse_version, ts_created_ms, ts_updated_ms FROM imprimante_citerne_v29");
+            db.execSQL("DROP TABLE imprimante_citerne_v29");
         }
     }
 
@@ -857,7 +872,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_registre_sync ON registre(sync_status);");
     }
 
-    // Une ligne par (citerne, format) : une citerne peut avoir une imprimante GRAND et une PETIT.
+    // Une ligne par (citerne, cible) : autant d'imprimantes Bluetooth que voulu, une seule HTTP (REGISTRE).
     // Le format est déduit du pilote (voir PrinterCatalog). truck_key = identifiant de la citerne en
     // majuscules (clé, insensible à la casse) ; truck_id garde la saisie d'origine.
     private static void createImprimanteCiterneTable(SQLiteDatabase db) {
@@ -869,7 +884,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "format           TEXT    NOT NULL," +          // GRAND | PETIT (déduit du pilote)
             "company          TEXT," +                      // TEG_PROPANE | TEG_PETROLE | AUTRE | vide
             "driver_type      TEXT    NOT NULL," +          // nom d'enum du service d'impression
-            "bt_mac           TEXT," +                      // cible : MAC Bluetooth, IP ou 127.0.0.1
+            "bt_mac           TEXT    NOT NULL DEFAULT ''," + // cible : MAC Bluetooth (majuscules), IP ou 127.0.0.1
             "printer_name     TEXT," +
             "citerne_source   TEXT    NOT NULL DEFAULT 'MANUEL'," + // DATAVERSE | MANUEL
             "registre_serial  TEXT," +
@@ -882,7 +897,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "dataverse_version TEXT," +
             "ts_created_ms    INTEGER NOT NULL," +
             "ts_updated_ms    INTEGER NOT NULL," +
-            "UNIQUE(truck_key, format)" +
+            "UNIQUE(truck_key, bt_mac)" +
             ");"
         );
     }

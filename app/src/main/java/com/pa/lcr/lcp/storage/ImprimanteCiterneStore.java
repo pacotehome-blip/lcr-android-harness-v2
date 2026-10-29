@@ -5,14 +5,17 @@ import android.content.Context;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 
+import com.pa.lcrdemo.print.PrinterCatalog;
+
 import java.util.ArrayList;
 import java.util.List;
 
 /**
  * ImprimanteCiterneStore — table locale imprimante_citerne (v29, 29 oct 2026).
  *
- * Une ligne par (citerne, format) : une citerne/camion peut avoir une imprimante GRAND (PJ-862)
- * ET une PETIT. Le format est déduit du pilote (PrinterCatalog.formatFor), jamais saisi.
+ * Une ligne par (citerne, cible) : une citerne/camion peut avoir autant d'imprimantes Bluetooth que
+ * voulu (même du même format) et UNE SEULE imprimante HTTP (format REGISTRE). Le format est déduit
+ * du pilote (PrinterCatalog.formatFor), jamais saisi ; il sert au choix, pas à l'identité.
  * La ligne est poussée au service d'impression (PrintServiceClient) ; service_sync dit où on en est.
  * Les colonnes dataverse_* sont réservées à la 2e phase (push vers filgo_print_printers, table
  * pas encore créée côté Dataverse) — non utilisées ici.
@@ -88,10 +91,15 @@ public class ImprimanteCiterneStore {
         return out;
     }
 
-    public Row get(String truckId, String format) {
+    public static String macOf(String target) {
+        return target == null ? "" : target.trim().toUpperCase(java.util.Locale.ROOT);
+    }
+
+    /** Une ligne precise : citerne + cible (MAC Bluetooth, IP ou 127.0.0.1). */
+    public Row get(String truckId, String target) {
         SQLiteDatabase db = helper.getReadableDatabase();
-        try (Cursor c = db.query(TABLE, null, "truck_key=? AND format=?",
-                new String[]{ keyOf(truckId), format }, null, null, null, "1")) {
+        try (Cursor c = db.query(TABLE, null, "truck_key=? AND bt_mac=?",
+                new String[]{ keyOf(truckId), macOf(target) }, null, null, null, "1")) {
             return c.moveToFirst() ? Row.from(c) : null;
         }
     }
@@ -105,7 +113,7 @@ public class ImprimanteCiterneStore {
         cv.put("format",     r.format);
         cv.put("company",    r.company == null ? "" : r.company);
         cv.put("driver_type", r.driverType);
-        cv.put("bt_mac",     r.btMac);
+        cv.put("bt_mac",     macOf(r.btMac));
         cv.put("printer_name", r.printerName);
         cv.put("citerne_source", r.citerneSource == null ? SRC_MANUEL : r.citerneSource);
         cv.put("registre_serial", r.registreSerial);
@@ -115,8 +123,13 @@ public class ImprimanteCiterneStore {
         cv.putNull("service_msg");
         cv.put("ts_updated_ms", now);
         SQLiteDatabase db = helper.getWritableDatabase();
-        int n = db.update(TABLE, cv, "truck_key=? AND format=?",
-                new String[]{ keyOf(r.truckId), r.format });
+        // Imprimante du registre (HTTP) : une seule par citerne -- remplace l'ancienne, quelle que soit sa cible.
+        if (PrinterCatalog.FORMAT_REGISTRE.equals(r.format)) {
+            db.delete(TABLE, "truck_key=? AND format=? AND bt_mac<>?",
+                new String[]{ keyOf(r.truckId), PrinterCatalog.FORMAT_REGISTRE, macOf(r.btMac) });
+        }
+        int n = db.update(TABLE, cv, "truck_key=? AND bt_mac=?",
+                new String[]{ keyOf(r.truckId), macOf(r.btMac) });
         if (n > 0) return n;
         cv.put("ts_created_ms", now);
         return db.insert(TABLE, null, cv);

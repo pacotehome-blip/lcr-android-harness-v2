@@ -387,9 +387,15 @@ public class PrinterConfigActivity extends Activity {
                 r.registreNud = rr.nud;
                 r.registreGuid = rr.dataverseId;
             }
-            // Changement de citerne ou de format en modification : l'ancienne ligne ne doit pas rester.
+            // Une citerne peut avoir plusieurs imprimantes : seule la MÊME cible est refusée (hors modification de cette ligne).
+            ImprimanteCiterneStore.Row dejaLa = store.get(truck, mac);
+            if (dejaLa != null && (edit == null || dejaLa.id != edit.id)) {
+                etMac.setError("Cette citerne a déjà une imprimante sur cette cible");
+                return;
+            }
+            // Changement de citerne ou de cible en modification : l'ancienne ligne ne doit pas rester.
             if (edit != null && (!ImprimanteCiterneStore.keyOf(edit.truckId).equals(ImprimanteCiterneStore.keyOf(truck))
-                    || !edit.format.equals(r.format))) {
+                    || !ImprimanteCiterneStore.macOf(edit.btMac).equals(ImprimanteCiterneStore.macOf(mac)))) {
                 store.delete(edit.id);
             }
             store.save(r);
@@ -397,7 +403,7 @@ public class PrinterConfigActivity extends Activity {
                 + " driver=" + r.driverType + " cible=" + mac + " source=" + r.citerneSource);
             dlg.dismiss();
             refreshList();
-            send(store.get(truck, r.format), false);
+            send(store.get(truck, mac), false);
         });
     }
 

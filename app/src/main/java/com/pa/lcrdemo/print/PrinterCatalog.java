@@ -14,6 +14,7 @@ public final class PrinterCatalog {
 
     public static final String FORMAT_GRAND = "GRAND";
     public static final String FORMAT_PETIT = "PETIT";
+    public static final String FORMAT_REGISTRE = "REGISTRE";
 
     /** Pilote : nom d'enum côté service + libellé affiché + transport indicatif. */
     public static final class Driver {
@@ -55,14 +56,18 @@ public final class PrinterCatalog {
         return null;
     }
 
-    /** GRAND pour la PJ-862, PETIT pour tout le reste (y compris nom vide ou inconnu). */
+    /** GRAND pour la PJ-862, REGISTRE pour les deux pilotes registre (HTTP), PETIT pour tout le reste. */
     public static String formatFor(String driverName) {
-        return "BROTHER_PJ_862".equals(driverName == null ? "" : driverName.trim())
-            ? FORMAT_GRAND : FORMAT_PETIT;
+        String d = driverName == null ? "" : driverName.trim();
+        if ("BROTHER_PJ_862".equals(d)) return FORMAT_GRAND;
+        if (isRegistre(d)) return FORMAT_REGISTRE;
+        return FORMAT_PETIT;
     }
 
     public static String formatLabel(String format) {
-        return FORMAT_GRAND.equalsIgnoreCase(format) ? "Grand format (Letter)" : "Petit format (4 po)";
+        if (FORMAT_GRAND.equalsIgnoreCase(format)) return "Grand format (Letter)";
+        if (FORMAT_REGISTRE.equalsIgnoreCase(format)) return "Imprimante du registre (HTTP)";
+        return "Petit format (4 po)";
     }
 
     /** MAC Bluetooth au format AA:BB:CC:DD:EE:FF (majuscules) ou null si invalide. */
