@@ -46,6 +46,8 @@ public class RegistreStore {
     public static final String COL_NUMERO_SCELLE     = "numero_de_scelle";
     public static final String COL_IDENTIFIANT_LC3   = "identifiant_unite_lc3";
     public static final String COL_FIRMWARE          = "firmware";
+    public static final String COL_CITERNE_GUID      = "citerne_guid";
+    public static final String COL_CITERNE_NOM       = "citerne_nom";
     public static final String COL_DATAVERSE_VERSION = "dataverse_version";
     public static final String COL_SYNC_STATUS       = "sync_status";
     public static final String COL_UPDATED           = "updated_at";
@@ -85,6 +87,8 @@ public class RegistreStore {
         public final String numeroScelle;
         public final String identifiantLc3;
         public final String firmware;
+        public final String citerneGuid;
+        public final String citerneNom;
         public final String dataverseVersion;
         public final String syncStatus;
         public final long   updatedAt;
@@ -107,6 +111,8 @@ public class RegistreStore {
             numeroScelle     = getStr(c, COL_NUMERO_SCELLE);
             identifiantLc3   = getStr(c, COL_IDENTIFIANT_LC3);
             firmware         = getStr(c, COL_FIRMWARE);
+            citerneGuid      = getStr(c, COL_CITERNE_GUID);
+            citerneNom       = getStr(c, COL_CITERNE_NOM);
             dataverseVersion = getStr(c, COL_DATAVERSE_VERSION);
             syncStatus       = getStr(c, COL_SYNC_STATUS);
             updatedAt        = c.getLong(c.getColumnIndexOrThrow(COL_UPDATED));
@@ -263,11 +269,43 @@ public class RegistreStore {
         if (isVide(existing.identifiantLc3) && dataverseRow.has("filgo_identifiantunitelc3")) {
             cv.put(COL_IDENTIFIANT_LC3, dataverseRow.optString("filgo_identifiantunitelc3", ""));
         }
+        // v29 — citerne associée au registre (filgo_actifciterne) : Dataverse fait foi, donc on
+        // la rafraîchit dès qu'elle est présente là-bas (jamais effacée si Dataverse est vide).
+        String citGuid = dataverseRow.optString("_filgo_actifciterne_value", "");
+        String citNom  = dataverseRow.optString(
+            "_filgo_actifciterne_value@OData.Community.Display.V1.FormattedValue", "");
+        if (!isVide(citGuid) && !citGuid.equals(existing.citerneGuid)) cv.put(COL_CITERNE_GUID, citGuid);
+        if (!isVide(citNom)  && !citNom.equals(existing.citerneNom))   cv.put(COL_CITERNE_NOM,  citNom);
         if (cv.size() == 0) return; // rien à compléter
 
         SQLiteDatabase db = helper.getWritableDatabase();
         db.update(TABLE, cv, COL_SERIAL + "=?", new String[]{ serialId });
         Log.i(TAG, "enrichirDepuisDataverseSiManquant: serial=" + serialId + " — " + cv.size() + " champ(s) complété(s)");
+    }
+
+    /** Toutes les fiches locales, triées par numéro de série (écran Configurer → Imprimantes). */
+    public java.util.List<Row> listAll() {
+        java.util.List<Row> out = new java.util.ArrayList<>();
+        SQLiteDatabase db = helper.getReadableDatabase();
+        try (Cursor c = db.query(TABLE, null, null, null, null, null, COL_SERIAL + " ASC")) {
+            while (c.moveToNext()) out.add(new Row(c));
+        }
+        return out;
+    }
+
+    /**
+     * Mémorise la citerne lue dans Dataverse (filgo_actifciterne). Direction Dataverse→local
+     * uniquement : ne touche jamais sync_status (la fiche n'est pas repoussée pour ça).
+     * Une valeur vide ne remplace jamais une valeur déjà connue.
+     */
+    public void setCiterne(String serialId, String citerneGuid, String citerneNom) {
+        if (isVide(serialId) || (isVide(citerneGuid) && isVide(citerneNom))) return;
+        if (getBySerial(serialId) == null) return;
+        ContentValues cv = new ContentValues();
+        if (!isVide(citerneGuid)) cv.put(COL_CITERNE_GUID, citerneGuid);
+        if (!isVide(citerneNom))  cv.put(COL_CITERNE_NOM,  citerneNom);
+        helper.getWritableDatabase().update(TABLE, cv, COL_SERIAL + "=?", new String[]{ serialId });
+        Log.i(TAG, "setCiterne: serial=" + serialId + " guid=" + citerneGuid + " nom=" + citerneNom);
     }
 
     private static boolean isVide(String s) {

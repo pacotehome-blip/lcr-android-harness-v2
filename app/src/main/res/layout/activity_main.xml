@@ -281,6 +281,16 @@
                      moment entre deux candidats sans jamais toucher à l'état
                      de connexion réel de l'app (aucune session créée, aucun
                      réglage changé, aucune persistance). -->
+                <!-- 29 oct 2026 (demande Paul) : module d'ajout d'imprimante (pilote + BT-MAC + citerne),
+                     poussé au service d'impression — ouvre PrinterConfigActivity. -->
+                <Button
+                    android:id="@+id/btnConfigImprimantes"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="10dp"
+                    android:backgroundTint="#1565C0"
+                    android:text="🖨 Imprimantes (citerne / camion)"/>
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"

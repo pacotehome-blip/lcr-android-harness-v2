@@ -1642,6 +1642,13 @@ tabRegisters = findViewById(R.id.tabRegisters);
             btnValiderCandidats.setOnClickListener(v ->
                 startActivity(new android.content.Intent(MainActivity.this, RegisterValidationActivity.class)));
         }
+        // 29 oct 2026 (demande Paul) — Configurer → Imprimantes (ajout pilote + BT-MAC + citerne).
+        Button btnConfigImprimantes = findViewById(R.id.btnConfigImprimantes);
+        if (btnConfigImprimantes != null) {
+            btnConfigImprimantes.setOnClickListener(v ->
+                startActivity(new android.content.Intent(MainActivity.this,
+                    com.pa.lcrdemo.print.PrinterConfigActivity.class)));
+        }
         if (btnAnnulerCandidats != null) {
             btnAnnulerCandidats.setOnClickListener(v -> {
                 candidatsAnnules = true;

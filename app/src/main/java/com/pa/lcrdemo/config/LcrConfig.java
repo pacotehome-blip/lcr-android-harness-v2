@@ -32,6 +32,12 @@ public class LcrConfig {
     // API publique
     // =========================================================
 
+    // ── Service d'impression (com.filgo.printspooler) — 29 oct 2026 ─────────
+    // Service local sur la même tablette. Jeton partagé = constante (décision Paul : "oui vas y,
+    // jeton en constante dans LcrConfig"). Doit être identique à PrintHttpService.REQUIRED_APP_TOKEN du service.
+    public static final String PRINT_SERVICE_URL   = "http://127.0.0.1:9182/truck-printer";
+    public static final String PRINT_SERVICE_TOKEN = "filgo-fsm-print-2026";
+
     public static String getDataverseUrl(Context ctx) {
         return get(ctx, "lcr_dataverse_url_" + env(ctx).toLowerCase(),
             "https://dev-filgo-sonic.crm3.dynamics.com");

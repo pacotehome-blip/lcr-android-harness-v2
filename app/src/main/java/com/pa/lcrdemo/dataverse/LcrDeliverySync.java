@@ -610,7 +610,7 @@ public class LcrDeliverySync {
         String urlStr = orgUrl + "/api/data/v9.2/" + TABLE_REGISTRE
             + "?$select=filgo_registrecompteurid,versionnumber,filgo_registrecompteur1,"
             + "filgo_coefficientbrutnet,filgo_datedecalibration,filgo_datedescellement,"
-            + "filgo_numerodescelle,filgo_identifiantunitelc3"
+            + "filgo_numerodescelle,filgo_identifiantunitelc3,_filgo_actifciterne_value"
             + "&$top=1&$filter=" + filter;
         URL url = new URL(urlStr);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -622,6 +622,9 @@ public class LcrDeliverySync {
             conn.setRequestProperty("Accept",           "application/json");
             conn.setRequestProperty("OData-MaxVersion", "4.0");
             conn.setRequestProperty("OData-Version",    "4.0");
+            // v29 : libellé de la citerne (lookup) renvoyé avec le GUID.
+            conn.setRequestProperty("Prefer",
+                "odata.include-annotations=\"OData.Community.Display.V1.FormattedValue\"");
 
             int code = conn.getResponseCode();
             if (code != 200) return null;
@@ -633,6 +636,39 @@ public class LcrDeliverySync {
             return null;
         } finally {
             conn.disconnect();
+        }
+    }
+
+    /**
+     * v29 (29 oct 2026) — lit dans Dataverse la citerne liée au registre (filgo_actifciterne) et
+     * la mémorise localement (RegistreStore.setCiterne). Appel réseau : à lancer hors du thread UI.
+     * Si le lookup est vide côté Dataverse, rien n'est écrit et le retour est null (l'écran propose
+     * alors la saisie manuelle, marquée "saisie manuelle").
+     *
+     * @return {guid, nom} ou null si Dataverse n'a pas de citerne pour ce registre (ou erreur réseau)
+     */
+    public static String[] lookupCiterne(Context ctx, String accessToken, String serialId) {
+        if (serialId == null || serialId.trim().isEmpty()) return null;
+        try {
+            String orgUrl = LcrConfig.getDataverseUrl(ctx);
+            JSONObject fiche = findRegistreByNumeroDeSerie(serialId.trim(), orgUrl, accessToken);
+            if (fiche == null) {
+                LogBus.api(0, "[PRINT-SYNC] citerne: registre " + serialId + " introuvable dans Dataverse");
+                return null;
+            }
+            String guid = fiche.optString("_filgo_actifciterne_value", "");
+            String nom  = fiche.optString("_filgo_actifciterne_value@OData.Community.Display.V1.FormattedValue", "");
+            if (guid.isEmpty() && nom.isEmpty()) {
+                LogBus.api(0, "[PRINT-SYNC] citerne: Dataverse n'a aucune citerne liée au registre " + serialId);
+                return null;
+            }
+            new RegistreStore(ctx).setCiterne(serialId.trim(), guid, nom);
+            LogBus.api(0, "[PRINT-SYNC] citerne lue: registre " + serialId + " → " + nom + " (" + guid + ")");
+            return new String[]{ guid, nom };
+        } catch (Exception e) {
+            Log.w(TAG, "lookupCiterne ERR: " + e.getMessage());
+            LogBus.api(0, "[PRINT-SYNC] citerne ERR registre " + serialId + " : " + e.getMessage());
+            return null;
         }
     }
 

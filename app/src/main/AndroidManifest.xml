@@ -103,6 +103,11 @@
              validation" de l'onglet Configure, plein écran, cases à
              cocher par candidat. -->
         <activity
+            android:name="com.pa.lcrdemo.print.PrinterConfigActivity"
+            android:label="Imprimantes"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity
             android:name="com.pa.lcrdemo.RegisterValidationActivity"
             android:label="Validation registres"
             android:exported="false"

@@ -43,7 +43,10 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      chaque soir) + diagnostic_match_history (persiste chaque résultat de
     //      DiagnosticRuleEngine, jusqu'ici calculé à la volée et jamais stocké — nécessaire
     //      pour calibrer les règles / futur agent IA, demande Paul 31 juillet 2026).
-    public static final int DB_VERSION = 28;
+    // v29 (29 oct 2026, demande Paul) — imprimantes par citerne : table imprimante_citerne (citerne +
+    //      format GRAND/PETIT + pilote + BT MAC, poussée au service d'impression) et colonnes
+    //      citerne_guid / citerne_nom sur la fiche registre (lues dans Dataverse, jamais repoussées).
+    public static final int DB_VERSION = 29;
 
     private static final String TAG = "DeliveryDb";
 
@@ -77,6 +80,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
         createRegisterProductsTable(db);
         createKnownTcpDeviceTable(db);
         createRegistreTable(db);
+        createImprimanteCiterneTable(db);
         createApiTraceTable(db);
         createDiagnosticEventsView(db);
         createDiagnosticRulesTable(db);
@@ -261,6 +265,12 @@ public class DeliveryDb extends SQLiteOpenHelper {
         if (oldVersion < 28) {
             addColumnIfMissing(db, "active_delivery", "stopid",    "TEXT");
             addColumnIfMissing(db, "active_delivery", "productid", "TEXT");
+        }
+        // v29 (29 oct 2026, demande Paul) — imprimantes par citerne (voir DB_VERSION).
+        if (oldVersion < 29) {
+            addColumnIfMissing(db, "registre", "citerne_guid", "TEXT");
+            addColumnIfMissing(db, "registre", "citerne_nom",  "TEXT");
+            createImprimanteCiterneTable(db);
         }
     }
 
@@ -837,12 +847,44 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "numero_de_scelle         TEXT," +
             "identifiant_unite_lc3    TEXT," +
             "firmware                 TEXT," +          // lu uniquement lors de la validation manuelle (Configurer → Démarrer la validation)
+            "citerne_guid             TEXT," +          // v29 : filgo_actifciterne (GUID), lu dans Dataverse
+            "citerne_nom              TEXT," +          // v29 : libellé de la citerne (valeur formatée de la recherche)
             "dataverse_version        TEXT," +          // dernier versionnumber connu, pour éviter d'écraser un changement concurrent
             "sync_status              TEXT    NOT NULL DEFAULT 'PENDING'," +
             "updated_at               INTEGER NOT NULL DEFAULT 0" +
             ");"
         );
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_registre_sync ON registre(sync_status);");
+    }
+
+    // Une ligne par (citerne, format) : une citerne peut avoir une imprimante GRAND et une PETIT.
+    // Le format est déduit du pilote (voir PrinterCatalog). truck_key = identifiant de la citerne en
+    // majuscules (clé, insensible à la casse) ; truck_id garde la saisie d'origine.
+    private static void createImprimanteCiterneTable(SQLiteDatabase db) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS imprimante_citerne (" +
+            "id               INTEGER PRIMARY KEY AUTOINCREMENT," +
+            "truck_key        TEXT    NOT NULL," +
+            "truck_id         TEXT    NOT NULL," +
+            "format           TEXT    NOT NULL," +          // GRAND | PETIT (déduit du pilote)
+            "company          TEXT," +                      // TEG_PROPANE | TEG_PETROLE | AUTRE | vide
+            "driver_type      TEXT    NOT NULL," +          // nom d'enum du service d'impression
+            "bt_mac           TEXT," +                      // cible : MAC Bluetooth, IP ou 127.0.0.1
+            "printer_name     TEXT," +
+            "citerne_source   TEXT    NOT NULL DEFAULT 'MANUEL'," + // DATAVERSE | MANUEL
+            "registre_serial  TEXT," +
+            "registre_nud     INTEGER," +
+            "registre_guid    TEXT," +                      // registrecompteur_id Dataverse
+            "service_sync     TEXT    NOT NULL DEFAULT 'PENDING'," + // PENDING | SENT | ERROR
+            "service_msg      TEXT," +
+            "service_ts_ms    INTEGER NOT NULL DEFAULT 0," +
+            "dataverse_id     TEXT," +                      // réservé : futur push filgo_print_printers
+            "dataverse_version TEXT," +
+            "ts_created_ms    INTEGER NOT NULL," +
+            "ts_updated_ms    INTEGER NOT NULL," +
+            "UNIQUE(truck_key, format)" +
+            ");"
+        );
     }
 
     private static void createRegisterProductsTable(SQLiteDatabase db) {
