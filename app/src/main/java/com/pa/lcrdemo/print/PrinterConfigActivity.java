@@ -49,10 +49,17 @@ public class PrinterConfigActivity extends Activity {
     private RegistreStore registres;
     private LinearLayout listBox;
     private TextView status;
+    // Registre de l'onglet actif (passé par MainActivity) : déjà connu, donc pas de choix à faire.
+    private String fixSerial = null;
+    private int fixNode = -1;
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        fixSerial = getIntent().getStringExtra("serial");
+        if (fixSerial != null && fixSerial.trim().isEmpty()) fixSerial = null;
+        if (fixSerial != null) fixSerial = fixSerial.trim();
+        fixNode = getIntent().getIntExtra("node", -1);
         store = new ImprimanteCiterneStore(this);
         registres = new RegistreStore(this);
 
@@ -161,9 +168,20 @@ public class PrinterConfigActivity extends Activity {
             regLabels.add(r.serialId + (r.nom != null && !r.nom.isEmpty() ? " — " + r.nom : "")
                 + (r.citerneNom != null && !r.citerneNom.isEmpty() ? "  [" + r.citerneNom + "]" : ""));
         }
-        f.addView(label("Registre"));
+        final RegistreStore.Row fixRow = fixSerial != null ? registres.getBySerial(fixSerial) : null;
+        final TextView lblReg = label(fixSerial != null ? "Registre de l'onglet actif" : "Registre");
+        f.addView(lblReg);
         final Spinner spReg = new Spinner(this);
         spReg.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, regLabels));
+        if (fixSerial != null) {
+            spReg.setVisibility(View.GONE);
+            TextView fixe = new TextView(this);
+            fixe.setText(fixSerial + (fixNode >= 0 ? "  (node " + fixNode + ")" : "")
+                + (fixRow != null && fixRow.nom != null && !fixRow.nom.isEmpty() ? " — " + fixRow.nom : ""));
+            fixe.setTextSize(15);
+            fixe.setTypeface(null, android.graphics.Typeface.BOLD);
+            f.addView(fixe);
+        }
         f.addView(spReg);
 
         f.addView(label("Citerne / camion"));
@@ -223,6 +241,7 @@ public class PrinterConfigActivity extends Activity {
         final boolean[] premierAppel = { edit != null }; // en modification, ne pas écraser la citerne enregistrée
         spReg.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> a, View v, int pos, long id) {
+                if (fixSerial != null) return; // registre imposé par l'onglet actif
                 if (premierAppel[0]) {
                     premierAppel[0] = false;
                     if (pos > 0) {
@@ -253,14 +272,18 @@ public class PrinterConfigActivity extends Activity {
             @Override public void onNothingSelected(AdapterView<?> a) {}
         });
 
-        btnLire.setOnClickListener(v -> {
-            int pos = spReg.getSelectedItemPosition();
-            if (pos <= 0) return;
-            final RegistreStore.Row r = regs.get(pos - 1);
+        final Runnable lireCiterne = () -> {
+            final String serialLu;
+            if (fixSerial != null) serialLu = fixSerial;
+            else {
+                int pos = spReg.getSelectedItemPosition();
+                if (pos <= 0) return;
+                serialLu = regs.get(pos - 1).serialId;
+            }
             btnLire.setEnabled(false);
             srcInfo.setText("Lecture dans Dataverse…");
             withToken(token -> {
-                String[] cit = token == null ? null : LcrDeliverySync.lookupCiterne(getApplicationContext(), token, r.serialId);
+                String[] cit = token == null ? null : LcrDeliverySync.lookupCiterne(getApplicationContext(), token, serialLu);
                 ui.post(() -> {
                     btnLire.setEnabled(true);
                     if (cit != null && !cit[1].isEmpty()) {
@@ -274,7 +297,8 @@ public class PrinterConfigActivity extends Activity {
                     }
                 });
             });
-        });
+        };
+        btnLire.setOnClickListener(v -> lireCiterne.run());
 
         btnBonded.setOnClickListener(v -> chooseBonded(etMac, etName));
 
@@ -297,6 +321,16 @@ public class PrinterConfigActivity extends Activity {
         } else {
             etFmt.setText(PrinterCatalog.formatLabel(PrinterCatalog.formatFor(PrinterCatalog.DRIVERS[0].name)));
             srcInfo.setText("Citerne : saisie manuelle.");
+            if (fixSerial != null) {
+                btnLire.setVisibility(View.VISIBLE);
+                if (fixRow != null && fixRow.citerneNom != null && !fixRow.citerneNom.isEmpty()) {
+                    etTruck.setText(fixRow.citerneNom);
+                    source[0] = ImprimanteCiterneStore.SRC_DATAVERSE;
+                    srcInfo.setText("Citerne lue dans Dataverse (registre " + fixSerial + ").");
+                } else {
+                    lireCiterne.run(); // le registre est connu : on va chercher sa citerne tout de suite
+                }
+            }
         }
 
         ScrollView sv = new ScrollView(this);
@@ -328,7 +362,11 @@ public class PrinterConfigActivity extends Activity {
             r.printerName = etName.getText().toString().trim();
             r.citerneSource = source[0];
             int rp = spReg.getSelectedItemPosition();
-            if (rp > 0) {
+            if (fixSerial != null) {
+                r.registreSerial = fixSerial;
+                r.registreNud = fixNode >= 0 ? fixNode : (fixRow != null ? fixRow.nud : null);
+                r.registreGuid = fixRow != null ? fixRow.dataverseId : null;
+            } else if (rp > 0) {
                 RegistreStore.Row rr = regs.get(rp - 1);
                 r.registreSerial = rr.serialId;
                 r.registreNud = rr.nud;

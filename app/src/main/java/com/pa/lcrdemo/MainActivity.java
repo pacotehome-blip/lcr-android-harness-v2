@@ -1645,9 +1645,17 @@ tabRegisters = findViewById(R.id.tabRegisters);
         // 29 oct 2026 (demande Paul) — Configurer → Imprimantes (ajout pilote + BT-MAC + citerne).
         Button btnConfigImprimantes = findViewById(R.id.btnConfigImprimantes);
         if (btnConfigImprimantes != null) {
-            btnConfigImprimantes.setOnClickListener(v ->
-                startActivity(new android.content.Intent(MainActivity.this,
-                    com.pa.lcrdemo.print.PrinterConfigActivity.class)));
+            btnConfigImprimantes.setOnClickListener(v -> {
+                android.content.Intent it = new android.content.Intent(MainActivity.this,
+                    com.pa.lcrdemo.print.PrinterConfigActivity.class);
+                // Le registre est déjà connu par l'onglet actif : on le passe tel quel.
+                TabSpec specActif = currentTabKey != null ? tabsByKey.get(currentTabKey) : null;
+                if (specActif != null && specActif.serialId != null && !specActif.serialId.trim().isEmpty()) {
+                    it.putExtra("serial", specActif.serialId.trim());
+                    it.putExtra("node", specActif.node);
+                }
+                startActivity(it);
+            });
         }
         if (btnAnnulerCandidats != null) {
             btnAnnulerCandidats.setOnClickListener(v -> {
