@@ -4536,6 +4536,7 @@ private void setupTabsTop() {
             try {
                 for (BluetoothDevice d : btBonded) {
                     if (d == null) continue;
+                    if (estImprimanteBt(d)) continue; // jamais sonder une imprimante (30 oct 2026)
                     candidats.add("BT:" + d.getAddress());
                 }
             } catch (Exception ignored) {}
@@ -6415,6 +6416,56 @@ private boolean ensureBtConnectPermission() {
         logMedia1("BT Refresh: appairés=" + btBonded.size());
     }
 
+    /**
+     * Vrai si cet appareil Bluetooth appairé est une IMPRIMANTE (30 oct 2026, demande Paul : le diagnostic / la
+     * validation ne doit provoquer aucune réaction des imprimantes Brother PJ et RJ, on veut seulement savoir si
+     * elles sont actives). La recherche d'un registre perdu saute les imprimantes ; la validation les teste par
+     * simple connexion, sans aucune commande (le balayage des nodes LCP n'est jamais envoyé à une imprimante). Reconnue par : sa MAC dans les imprimantes ajoutées dans Filgo-Registre
+     * (imprimante_citerne), sa classe Bluetooth « Imaging », ou un nom de modèle d'imprimante (PJ-, RJ-, QL-, TD-, TM-).
+     * Au moindre doute d'accès (permission, erreur), l'appareil n'est PAS exclu : le comportement d'avant est conservé.
+     */
+    private boolean estImprimanteBt(BluetoothDevice d) {
+        if (d == null) return false;
+        String raison = null;
+        try {
+            String mac = d.getAddress() == null ? "" : d.getAddress().trim().toUpperCase(java.util.Locale.ROOT);
+            try {
+                for (com.pa.lcr.lcp.storage.ImprimanteCiterneStore.Row r
+                        : new com.pa.lcr.lcp.storage.ImprimanteCiterneStore(this).listAll()) {
+                    if (r.btMac != null && mac.equals(r.btMac.trim().toUpperCase(java.util.Locale.ROOT))) {
+                        raison = "imprimante ajoutée dans Filgo-Registre";
+                        break;
+                    }
+                }
+            } catch (Exception ignored) {}
+            if (raison == null) {
+                try {
+                    android.bluetooth.BluetoothClass bc = d.getBluetoothClass();
+                    if (bc != null && bc.getMajorDeviceClass() == android.bluetooth.BluetoothClass.Device.Major.IMAGING) {
+                        raison = "classe Bluetooth imprimante";
+                    }
+                } catch (SecurityException ignored) {}
+            }
+            if (raison == null) {
+                String nom = null;
+                try { nom = d.getName(); } catch (SecurityException ignored) {}
+                if (nom != null) {
+                    String n = nom.trim().toUpperCase(java.util.Locale.ROOT);
+                    if (n.startsWith("PJ-") || n.startsWith("RJ-") || n.startsWith("QL-")
+                            || n.startsWith("TD-") || n.startsWith("TM-")) {
+                        raison = "nom de modèle d'imprimante (" + nom + ")";
+                    }
+                }
+            }
+            if (raison != null) {
+                try { com.pa.lcr.lcp.log.LogBus.ui(0, "[MEDIA] BT " + mac + " = imprimante (" + raison + ") : aucune commande envoyée"); }
+                catch (Exception ignored) {}
+                return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
     private BluetoothDevice getSelectedBonded() {
         if (spnBtBonded == null) return null;
         int idx = spnBtBonded.getSelectedItemPosition();
@@ -7358,6 +7409,12 @@ private boolean ensureBtConnectPermission() {
                 }
                 if (connectErr[0] != null) throw connectErr[0];
                 android.bluetooth.BluetoothSocket sock = sockHolder[0];
+                // IMPRIMANTE (30 oct 2026, demande Paul) : on veut seulement savoir si elle est ACTIVE. La connexion vient
+                // de réussir : on s'arrête là, AUCUNE commande envoyée (le balayage LCP des 250 nodes ci-dessous ferait
+                // réagir une Brother PJ ou RJ : même problème que celui corrigé pour le deep link au commit 771c6e8).
+                if (estImprimanteBt(dev)) {
+                    return "🖨 Imprimante — active (connexion établie), aucune commande envoyée";
+                }
                 com.pa.lcr.lcp.transport.BtSppTransportIo tmpIo = new com.pa.lcr.lcp.transport.BtSppTransportIo(
                     "BT:" + mac, sock, sock.getInputStream(), sock.getOutputStream(),
                     "Validation candidat BT:" + mac, System.currentTimeMillis());
