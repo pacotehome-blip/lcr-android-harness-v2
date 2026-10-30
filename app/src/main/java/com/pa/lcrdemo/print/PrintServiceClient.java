@@ -39,6 +39,84 @@ public final class PrintServiceClient {
         }
     }
 
+    /**
+     * Envoie un formulaire au service (POST /print-form) : meme structure que filgo_print_forms, PDF en base64.
+     * Un formulaire inactif retire la copie recue du service (le formulaire embarque de meme code redevient utilise).
+     */
+    public static Result pushForm(com.pa.lcr.lcp.storage.FormulaireImpressionStore.Row f) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("code",      f.code);
+            body.put("name",      f.name);
+            body.put("format",    f.format);
+            body.put("version",   f.version);
+            body.put("active",    f.active);
+            body.put("pdfSha256", f.pdfSha256);
+            if (f.manifest != null && !f.manifest.trim().isEmpty()) body.put("manifest", f.manifest);
+            if (f.pdf != null && f.pdf.length > 0) {
+                body.put("pdfBase64", android.util.Base64.encodeToString(f.pdf, android.util.Base64.NO_WRAP));
+            }
+            return formCall("POST", LcrConfig.PRINT_FORM_URL, body.toString(), f.code);
+        } catch (Exception e) {
+            Log.w(TAG, "pushForm ERR: " + e.getMessage());
+            LogBus.api(0, "[PRINT-SYNC] formulaire " + f.code + " ERR " + e.getClass().getSimpleName() + " : " + e.getMessage());
+            return new Result(false, false, "Erreur : " + e.getMessage());
+        }
+    }
+
+    /** Retire la copie recue d'un formulaire dans le service (DELETE /print-form?code=). */
+    public static Result deleteForm(String code) {
+        try {
+            return formCall("DELETE", LcrConfig.PRINT_FORM_URL + "?code="
+                    + java.net.URLEncoder.encode(code, "UTF-8"), null, code);
+        } catch (Exception e) {
+            return new Result(false, false, "Erreur : " + e.getMessage());
+        }
+    }
+
+    private static Result formCall(String method, String url, String json, String code) {
+        try {
+            HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+            try {
+                conn.setRequestMethod(method);
+                conn.setConnectTimeout(4000);
+                conn.setReadTimeout(20000);
+                conn.setRequestProperty("X-App-Token", LcrConfig.PRINT_SERVICE_TOKEN);
+                if (json != null) {
+                    conn.setDoOutput(true);
+                    conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                    byte[] payload = json.getBytes(StandardCharsets.UTF_8);
+                    conn.setFixedLengthStreamingMode(payload.length);
+                    try (OutputStream os = conn.getOutputStream()) { os.write(payload); }
+                }
+                int rc = conn.getResponseCode();
+                InputStream is = rc >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                String resp = is == null ? "" : readAll(is);
+                String err = "", msg = "";
+                try {
+                    JSONObject j = new JSONObject(resp);
+                    err = j.optString("err", "");
+                    msg = j.optString("msg", "");
+                } catch (Exception ignored) {}
+                if (rc == 200) {
+                    LogBus.api(0, "[PRINT-SYNC] formulaire " + code + " " + method + " OK");
+                    return new Result(true, false, "Envoyé au service d'impression");
+                }
+                String m = "HTTP " + rc + (err.isEmpty() ? "" : " " + err) + (msg.isEmpty() ? "" : " — " + msg);
+                LogBus.api(0, "[PRINT-SYNC] formulaire " + code + " " + method + " ERR : " + m);
+                return new Result(false, false, m);
+            } finally {
+                conn.disconnect();
+            }
+        } catch (java.net.ConnectException e) {
+            LogBus.api(0, "[PRINT-SYNC] service injoignable (formulaire " + code + ") : " + e.getMessage());
+            return new Result(false, false, "Service d'impression injoignable (127.0.0.1:9182)");
+        } catch (Exception e) {
+            LogBus.api(0, "[PRINT-SYNC] formulaire " + code + " ERR " + e.getClass().getSimpleName() + " : " + e.getMessage());
+            return new Result(false, false, "Erreur : " + e.getMessage());
+        }
+    }
+
     public static Result push(ImprimanteCiterneStore.Row r, boolean ack) {
         try {
             JSONObject body = new JSONObject();

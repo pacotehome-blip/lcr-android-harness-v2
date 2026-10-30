@@ -37,6 +37,15 @@ public class LcrConfig {
     // jeton en constante dans LcrConfig"). Doit être identique à PrintHttpService.REQUIRED_APP_TOKEN du service.
     public static final String PRINT_SERVICE_URL   = "http://127.0.0.1:9182/truck-printer";
     public static final String PRINT_SERVICE_TOKEN = "filgo-fsm-print-2026";
+    /** Route du service pour la table locale des formulaires (copie de filgo_print_forms). 30 oct 2026. */
+    public static final String PRINT_FORM_URL      = "http://127.0.0.1:9182/print-form";
+    /**
+     * Noms Dataverse (jeu d'entites, partie de l'URL /api/data/v9.2/<nom>) des tables d'impression. A CONFIRMER
+     * a la creation des tables : tant qu'une table n'existe pas (HTTP 404), la synchronisation l'ignore.
+     * Colonnes lues : voir PrintDataverseSync.
+     */
+    public static final String DV_PRINT_FORMS_SET   = "filgo_print_forms";
+    public static final String DV_PRINT_BANNERS_SET = "filgo_print_banners";
 
     public static String getDataverseUrl(Context ctx) {
         return get(ctx, "lcr_dataverse_url_" + env(ctx).toLowerCase(),

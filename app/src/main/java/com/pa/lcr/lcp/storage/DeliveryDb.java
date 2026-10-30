@@ -48,7 +48,11 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      citerne_guid / citerne_nom sur la fiche registre (lues dans Dataverse, jamais repoussées).
     // v30 (29 oct 2026) -- imprimante_citerne : une ligne par (citerne, cible) au lieu de (citerne, format) :
     //      autant d'imprimantes Bluetooth que voulu par citerne, une seule imprimante HTTP (registre).
-    public static final int DB_VERSION = 30;
+    // v31 (30 oct 2026, demande Paul) -- copie locale des formulaires et des bannieres d'impression lues dans
+    //      Dataverse (formulaire_impression avec le PDF en BLOB, banniere_impression avec le logo en BLOB). Dans cette
+    //      BD pour etre dans l'export / la sauvegarde de lcr_delivery.db. Les formulaires sont envoyes au service
+    //      d'impression (/print-form) ; les bannieres seulement gardees pour plus tard.
+    public static final int DB_VERSION = 31;
 
     private static final String TAG = "DeliveryDb";
 
@@ -83,6 +87,8 @@ public class DeliveryDb extends SQLiteOpenHelper {
         createKnownTcpDeviceTable(db);
         createRegistreTable(db);
         createImprimanteCiterneTable(db);
+        createFormulaireImpressionTable(db);
+        createBanniereImpressionTable(db);
         createApiTraceTable(db);
         createDiagnosticEventsView(db);
         createDiagnosticRulesTable(db);
@@ -286,6 +292,11 @@ public class DeliveryDb extends SQLiteOpenHelper {
                 + "citerne_source, registre_serial, registre_nud, registre_guid, service_sync, service_msg, "
                 + "service_ts_ms, dataverse_id, dataverse_version, ts_created_ms, ts_updated_ms FROM imprimante_citerne_v29");
             db.execSQL("DROP TABLE imprimante_citerne_v29");
+        }
+        // v31 : tables des formulaires et des bannieres d'impression (CREATE IF NOT EXISTS : sans risque a rejouer).
+        if (oldVersion < 31) {
+            createFormulaireImpressionTable(db);
+            createBanniereImpressionTable(db);
         }
     }
 
@@ -898,6 +909,56 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "ts_created_ms    INTEGER NOT NULL," +
             "ts_updated_ms    INTEGER NOT NULL," +
             "UNIQUE(truck_key, bt_mac)" +
+            ");"
+        );
+    }
+
+    // Formulaires d'impression : meme structure que filgo_print_forms (Dataverse). code = filgo_code en minuscules.
+    // Le PDF est dans la BD (BLOB) pour etre sauvegarde avec elle ; absent pour le format REGISTRE (texte).
+    private static void createFormulaireImpressionTable(SQLiteDatabase db) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS formulaire_impression (" +
+            "code             TEXT    PRIMARY KEY," +
+            "name             TEXT," +
+            "format           TEXT    NOT NULL," +          // GRAND | PETIT | REGISTRE
+            "version          TEXT," +                      // filgo_version
+            "active           INTEGER NOT NULL DEFAULT 1," +
+            "pdf              BLOB," +
+            "pdf_sha256       TEXT," +
+            "manifest         TEXT," +                      // tableau JSON des champs (filgo_manifest)
+            "dataverse_id     TEXT," +
+            "dataverse_modified TEXT," +                    // modifiedon : changement detecte par egalite, jamais par l'horloge
+            "service_sync     TEXT    NOT NULL DEFAULT 'PENDING'," + // PENDING | SENT | ERROR
+            "service_msg      TEXT," +
+            "service_ts_ms    INTEGER NOT NULL DEFAULT 0," +
+            "ts_updated_ms    INTEGER NOT NULL" +
+            ");"
+        );
+    }
+
+    // Bannieres d'impression : meme structure que filgo_print_banners (Dataverse). Lues et gardees ; pas encore
+    // envoyees au service (il n'a pas encore de route pour elles).
+    private static void createBanniereImpressionTable(SQLiteDatabase db) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS banniere_impression (" +
+            "code             TEXT    PRIMARY KEY," +
+            "name             TEXT," +
+            "logo             BLOB," +
+            "logo_sha256      TEXT," +
+            "address_line1    TEXT," +
+            "city             TEXT," +
+            "province         TEXT," +
+            "postal_code      TEXT," +
+            "phone            TEXT," +
+            "tollfree_phone   TEXT," +
+            "tax_info         TEXT," +
+            "footer_text      TEXT," +
+            "company          TEXT," +
+            "version          TEXT," +
+            "active           INTEGER NOT NULL DEFAULT 1," +
+            "dataverse_id     TEXT," +
+            "dataverse_modified TEXT," +
+            "ts_updated_ms    INTEGER NOT NULL" +
             ");"
         );
     }

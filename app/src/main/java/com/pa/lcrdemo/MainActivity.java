@@ -831,10 +831,14 @@ public class MainActivity extends AppCompatActivity {
                         // Déclencher sync immédiat si items en attente
                         DeliverySyncScheduler.triggerNow(MainActivity.this);
                         // ✅ Sync filgo_delivery_status + filgo_note_template au lancement
-                        new Thread(() ->
+                        new Thread(() -> {
                             com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(
-                                MainActivity.this, token)
-                        ).start();
+                                MainActivity.this, token);
+                            // Formulaires et bannieres d'impression (30 oct 2026) : Dataverse -> tables locales,
+                            // puis tables locales -> service d'impression. Jamais d'exception vers l'appelant.
+                            com.pa.lcrdemo.dataverse.PrintDataverseSync.syncAll(
+                                MainActivity.this, token);
+                        }).start();
                     }
                     @Override
                     public void onError(Exception e) {

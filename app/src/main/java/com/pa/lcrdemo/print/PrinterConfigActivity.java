@@ -89,6 +89,19 @@ public class PrinterConfigActivity extends Activity {
         add.setOnClickListener(v -> showEditor(null));
         root.addView(add);
 
+        // Formulaires d'impression (30 oct 2026) : renvoie au service ceux de la table locale qui ne sont pas
+        // encore confirmes. La lecture de Dataverse, elle, se fait au lancement de l'app (jeton Dataverse).
+        Button formsBtn = new Button(this);
+        formsBtn.setText("📄 Envoyer les formulaires au service");
+        formsBtn.setOnClickListener(v -> {
+            status.setText("Envoi des formulaires au service d'impression…");
+            new Thread(() -> {
+                final String resume = com.pa.lcrdemo.dataverse.PrintDataverseSync.envoyerFormulairesAuService(this);
+                ui.post(() -> status.setText(resume));
+            }, "print-forms-sync").start();
+        });
+        root.addView(formsBtn);
+
         status = new TextView(this);
         status.setTextSize(13);
         status.setPadding(0, dp(8), 0, dp(4));
