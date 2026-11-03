@@ -713,6 +713,86 @@ public class LcpLink {
         return s.trim();
     }
 
+    // ✅ AJOUTÉ (3 nov 2026, demande Paul — "on doit savoir quel type d'imprimante est configuré dans le
+    // registre, ceci aiderait aussi pour le diagnostique") — champs 56 à 59 de la table des champs LCP
+    // (Excel de Paul). LECTURE SEULE : aucune écriture. 56/57 = entiers, 58/59 = flottants IEEE 754 big-endian.
+    public static final int FIELD_PRINTER           = 56;
+    public static final int FIELD_COMPENSATION_TYPE = 57;
+    public static final int FIELD_COMPENSATION_PARAM = 58;
+    public static final int FIELD_BASE_TEMP         = 59;
+
+    /** @return valeur du champ 56 (0..6), ou -1 si la lecture échoue. */
+    public int opGetPrinterType() {
+        try {
+            byte[] raw = opGetField(FIELD_PRINTER, 3000);
+            return bigEndianInt(raw);
+        } catch (Exception e) { return -1; }
+    }
+
+    /** @return champ 57 (type de compensation du produit actif), ou -1 si la lecture échoue. */
+    public int opGetCompensationType() {
+        try { return bigEndianInt(opGetField(FIELD_COMPENSATION_TYPE, 3000)); }
+        catch (Exception e) { return -1; }
+    }
+
+    /** @return champ 58 (paramètre de compensation du produit actif), ou null si la lecture échoue. */
+    public Float opGetCompensationParam() {
+        try { return bigEndianFloat(opGetField(FIELD_COMPENSATION_PARAM, 3000)); }
+        catch (Exception e) { return null; }
+    }
+
+    /** @return champ 59 (température de base du produit actif), ou null si la lecture échoue. */
+    public Float opGetBaseTemp() {
+        try { return bigEndianFloat(opGetField(FIELD_BASE_TEMP, 3000)); }
+        catch (Exception e) { return null; }
+    }
+
+    /** Entier big-endian de 1 à 4 octets ; -1 si vide ou trop long. */
+    public static int bigEndianInt(byte[] raw) {
+        if (raw == null || raw.length == 0 || raw.length > 4) return -1;
+        int v = 0;
+        for (byte b : raw) v = (v << 8) | (b & 0xFF);
+        return v;
+    }
+
+    /** Flottant IEEE 754 big-endian sur 4 octets ; null sinon. */
+    public static Float bigEndianFloat(byte[] raw) {
+        if (raw == null || raw.length != 4) return null;
+        return Float.intBitsToFloat(((raw[0] & 0xFF) << 24) | ((raw[1] & 0xFF) << 16)
+                | ((raw[2] & 0xFF) << 8) | (raw[3] & 0xFF));
+    }
+
+    /** Nom du type d'imprimante (table du champ 56). */
+    public static String printerTypeName(int v) {
+        switch (v) {
+            case 0: return "Epson New Font B (200 Roll)";
+            case 1: return "Epson New Font A (290 Slip)";
+            case 2: return "Epson Old Font A (295 Slip)";
+            case 3: return "Epson Old Font B (300 Roll)";
+            case 4: return "Okidata ML184T";
+            case 5: return "Blaster (Cognitive)";
+            case 6: return "Zebra ZQ520";
+            default: return v < 0 ? "?" : "inconnu (" + v + ")";
+        }
+    }
+
+    /** Nom du type de compensation (table du champ 57). */
+    public static String compensationTypeName(int v) {
+        switch (v) {
+            case 0: return "None";
+            case 1: return "Linear F (at 60°F)";
+            case 2: return "Linear C (at 15°C)";
+            case 3: return "Table 24";
+            case 4: return "Table 54/54E";
+            case 5: return "Table 6B";
+            case 6: return "Table 54B";
+            case 7: return "Table 54C";
+            case 8: return "Table 54D";
+            case 9: return "NH3";
+            default: return v < 0 ? "?" : "inconnu (" + v + ")";
+        }
+    }
+
     // ✅ AJOUTÉ (7 août 2026, demande Paul — "donne-moi l'info des deux pour
     // voir s'il y a une différence") — "Get Product ID" est un message LCP
     // GÉNÉRIQUE (tout appareil LCP le supporte, même avant de savoir si

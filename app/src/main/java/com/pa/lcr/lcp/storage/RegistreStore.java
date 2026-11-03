@@ -46,6 +46,7 @@ public class RegistreStore {
     public static final String COL_NUMERO_SCELLE     = "numero_de_scelle";
     public static final String COL_IDENTIFIANT_LC3   = "identifiant_unite_lc3";
     public static final String COL_FIRMWARE          = "firmware";
+    public static final String COL_TYPE_IMPRIMANTE   = "type_imprimante";
     public static final String COL_CITERNE_GUID      = "citerne_guid";
     public static final String COL_CITERNE_NOM       = "citerne_nom";
     public static final String COL_DATAVERSE_VERSION = "dataverse_version";
@@ -87,6 +88,8 @@ public class RegistreStore {
         public final String numeroScelle;
         public final String identifiantLc3;
         public final String firmware;
+        /** Champ LCP 56 (0..6) lu à la validation ; null si jamais lu. */
+        public final Integer typeImprimante;
         public final String citerneGuid;
         public final String citerneNom;
         public final String dataverseVersion;
@@ -111,6 +114,7 @@ public class RegistreStore {
             numeroScelle     = getStr(c, COL_NUMERO_SCELLE);
             identifiantLc3   = getStr(c, COL_IDENTIFIANT_LC3);
             firmware         = getStr(c, COL_FIRMWARE);
+            typeImprimante   = getIntOrNull(c, COL_TYPE_IMPRIMANTE);
             citerneGuid      = getStr(c, COL_CITERNE_GUID);
             citerneNom       = getStr(c, COL_CITERNE_NOM);
             dataverseVersion = getStr(c, COL_DATAVERSE_VERSION);
@@ -160,6 +164,17 @@ public class RegistreStore {
     public boolean upsertDepuisValidation(String serialId, int nud, String btAddr, String btNom,
                                            String ipAddr, Integer ipPort, Integer transportPrefere,
                                            String firmware) {
+        return upsertDepuisValidation(serialId, nud, btAddr, btNom, ipAddr, ipPort, transportPrefere, firmware, null);
+    }
+
+    /**
+     * @param typeImprimante champ LCP 56 lu à la validation (null ou négatif = lecture échouée, valeur précédente
+     *                       conservée). N'entre PAS dans la détection de changement : aucune colonne Dataverse
+     *                       ne le reçoit encore, donc il ne doit pas remettre la fiche en PENDING.
+     */
+    public boolean upsertDepuisValidation(String serialId, int nud, String btAddr, String btNom,
+                                           String ipAddr, Integer ipPort, Integer transportPrefere,
+                                           String firmware, Integer typeImprimante) {
         if (serialId == null || serialId.trim().isEmpty()) {
             Log.w(TAG, "upsertDepuisValidation: numero_de_serie vide — ignoré");
             return false;
@@ -187,6 +202,7 @@ public class RegistreStore {
         if (firmware != null && !firmware.trim().isEmpty() && !"?".equals(firmware.trim())) {
             cv.put(COL_FIRMWARE, firmware);
         }
+        if (typeImprimante != null && typeImprimante >= 0) cv.put(COL_TYPE_IMPRIMANTE, typeImprimante);
         cv.put(COL_UPDATED, System.currentTimeMillis());
         if (changed) cv.put(COL_SYNC_STATUS, SYNC_PENDING);
 

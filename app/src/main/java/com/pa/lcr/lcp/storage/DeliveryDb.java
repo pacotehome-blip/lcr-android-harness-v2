@@ -52,7 +52,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      Dataverse (formulaire_impression avec le PDF en BLOB, banniere_impression avec le logo en BLOB). Dans cette
     //      BD pour etre dans l'export / la sauvegarde de lcr_delivery.db. Les formulaires sont envoyes au service
     //      d'impression (/print-form) ; les bannieres seulement gardees pour plus tard.
-    public static final int DB_VERSION = 31;
+    public static final int DB_VERSION = 32;
 
     private static final String TAG = "DeliveryDb";
 
@@ -297,6 +297,10 @@ public class DeliveryDb extends SQLiteOpenHelper {
         if (oldVersion < 31) {
             createFormulaireImpressionTable(db);
             createBanniereImpressionTable(db);
+        }
+        // v32 (3 nov 2026, demande Paul) — type d'imprimante configuré dans le registre (champ LCP 56), lu à la validation.
+        if (oldVersion < 32) {
+            addColumnIfMissing(db, "registre", "type_imprimante", "INTEGER");
         }
     }
 
@@ -873,6 +877,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "numero_de_scelle         TEXT," +
             "identifiant_unite_lc3    TEXT," +
             "firmware                 TEXT," +          // lu uniquement lors de la validation manuelle (Configurer → Démarrer la validation)
+            "type_imprimante          INTEGER," +       // v32 : champ LCP 56 (0..6), lu à la validation manuelle
             "citerne_guid             TEXT," +          // v29 : filgo_actifciterne (GUID), lu dans Dataverse
             "citerne_nom              TEXT," +          // v29 : libellé de la citerne (valeur formatée de la recherche)
             "dataverse_version        TEXT," +          // dernier versionnumber connu, pour éviter d'écraser un changement concurrent

@@ -7241,6 +7241,23 @@ private boolean ensureBtConnectPermission() {
      *  ailleurs dans l'app pour l'affichage normal (celui-ci est un
      *  diagnostic brut, pas l'affichage métier). */
     private String infosSupplementaires(com.pa.lcr.lcp.LcpLink tmp, int node, String baudConfirme) {
+        return infosSupplementaires(tmp, node, baudConfirme, null);
+    }
+
+    /** @param typeImprimante champ LCP 56 déjà lu (null = le lire ici). Lecture seule. */
+    private String infosSupplementaires(com.pa.lcr.lcp.LcpLink tmp, int node, String baudConfirme, Integer typeImprimante) {
+        // 3 nov 2026 (demande Paul) : type d'imprimante configuré dans le registre (champ 56) et compensation du
+        // produit actif (champs 57, 58, 59). Lectures seules, best-effort : "?" si le registre ne répond pas.
+        int prn = (typeImprimante != null) ? typeImprimante : tmp.opGetPrinterType();
+        int compType = tmp.opGetCompensationType();
+        Float compParam = tmp.opGetCompensationParam();
+        Float baseTemp = tmp.opGetBaseTemp();
+        String ligneImprimante = "\n  imprimante=" + com.pa.lcr.lcp.LcpLink.printerTypeName(prn)
+            + (prn >= 0 ? " (" + prn + ")" : "");
+        String ligneCompensation = "\n  compensation (produit actif)=" + com.pa.lcr.lcp.LcpLink.compensationTypeName(compType)
+            + (compType >= 0 ? " (" + compType + ")" : "")
+            + ", paramètre=" + (compParam != null ? String.valueOf(compParam) : "?")
+            + ", temp. de base=" + (baseTemp != null ? String.valueOf(baseTemp) : "?");
         String firmware = "?";
         try { firmware = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
         String ticketNo = "?";
@@ -7263,6 +7280,7 @@ private boolean ensureBtConnectPermission() {
         // le débit (confirmé ou supposé) saute maintenant aux yeux, pas
         // noyé dans le reste.
         return "\n  node=" + node + "\n  ticket=" + ticketNo + "\n  firmware=" + firmware
+            + ligneImprimante + ligneCompensation
             + (baudConfirme != null ? "\n  débit=" + baudConfirme : "");
     }
 
@@ -7369,7 +7387,8 @@ private boolean ensureBtConnectPermission() {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, trouve.node, 255, true);
                     String fwUsb = null;
                     try { fwUsb = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
-                    enregistrerRegistreDepuisValidation("USB", trouve.node, trouve.serial, fwUsb);
+                    final int prn_fwUsb = tmp.opGetPrinterType();
+                    enregistrerRegistreDepuisValidation("USB", trouve.node, trouve.serial, fwUsb, prn_fwUsb);
                     // Scan produits AVANT la détection de débit (qui peut changer le baud du port).
                     String ligneProduits = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
                     String detailBauds = "";
@@ -7377,7 +7396,7 @@ private boolean ensureBtConnectPermission() {
                         java.util.List<String> lignesBaud = detecterBaudDetaille(usbPort, trouve.node);
                         detailBauds = "\n  Débits testés :\n" + String.join("\n", lignesBaud);
                     }
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "19200 (confirmé — port app)") + ligneProduits + detailBauds;
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "19200 (confirmé — port app)", prn_fwUsb) + ligneProduits + detailBauds;
                 }
                 // ✅ AJOUTÉ (20 août 2026, demande Paul — "ajouter dans la
                 // validation la détection du baud rate") — au lieu de
@@ -7464,9 +7483,10 @@ private boolean ensureBtConnectPermission() {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, trouve.node, 255, true);
                     String fwBt = null;
                     try { fwBt = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
-                    enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwBt);
+                    final int prn_fwBt = tmp.opGetPrinterType();
+                    enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwBt, prn_fwBt);
                     String ligneProduitsBt = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)") + ligneProduitsBt;
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)", prn_fwBt) + ligneProduitsBt;
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — débit du pont BT à vérifier séparément (voir guide)";
             } catch (Exception e) {
@@ -7492,9 +7512,10 @@ private boolean ensureBtConnectPermission() {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, trouve.node, 255, true);
                     String fwTcp = null;
                     try { fwTcp = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
-                    enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwTcp);
+                    final int prn_fwTcp = tmp.opGetPrinterType();
+                    enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwTcp, prn_fwTcp);
                     String ligneProduitsTcp = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)") + ligneProduitsTcp;
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)", prn_fwTcp) + ligneProduitsTcp;
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — mauvais débit probable";
             } catch (Exception e) {
@@ -7516,6 +7537,11 @@ private boolean ensureBtConnectPermission() {
      */
     private void enregistrerRegistreDepuisValidation(String candidatKey, int node, String serial,
                                                        String firmware) {
+        enregistrerRegistreDepuisValidation(candidatKey, node, serial, firmware, null);
+    }
+
+    private void enregistrerRegistreDepuisValidation(String candidatKey, int node, String serial,
+                                                       String firmware, Integer typeImprimante) {
         try {
             String btAddr = null, btNom = null, ipAddr = null;
             Integer ipPort = null, transportPrefere = null;
@@ -7547,7 +7573,7 @@ private boolean ensureBtConnectPermission() {
             }
             if (serial != null && !serial.trim().isEmpty()) {
                 new com.pa.lcr.lcp.storage.RegistreStore(getApplicationContext())
-                    .upsertDepuisValidation(serial, node, btAddr, btNom, ipAddr, ipPort, transportPrefere, firmware);
+                    .upsertDepuisValidation(serial, node, btAddr, btNom, ipAddr, ipPort, transportPrefere, firmware, typeImprimante);
             }
         } catch (Exception e) {
             android.util.Log.w("MainActivity", "enregistrerRegistreDepuisValidation ERR (non-bloquant): " + e.getMessage());
