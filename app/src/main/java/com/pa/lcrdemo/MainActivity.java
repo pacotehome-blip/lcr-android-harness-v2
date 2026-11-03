@@ -1646,6 +1646,25 @@ tabRegisters = findViewById(R.id.tabRegisters);
             btnValiderCandidats.setOnClickListener(v ->
                 startActivity(new android.content.Intent(MainActivity.this, RegisterValidationActivity.class)));
         }
+        // 3 nov 2026 (demande Paul) — Configurer → Changer le node du registre (champ LCP 102).
+        Button btnChangerNode = findViewById(R.id.btnChangerNode);
+        if (btnChangerNode != null) {
+            btnChangerNode.setOnClickListener(v -> {
+                TabSpec sp = currentTabKey != null ? tabsByKey.get(currentTabKey) : null;
+                if (sp == null || sp.serialId == null || sp.serialId.trim().isEmpty()
+                        || sp.transportKey == null || sp.transportKey.trim().isEmpty()) {
+                    Toast.makeText(MainActivity.this,
+                        "Ouvre d'abord l'onglet du registre (connecté, avec son #série).", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                android.content.Intent it = new android.content.Intent(MainActivity.this, RegisterNodeActivity.class);
+                it.putExtra("serial", sp.serialId.trim());
+                it.putExtra("node", sp.node);
+                it.putExtra("transportKey", sp.transportKey.trim());
+                it.putExtra("isLc3", sp.isLc3);
+                startActivity(it);
+            });
+        }
         // 29 oct 2026 (demande Paul) — Configurer → Imprimantes (ajout pilote + BT-MAC + citerne).
         Button btnConfigImprimantes = findViewById(R.id.btnConfigImprimantes);
         if (btnConfigImprimantes != null) {
@@ -6713,6 +6732,142 @@ private boolean ensureBtConnectPermission() {
         if (sb.length() == 0) return null;
         return "⛔ Validation refusée — une livraison est en cours sur : " + sb
             + ". Décochez ce média pour valider les autres sans y toucher, ou terminez la livraison.";
+    }
+
+    /** Progression d'un changement de node (appelée sur le thread UI). */
+    public interface NodeChangeListener {
+        void onStep(String message);
+        void onDone(boolean ok, String message);
+    }
+
+    /** Champ LCP 102 = node du registre (Excel de Paul), 2 octets big-endian. */
+    static final int FIELD_LCR_NODE = 102;
+
+    /**
+     * 3 nov 2026 (demande Paul) — change le node d'un registre LCR-II (champ 102). Étapes : contrôles (plage, livraison,
+     * conflit sur le même transport, #série et valeur actuelle relus), écriture, VÉRIFICATION par relecture du #série et
+     * du champ à la NOUVELLE adresse, puis fermeture de l'ancienne session, mise à jour de la table registre (la fiche
+     * repasse en attente de synchronisation Dataverse), suppression de l'ancien onglet et reconnexion.
+     * Chaque étape est écrite dans Support (LogBus, préfixe [NODE]).
+     */
+    public void changerNodeRegistre(final String transportKey, final int ancienNode, final String serial,
+                                    final int nouveauNode, final NodeChangeListener l) {
+        new Thread(() -> {
+            final java.util.function.Consumer<String> step = m -> {
+                try { com.pa.lcr.lcp.log.LogBus.api(ancienNode, "[NODE] " + m); } catch (Exception ignored) {}
+                android.util.Log.i("MainActivity", "[NODE] " + m);
+                if (l != null) runOnUiThread(() -> l.onStep(m));
+            };
+            final java.util.function.BiConsumer<Boolean, String> fin = (ok, m) -> {
+                try { com.pa.lcr.lcp.log.LogBus.api(ok ? nouveauNode : ancienNode, "[NODE] " + (ok ? "TERMINÉ — " : "ÉCHEC — ") + m); } catch (Exception ignored) {}
+                if (l != null) runOnUiThread(() -> l.onDone(ok, m));
+            };
+            try {
+                step.accept("Demande : registre #série=" + serial + ", node " + ancienNode + " → " + nouveauNode
+                    + " (transport " + transportKey + ")");
+                if (nouveauNode < 1 || nouveauNode > 250) { fin.accept(false, "node hors plage (1 à 250)"); return; }
+                if (nouveauNode == ancienNode) { fin.accept(false, "le nouveau node est identique à l'actuel"); return; }
+                String refus = verifierAucuneLivraisonActive();
+                if (refus != null) { fin.accept(false, refus); return; }
+                // Conflit : un autre onglet du MÊME transport ayant déjà ce node.
+                synchronized (tabsByKey) {
+                    for (TabSpec t : tabsByKey.values()) {
+                        if (t != null && t.transportKey != null && t.transportKey.equalsIgnoreCase(transportKey)
+                                && t.node == nouveauNode && (t.serialId == null || !t.serialId.trim().equals(serial))) {
+                            fin.accept(false, "le node " + nouveauNode + " est déjà utilisé par un autre registre sur ce transport (#série "
+                                + t.serialId + ")");
+                            return;
+                        }
+                    }
+                }
+                com.pa.lcr.lcp.transport.TransportIo io = (mediaTransportManager != null)
+                    ? mediaTransportManager.getByKey(transportKey) : null;
+                if (io == null || !io.isOpen()) { fin.accept(false, "transport non ouvert (" + transportKey + ")"); return; }
+
+                // Contrôles + écriture, sous le verrou LCP de l'ancien node (même verrou que le contrôleur du registre).
+                java.util.concurrent.locks.ReentrantLock lock = com.pa.lcr.lcp.LcpNodeLocks.tryAcquire(
+                    ancienNode, com.pa.lcr.lcp.LcpNodeLocks.LOCK_TIMEOUT_MS);
+                if (lock == null) { fin.accept(false, "verrou LCP indisponible (registre occupé)"); return; }
+                try {
+                    com.pa.lcr.lcp.LcpLink lk = new com.pa.lcr.lcp.LcpLink(io, ancienNode, 255, true);
+                    byte[] r80 = lk.opGetField(80, 3000);
+                    String lu = new String(r80, java.nio.charset.StandardCharsets.UTF_8).split("\u0000")[0].trim();
+                    if (!lu.equals(serial)) { fin.accept(false, "#série lu (" + lu + ") différent de celui attendu (" + serial + ") — rien n'a été écrit"); return; }
+                    int courant = com.pa.lcr.lcp.LcpLink.bigEndianInt(lk.opGetField(FIELD_LCR_NODE, 3000));
+                    step.accept("Lecture avant écriture : #série=" + lu + ", champ " + FIELD_LCR_NODE + " = " + courant);
+                    if (courant != ancienNode) { fin.accept(false, "le champ " + FIELD_LCR_NODE + " vaut " + courant + ", pas " + ancienNode + " — rien n'a été écrit"); return; }
+                    step.accept("Écriture du champ " + FIELD_LCR_NODE + " = " + nouveauNode);
+                    try {
+                        lk.opSetField(FIELD_LCR_NODE, new byte[]{ (byte) ((nouveauNode >> 8) & 0xFF), (byte) (nouveauNode & 0xFF) });
+                    } catch (java.io.IOException e) {
+                        String m = String.valueOf(e.getMessage());
+                        if (m.contains("rc=0x23")) {
+                            fin.accept(false, "le registre refuse (rc=0x23, champ protégé). Au script, l'écriture passait en RUN : vérifie le niveau de sécurité du registre. Rien n'a été modifié.");
+                        } else {
+                            fin.accept(false, "écriture refusée : " + m);
+                        }
+                        return;
+                    }
+                } finally {
+                    com.pa.lcr.lcp.LcpNodeLocks.release(lock);
+                }
+
+                // Vérification à la NOUVELLE adresse.
+                try { Thread.sleep(700); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                String verifSerial = "?"; int verifNode = -1;
+                try {
+                    com.pa.lcr.lcp.LcpLink lk2 = new com.pa.lcr.lcp.LcpLink(io, nouveauNode, 255, true);
+                    byte[] a = lk2.opGetField(80, 3000);
+                    verifSerial = new String(a, java.nio.charset.StandardCharsets.UTF_8).split("\u0000")[0].trim();
+                    verifNode = com.pa.lcr.lcp.LcpLink.bigEndianInt(lk2.opGetField(FIELD_LCR_NODE, 3000));
+                } catch (Exception e) {
+                    step.accept("Relecture à la nouvelle adresse impossible : " + e.getMessage());
+                }
+                if (!serial.equals(verifSerial) || verifNode != nouveauNode) {
+                    fin.accept(false, "écriture envoyée mais NON confirmée à l'adresse " + nouveauNode + " (#série relu=" + verifSerial
+                        + ", champ relu=" + verifNode + "). Le registre est peut-être encore à " + ancienNode
+                        + " ou à " + nouveauNode + " : vérifie avant toute autre action. Aucune donnée locale n'a été modifiée.");
+                    return;
+                }
+                step.accept("Confirmé à la nouvelle adresse : #série=" + verifSerial + ", champ " + FIELD_LCR_NODE + " = " + verifNode);
+
+                // Après succès : session, base locale, onglet, reconnexion.
+                com.pa.lcr.lcp.RegisterSessionManager.get(this).closeSession(transportKey, ancienNode);
+                try {
+                    new com.pa.lcr.lcp.storage.RegistreStore(getApplicationContext())
+                        .upsertDepuisValidation(serial, nouveauNode, null, null, null, null, null, null);
+                    step.accept("Base locale : nud=" + nouveauNode + " (fiche en attente de synchronisation Dataverse)");
+                } catch (Exception e) {
+                    step.accept("Base locale : mise à jour impossible (" + e.getMessage() + ") — à corriger à la prochaine validation");
+                }
+                java.util.List<String> anciens = new java.util.ArrayList<>();
+                synchronized (tabsByKey) {
+                    for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                        TabSpec t = e.getValue();
+                        if (t != null && t.node == ancienNode && t.serialId != null && t.serialId.trim().equals(serial)) anciens.add(e.getKey());
+                    }
+                }
+                final java.util.concurrent.CountDownLatch uiDone = new java.util.concurrent.CountDownLatch(1);
+                runOnUiThread(() -> {
+                    try { for (String tk : anciens) { removeTabAndFragment(tk, "NODE_CHANGE"); } }
+                    finally { uiDone.countDown(); }
+                });
+                try { uiDone.await(5, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                step.accept("Ancien onglet supprimé (" + anciens.size() + "), reconnexion à la nouvelle adresse…");
+                try {
+                    com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade =
+                        new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(getApplicationContext());
+                    com.pa.lcr.lcp.ApiResult r = facade.api_registerConnectAuto(serial, nouveauNode);
+                    step.accept("Reconnexion : " + (r != null ? r.msg : "null"));
+                } catch (Exception e) {
+                    step.accept("Reconnexion automatique impossible (" + e.getMessage() + ") — relance une validation ou un scan.");
+                }
+                fin.accept(true, "node " + ancienNode + " → " + nouveauNode + ", #série " + serial);
+            } catch (Exception e) {
+                try { com.pa.lcr.lcp.log.LogBus.err(ancienNode, "MainActivity.changerNodeRegistre", e); } catch (Exception ignored) {}
+                fin.accept(false, "erreur : " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+        }).start();
     }
 
     /** Retourne le refus si une livraison est active quelque part, sinon null. Vérification seule, sans effet de bord. */

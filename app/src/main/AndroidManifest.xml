@@ -108,6 +108,11 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
         <activity
+            android:name="com.pa.lcrdemo.RegisterNodeActivity"
+            android:label="Node du registre"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity
             android:name="com.pa.lcrdemo.RegisterValidationActivity"
             android:label="Validation registres"
             android:exported="false"

@@ -516,6 +516,18 @@ public final class RegisterSessionManager {
     // =========================================================
     // ✅ Option B: API principale (TransportIo)
     // =========================================================
+    /**
+     * 3 nov 2026 (demande Paul — changement de node) : ferme proprement la session d'un registre (scheduler et
+     * contrôleur, fermeture "douce" comme closeAllForValidation) et la retire. Le registre ne répond plus à son
+     * ancien node : cette session est devenue inutile.
+     */
+    public synchronized void closeSession(String transportKey, int nodeDec) {
+        NodeSession s = sessions.remove(key(transportKey, nodeDec));
+        if (s == null) return;
+        try { s.scheduler.shutdown(); } catch (Exception ignored) {}
+        try { s.dc.shutdown(false); } catch (Exception ignored) {}
+    }
+
     public synchronized DeliveryController getController(String transportKey, int nodeDec) {
         NodeSession s = sessions.get(key(transportKey, nodeDec));
         return (s != null) ? s.dc : null;

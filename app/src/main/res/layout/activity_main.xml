@@ -281,6 +281,15 @@
                      moment entre deux candidats sans jamais toucher à l'état
                      de connexion réel de l'app (aucune session créée, aucun
                      réglage changé, aucune persistance). -->
+                <!-- 3 nov 2026 (demande Paul) : changement du node du registre (champ LCP 102) — ouvre RegisterNodeActivity. -->
+                <Button
+                    android:id="@+id/btnChangerNode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="10dp"
+                    android:backgroundTint="#6A1B9A"
+                    android:text="🔢 Changer le node du registre"/>
+
                 <!-- 29 oct 2026 (demande Paul) : module d'ajout d'imprimante (pilote + BT-MAC + citerne),
                      poussé au service d'impression — ouvre PrinterConfigActivity. -->
                 <Button
