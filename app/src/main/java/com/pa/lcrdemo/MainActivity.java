@@ -6802,7 +6802,7 @@ private boolean ensureBtConnectPermission() {
                     } catch (java.io.IOException e) {
                         String m = String.valueOf(e.getMessage());
                         if (m.contains("rc=0x23")) {
-                            fin.accept(false, "le registre refuse (rc=0x23, champ protégé). Au script, l'écriture passait en RUN : vérifie le niveau de sécurité du registre. Rien n'a été modifié.");
+                            fin.accept(false, "le registre refuse (rc=0x23, protégé Poids et mesures). Mets le sélecteur en position CALIBRATION, puis réessaie. Rien n'a été modifié.");
                         } else {
                             fin.accept(false, "écriture refusée : " + m);
                         }
