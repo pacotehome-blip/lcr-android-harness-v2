@@ -185,25 +185,26 @@ public class RegisterValidationActivity extends Activity {
             btnDemarrer.setEnabled(false);
             return;
         }
-        String refus = m.verifierAucuneLivraisonActive();
-        if (refus != null) {
-            txtEtat.setText(refus);
-            btnDemarrer.setEnabled(false);
-            return;
-        }
         btnDemarrer.setEnabled(true);
+        // 3 nov 2026 (demande Paul) : un média qui porte une livraison en cours est signalé et décoché ; s'il est
+        // recoché, la validation est refusée. Décoché, on valide les autres sans y toucher.
+        java.util.Set<String> actifs = m.candidatsAvecLivraisonActive();
         List<String[]> found = m.discoverValidationCandidates();
         candidats.addAll(found);
+        int nbLivraison = 0;
         for (String[] c : found) {
+            boolean enLivraison = c[1] != null && actifs.contains(c[1].trim().toUpperCase(java.util.Locale.ROOT));
             CheckBox cb = new CheckBox(this);
-            cb.setText(c[0]);
-            cb.setChecked(true);
+            cb.setText(enLivraison ? c[0] + "  🔒 livraison en cours" : c[0]);
+            cb.setChecked(!enLivraison);
+            if (enLivraison) nbLivraison++;
             cases.add(cb);
             containerCandidats.addView(cb);
         }
-        touteCocheState = true;
-        btnToutCocher.setText("Tout décocher");
-        txtEtat.setText(found.size() + " candidat(s) disponible(s).");
+        touteCocheState = nbLivraison == 0;
+        btnToutCocher.setText(touteCocheState ? "Tout décocher" : "Tout cocher");
+        txtEtat.setText(found.size() + " candidat(s) disponible(s)."
+            + (nbLivraison > 0 ? " " + nbLivraison + " média(s) avec livraison en cours : décoché(s), à ne pas recocher." : ""));
     }
 
     private android.widget.EditText ajouterChampNumerique(LinearLayout root, String libelle, int valeur) {
@@ -249,14 +250,14 @@ public class RegisterValidationActivity extends Activity {
             Toast.makeText(this, "MainActivity non disponible", Toast.LENGTH_SHORT).show();
             return;
         }
-        String refus = m.verifierAucuneLivraisonActive();
-        if (refus != null) {
-            txtEtat.setText(refus);
-            return;
-        }
         List<String[]> selectionnes = new ArrayList<>();
         for (int i = 0; i < cases.size(); i++) {
             if (cases.get(i).isChecked()) selectionnes.add(candidats.get(i));
+        }
+        String refus = m.verifierSelectionSansLivraison(selectionnes);
+        if (refus != null) {
+            txtEtat.setText(refus);
+            return;
         }
         if (selectionnes.isEmpty()) {
             Toast.makeText(this, "Aucun candidat coché", Toast.LENGTH_SHORT).show();

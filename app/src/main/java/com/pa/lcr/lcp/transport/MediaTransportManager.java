@@ -50,10 +50,15 @@ public final class MediaTransportManager {
     // sur TransportHandle, utilisé ailleurs) ferme vraiment (io.close())
     // — jamais utilisé pour TOUS les transports avant une validation.
     // Retourne le nombre de transports réellement fermés.
-    public int closeAllRealTransports() {
+    public int closeAllRealTransports() { return closeAllRealTransports(null); }
+
+    /** @param garder clés (MAJUSCULES) des transports à NE PAS fermer (livraison en cours, 3 nov 2026). */
+    public int closeAllRealTransports(java.util.Set<String> garder) {
         int fermes = 0;
         for (TransportHandle h : handles.values()) {
             if (h == null) continue;
+            if (garder != null && h.getKey() != null
+                    && garder.contains(h.getKey().trim().toUpperCase(java.util.Locale.ROOT))) continue;
             if (h.getIo() != null) fermes++;
             h.setDisconnected("VALIDATION_MANUELLE — fermeture réelle avant test");
         }

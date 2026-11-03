@@ -182,18 +182,55 @@ public final class RegisterSessionManager {
     // automatique déjà en place, une fois isValidationEnCours() retombé
     // à false). Les entrées de session elles-mêmes restent en mémoire
     // (transportKey, serialId) — seul le lien physique est coupé.
-    public void closeAllForValidation() {
-        for (java.util.Map.Entry<String, NodeSession> e : sessions.entrySet()) {
+    /**
+     * 3 nov 2026 (demande Paul) : sessions dont une livraison est en cours -> clés de transport (MAJUSCULES) et #séries.
+     * Même test que isAnyDeliveryActiveAnywhere(), mais par session. Session dont l'état est illisible = protégée
+     * (prudence). Retourne [0] = clés de transport, [1] = #séries.
+     */
+    public java.util.List<java.util.Set<String>> sessionsAvecLivraisonActive() {
+        java.util.Set<String> cles = new java.util.HashSet<>();
+        java.util.Set<String> series = new java.util.HashSet<>();
+        for (NodeSession s : sessions.values()) {
+            if (s == null || s.dc == null || s.dc.isStopped()) continue;
+            boolean active;
+            try {
+                DeliveryState st = s.dc.getState();
+                active = st == DeliveryState.PRESTART || st == DeliveryState.STARTING
+                        || st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED
+                        || st == DeliveryState.ENDING || s.dc.api_isDeliveryActiveNow();
+            } catch (Exception ex) {
+                active = true;
+            }
+            if (!active) continue;
+            if (s.transportKey != null && !s.transportKey.trim().isEmpty())
+                cles.add(s.transportKey.trim().toUpperCase(java.util.Locale.ROOT));
+            if (s.serialId != null && !s.serialId.trim().isEmpty()) series.add(s.serialId.trim());
+        }
+        java.util.List<java.util.Set<String>> out = new java.util.ArrayList<>();
+        out.add(cles);
+        out.add(series);
+        return out;
+    }
+
+    public void closeAllForValidation() { closeAllForValidation(null); }
+
+    /** @param garder clés de transport (MAJUSCULES) dont la session n'est PAS touchée (livraison en cours). */
+    public void closeAllForValidation(java.util.Set<String> garder) {
+        java.util.Iterator<java.util.Map.Entry<String, NodeSession>> it = sessions.entrySet().iterator();
+        while (it.hasNext()) {
+            java.util.Map.Entry<String, NodeSession> e = it.next();
             NodeSession s = e.getValue();
             if (s == null) continue;
+            if (garder != null && s.transportKey != null
+                    && garder.contains(s.transportKey.trim().toUpperCase(java.util.Locale.ROOT))) continue;
             // ✅ Même patron exact que la logique de remplacement de
             // session déjà existante ailleurs dans ce fichier (scheduler
             // ET contrôleur arrêtés, entrée retirée) — pas de nouvelle
             // convention inventée ici.
             try { s.scheduler.shutdown(); } catch (Exception ignored) {}
             try { s.dc.shutdown(false); } catch (Exception ignored) {}
+            it.remove();
         }
-        sessions.clear();
     }
 
     // ✅ v7: clé registre = node#serial (serial = #80)

@@ -6690,6 +6690,31 @@ private boolean ensureBtConnectPermission() {
         void onDone(boolean annule, String messageFinal);
     }
 
+    /**
+     * 3 nov 2026 (demande Paul) : clés des candidats (USB, BT:MAC, TCP:ip:port, en MAJUSCULES) dont le média porte
+     * une livraison en cours. Ces candidats ne peuvent pas être validés ; les autres le peuvent.
+     */
+    public java.util.Set<String> candidatsAvecLivraisonActive() {
+        return com.pa.lcr.lcp.RegisterSessionManager.get(this).sessionsAvecLivraisonActive().get(0);
+    }
+
+    /** Refus si un candidat COCHÉ est le média d'une livraison en cours, sinon null. Les candidats décochés sont ignorés. */
+    public String verifierSelectionSansLivraison(java.util.List<String[]> selection) {
+        java.util.Set<String> actifs = candidatsAvecLivraisonActive();
+        if (actifs.isEmpty() || selection == null) return null;
+        StringBuilder sb = new StringBuilder();
+        for (String[] c : selection) {
+            if (c != null && c.length > 1 && c[1] != null
+                    && actifs.contains(c[1].trim().toUpperCase(java.util.Locale.ROOT))) {
+                if (sb.length() > 0) sb.append(", ");
+                sb.append(c[0]);
+            }
+        }
+        if (sb.length() == 0) return null;
+        return "⛔ Validation refusée — une livraison est en cours sur : " + sb
+            + ". Décochez ce média pour valider les autres sans y toucher, ou terminez la livraison.";
+    }
+
     /** Retourne le refus si une livraison est active quelque part, sinon null. Vérification seule, sans effet de bord. */
     public String verifierAucuneLivraisonActive() {
         if (com.pa.lcr.lcp.RegisterSessionManager.get(this).isAnyDeliveryActiveAnywhere()) {
@@ -6744,16 +6769,25 @@ private boolean ensureBtConnectPermission() {
      * par la sélection au lieu de toujours tout tester.
      */
     public void runValidationOnCandidats(java.util.List<String[]> candidatsSelectionnes, ValidationProgressListener listener) {
-        String refus = verifierAucuneLivraisonActive();
+        String refus = verifierSelectionSansLivraison(candidatsSelectionnes);
         if (refus != null) {
             if (listener != null) listener.onDone(false, refus);
             return;
+        }
+        // 3 nov 2026 : sessions / tabs / transports portant une livraison en cours = intouchés.
+        java.util.List<java.util.Set<String>> protegees =
+            com.pa.lcr.lcp.RegisterSessionManager.get(this).sessionsAvecLivraisonActive();
+        final java.util.Set<String> clesProtegees = protegees.get(0);
+        final java.util.Set<String> seriesProtegees = protegees.get(1);
+        if (!clesProtegees.isEmpty()) {
+            logMedia1("[VALIDATION-CANDIDATS] livraison en cours sur " + clesProtegees + " : ce média n'est pas touché");
+            if (listener != null) runOnUiThread(() -> listener.onPreparationStep("🔒 Livraison en cours sur " + clesProtegees + " — non touché"));
         }
         validationExterneAnnulee = false;
         serialsProduitsValides.clear();
         validationEnCoursDepuisMs = System.currentTimeMillis();
         try {
-            com.pa.lcr.lcp.RegisterSessionManager.get(this).closeAllForValidation();
+            com.pa.lcr.lcp.RegisterSessionManager.get(this).closeAllForValidation(clesProtegees);
             android.util.Log.i("MainActivity", "runValidationOnCandidats: toutes les connexions fermées avant validation");
             if (listener != null) runOnUiThread(() -> listener.onPreparationStep("✅ Couche logique (contrôleurs/schedulers) arrêtée"));
         } catch (Exception e) {
@@ -6764,11 +6798,17 @@ private boolean ensureBtConnectPermission() {
             synchronized (tabsByKey) {
                 tabKeysSnapshot = new java.util.ArrayList<>(tabsByKey.keySet());
             }
+            int gardes = 0;
             for (String tk : tabKeysSnapshot) {
+                TabSpec sp = tabsByKey.get(tk);
+                boolean garder = sp != null
+                    && ((sp.transportKey != null && clesProtegees.contains(sp.transportKey.trim().toUpperCase(java.util.Locale.ROOT)))
+                        || (sp.serialId != null && !sp.serialId.trim().isEmpty() && seriesProtegees.contains(sp.serialId.trim())));
+                if (garder) { gardes++; continue; }
                 removeTabAndFragment(tk, "VALIDATION_MANUELLE");
             }
-            android.util.Log.i("MainActivity", "runValidationOnCandidats: " + tabKeysSnapshot.size() + " tab(s) supprimé(s) avant validation");
-            final int nbTabs = tabKeysSnapshot.size();
+            android.util.Log.i("MainActivity", "runValidationOnCandidats: " + (tabKeysSnapshot.size() - gardes) + " tab(s) supprimé(s), " + gardes + " gardé(s) (livraison en cours)");
+            final int nbTabs = tabKeysSnapshot.size() - gardes;
             if (listener != null) runOnUiThread(() -> listener.onPreparationStep("✅ " + nbTabs + " tab(s) supprimé(s)"));
         } catch (Exception e) {
             android.util.Log.w("MainActivity", "runValidationOnCandidats: suppression des tabs ERR: " + e.getMessage());
@@ -6782,7 +6822,7 @@ private boolean ensureBtConnectPermission() {
         // vraiment chaque transport (io.close() via setDisconnected()),
         // avec un vrai compte confirmé — jamais deviné.
         try {
-            int fermes = com.pa.lcr.lcp.transport.MediaTransportManager.get(this).closeAllRealTransports();
+            int fermes = com.pa.lcr.lcp.transport.MediaTransportManager.get(this).closeAllRealTransports(clesProtegees);
             android.util.Log.i("MainActivity", "runValidationOnCandidats: " + fermes + " transport(s) physique(s) réellement fermé(s)");
             if (listener != null) runOnUiThread(() -> listener.onPreparationStep("✅ " + fermes + " transport(s) physique(s) réellement fermé(s) (port/socket)"));
         } catch (Exception e) {
