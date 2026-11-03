@@ -3988,7 +3988,13 @@ public class RegisterTabFragment extends Fragment {
         // restait figé sur l'ancien WO. Déclenchement explicite ici,
         // hors anti-rebond, précisément quand le WO vient de changer.
         if (woNumVientDeChanger) {
-            ui.post(() -> rafraichirCumulWo());
+            ui.post(() -> {
+                // 3 nov 2026 : on vide d'abord l'ancien total (il appartenait à l'autre WO), puis lecture forcée.
+                if (txtWoCumulNet   != null) txtWoCumulNet.setText("Total NET: 0.0 L");
+                if (txtWoCumulGross != null) txtWoCumulGross.setText("Total GROSS: 0.0 L");
+                if (txtWoCumulCount != null) txtWoCumulCount.setText("Aucune livraison");
+                rafraichirCumulWo(true);
+            });
         }
         if (woIdGuid != null && !woIdGuid.isEmpty()) currentWoIdGuid = woIdGuid;
         // ✅ AJOUTÉ (9 oct 2026, demande Paul) — stopid / productid d'un vrai deep link : relus
@@ -7116,7 +7122,16 @@ public class RegisterTabFragment extends Fragment {
             String produit, String presetStr) {
         // Préfiller
         if (woNum != null && !woNum.isEmpty()) {
+            final boolean woDifferent = !woNum.equals(currentWoNum);
             currentWoNum = woNum;
+            if (woDifferent) { // 3 nov 2026 : l'ancien total appartenait à un autre WO
+                ui.post(() -> {
+                    if (txtWoCumulNet   != null) txtWoCumulNet.setText("Total NET: 0.0 L");
+                    if (txtWoCumulGross != null) txtWoCumulGross.setText("Total GROSS: 0.0 L");
+                    if (txtWoCumulCount != null) txtWoCumulCount.setText("Aucune livraison");
+                    rafraichirCumulWo(true);
+                });
+            }
             woNumFromDirectSource = true;
             lastTicketDetected = "";
         }
@@ -9031,7 +9046,14 @@ public class RegisterTabFragment extends Fragment {
 
 
     // ✅ Afficher le cumul WO à droite du live — lecture depuis LcrDeliveryStatusDb
-    private void rafraichirCumulWo() {
+    private void rafraichirCumulWo() { rafraichirCumulWo(false); }
+
+    /**
+     * @param force true = ignore l'anti-rebond de 2 s et le saut pendant une livraison active. Utilisé quand le WO
+     *              vient de changer (3 nov 2026, demande Paul : le total net doit suivre la livraison actuelle,
+     *              jamais des données passées).
+     */
+    private void rafraichirCumulWo(boolean force) {
         if (currentWoNum == null || currentWoNum.isEmpty()) {
             LogBus.apiUntilChanged(node, "CUMUL-WO.vide", "[CUMUL-WO] appelée mais currentWoNum vide — skip");
             // Ne pas cacher le panel — il doit toujours etre visible
@@ -9049,7 +9071,7 @@ public class RegisterTabFragment extends Fragment {
         // livraison active (RUNNING_FLOWING/RUNNING_PAUSED — le panel de
         // cumul n'a aucune raison de se rafraîchir en boucle pendant que
         // le vrai sondage live devrait avoir la priorité).
-        if (controller != null) {
+        if (controller != null && !force) {
             DeliveryState stCumul = controller.getState();
             // ✅ ÉLARGI (12 août 2026, même principe que les correctifs
             // d'aujourd'hui sur connectThisRegister) — couvre maintenant
@@ -9062,7 +9084,7 @@ public class RegisterTabFragment extends Fragment {
             }
         }
         long nowCumul = System.currentTimeMillis();
-        if (nowCumul - lastCumulWoRefreshMs < 2000) return;
+        if (!force && nowCumul - lastCumulWoRefreshMs < 2000) return;
         lastCumulWoRefreshMs = nowCumul;
         final String wo = currentWoNum;
         LogBus.apiUntilChanged(node, "CUMUL-WO.recherche", "[CUMUL-WO] recherche pour wo=" + wo);
@@ -9094,6 +9116,11 @@ public class RegisterTabFragment extends Fragment {
             ui.post(() -> {
                 if (!isAdded() || getView() == null || panelWoCumul == null) {
                     LogBus.api(node, "[CUMUL-WO] UI non prête (isAdded/getView/panelWoCumul) — mise à jour ignorée");
+                    return;
+                }
+                // Le WO a changé pendant la lecture BD : ce résultat est périmé, ne jamais l'afficher.
+                if (!wo.equals(currentWoNum)) {
+                    LogBus.api(node, "[CUMUL-WO] résultat périmé (wo lu=" + wo + ", wo courant=" + currentWoNum + ") — ignoré");
                     return;
                 }
                 // Toujours afficher panelWoCumul — même si 0 livraisons
