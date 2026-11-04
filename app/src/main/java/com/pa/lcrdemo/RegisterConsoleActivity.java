@@ -9,8 +9,11 @@ import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 import com.pa.lcr.lcp.LcpLink;
@@ -42,10 +45,16 @@ public class RegisterConsoleActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-        serial = getIntent().getStringExtra("serial");
-        transportKey = getIntent().getStringExtra("transportKey");
-        node = getIntent().getIntExtra("node", -1);
-        isLc3 = getIntent().getBooleanExtra("isLc3", false);
+        final String[] serials = getIntent().getStringArrayExtra("serials");
+        final String[] transports = getIntent().getStringArrayExtra("transports");
+        final int[] nodes = getIntent().getIntArrayExtra("nodes");
+        final boolean[] lc3s = getIntent().getBooleanArrayExtra("lc3s");
+        int sel = getIntent().getIntExtra("selected", 0);
+        if (serials == null || transports == null || nodes == null || lc3s == null || serials.length == 0) {
+            finish();
+            return;
+        }
+        if (sel < 0 || sel >= serials.length) sel = 0;
 
         int pad = (int) (12 * getResources().getDisplayMetrics().density);
         LinearLayout root = new LinearLayout(this);
@@ -55,8 +64,17 @@ public class RegisterConsoleActivity extends Activity {
         TextView head = new TextView(this);
         head.setTextSize(14f);
         head.setTypeface(Typeface.DEFAULT_BOLD);
-        head.setText("Console registre (lecture seule) — #série " + serial + ", node " + node + ", " + transportKey);
+        head.setText("Console registre (lecture seule) — choisis le registre :");
         root.addView(head);
+
+        final String[] labels = new String[serials.length];
+        for (int i = 0; i < serials.length; i++) {
+            labels[i] = "#série " + serials[i] + " — node " + nodes[i] + " — " + transports[i] + (lc3s[i] ? " — LC3" : "");
+        }
+        final Spinner spin = new Spinner(this);
+        spin.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, labels));
+        spin.setSelection(sel);
+        root.addView(spin);
 
         sv = new ScrollView(this);
         tvOut = new TextView(this);
@@ -90,12 +108,23 @@ public class RegisterConsoleActivity extends Activity {
         });
         btnRun.setOnClickListener(v -> executer());
 
-        if (isLc3) {
-            btnRun.setEnabled(false);
-            ajouter("Registre LC3 : cette console parle le protocole LCR-II (LCP) et n'est pas disponible pour un LC3.");
-        } else {
-            ajouter("Tape 'aide' pour la liste des commandes. Rien n'est écrit dans le registre.");
-        }
+        spin.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, android.view.View view, int pos, long id) {
+                serial = serials[pos];
+                transportKey = transports[pos];
+                node = nodes[pos];
+                isLc3 = lc3s[pos];
+                ajouter("— Registre sélectionné : " + labels[pos]);
+                if (isLc3) {
+                    btnRun.setEnabled(false);
+                    ajouter("Registre LC3 : cette console parle le protocole LCR-II (LCP) et n'est pas disponible pour un LC3.");
+                } else {
+                    btnRun.setEnabled(true);
+                    ajouter("Tape 'aide' pour la liste des commandes. Rien n'est écrit dans le registre.");
+                }
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
     }
 
     private void ajouter(String s) {

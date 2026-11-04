@@ -1669,18 +1669,39 @@ tabRegisters = findViewById(R.id.tabRegisters);
         Button btnConsoleRegistre = findViewById(R.id.btnConsoleRegistre);
         if (btnConsoleRegistre != null) {
             btnConsoleRegistre.setOnClickListener(v -> {
-                TabSpec sp = currentTabKey != null ? tabsByKey.get(currentTabKey) : null;
-                if (sp == null || sp.serialId == null || sp.serialId.trim().isEmpty()
-                        || sp.transportKey == null || sp.transportKey.trim().isEmpty()) {
+                // 4 nov 2026 (demande Paul) : la console propose TOUS les registres des onglets ouverts (2 ou 3), pas
+                // seulement l'onglet actif ; l'onglet actif est présélectionné.
+                java.util.ArrayList<String> serials = new java.util.ArrayList<>();
+                java.util.ArrayList<String> transports = new java.util.ArrayList<>();
+                java.util.ArrayList<Integer> nodes = new java.util.ArrayList<>();
+                java.util.ArrayList<Boolean> lc3s = new java.util.ArrayList<>();
+                int selected = 0;
+                synchronized (tabsByKey) {
+                    for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                        TabSpec sp = e.getValue();
+                        if (sp == null || sp.serialId == null || sp.serialId.trim().isEmpty()
+                                || sp.transportKey == null || sp.transportKey.trim().isEmpty()) continue;
+                        if (e.getKey() != null && e.getKey().equals(currentTabKey)) selected = serials.size();
+                        serials.add(sp.serialId.trim());
+                        transports.add(sp.transportKey.trim());
+                        nodes.add(sp.node);
+                        lc3s.add(sp.isLc3);
+                    }
+                }
+                if (serials.isEmpty()) {
                     Toast.makeText(MainActivity.this,
-                        "Ouvre d'abord l'onglet du registre (connecté, avec son #série).", Toast.LENGTH_LONG).show();
+                        "Aucun registre connecté (avec son #série) dans les onglets.", Toast.LENGTH_LONG).show();
                     return;
                 }
+                int[] nodeArr = new int[nodes.size()];
+                boolean[] lc3Arr = new boolean[lc3s.size()];
+                for (int i = 0; i < nodeArr.length; i++) { nodeArr[i] = nodes.get(i); lc3Arr[i] = lc3s.get(i); }
                 android.content.Intent it = new android.content.Intent(MainActivity.this, RegisterConsoleActivity.class);
-                it.putExtra("serial", sp.serialId.trim());
-                it.putExtra("node", sp.node);
-                it.putExtra("transportKey", sp.transportKey.trim());
-                it.putExtra("isLc3", sp.isLc3);
+                it.putExtra("serials", serials.toArray(new String[0]));
+                it.putExtra("transports", transports.toArray(new String[0]));
+                it.putExtra("nodes", nodeArr);
+                it.putExtra("lc3s", lc3Arr);
+                it.putExtra("selected", selected);
                 startActivity(it);
             });
         }
