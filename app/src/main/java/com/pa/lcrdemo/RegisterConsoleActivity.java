@@ -47,7 +47,10 @@ public class RegisterConsoleActivity extends Activity {
     private String serial;
     private boolean isLc3;
     // 4 nov 2026 (demande Paul) : table ressource des champs (res/raw/lcp_champs.csv) : champ -> {nom, type, source, description}.
+    // 4 nov 2026 : issu de l'Excel LCR_Registers_Fields.xlsx. Une ligne = {nom, description, niveau, typeInterne, typeSdk, valeurs, utilisePar}.
     private final Map<Integer, String[]> champs = new HashMap<>();
+    // type de donnée (A, AZ, LL, UB, ...) -> {nom, description}
+    private final Map<String, String[]> types = new HashMap<>();
 
     @Override
     protected void onCreate(Bundle b) {
@@ -231,27 +234,78 @@ public class RegisterConsoleActivity extends Activity {
 
     // ───────────── table ressource des champs ─────────────
     private void chargerChamps() {
-        try (InputStream in = getResources().openRawResource(R.raw.lcp_champs);
-             BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
-            String ln;
-            boolean premiere = true;
-            while ((ln = br.readLine()) != null) {
-                if (premiere) { premiere = false; continue; } // en-tête
-                if (ln.trim().isEmpty()) continue;
-                String[] p = ln.split(";", 5);
-                if (p.length < 5) continue;
-                try { champs.put(Integer.parseInt(p[0].trim()), new String[]{p[1], p[2], p[3], p[4]}); }
+        try {
+            for (String[] r : lireCsv(R.raw.lcp_champs)) {
+                if (r.length < 8) continue;
+                try { champs.put(Integer.parseInt(r[0].trim()), new String[]{r[1], r[2], r[3], r[4], r[5], r[6], r[7]}); }
                 catch (NumberFormatException ignored) {}
+            }
+            for (String[] r : lireCsv(R.raw.lcp_types)) {
+                if (r.length >= 3) types.put(r[0].trim(), new String[]{r[1], r[2]});
             }
         } catch (Exception e) {
             ajouter("Table des champs illisible : " + e.getMessage());
         }
     }
 
+    /** Lit un CSV entre guillemets (RFC 4180 : guillemets doublés, retours de ligne permis dans un champ). Saute l'en-tête. */
+    private java.util.List<String[]> lireCsv(int resId) throws java.io.IOException {
+        java.util.List<String[]> out = new java.util.ArrayList<>();
+        try (InputStream in = getResources().openRawResource(resId);
+             BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+            StringBuilder cur = new StringBuilder();
+            java.util.List<String> ligne = new java.util.ArrayList<>();
+            boolean guill = false;
+            int ch;
+            while ((ch = br.read()) != -1) {
+                char c = (char) ch;
+                if (guill) {
+                    if (c == '"') {
+                        br.mark(1);
+                        int nx = br.read();
+                        if (nx == '"') cur.append('"');
+                        else { guill = false; if (nx != -1) br.reset(); }
+                    } else cur.append(c);
+                } else if (c == '"') guill = true;
+                else if (c == ',') { ligne.add(cur.toString()); cur.setLength(0); }
+                else if (c == '\n') {
+                    ligne.add(cur.toString()); cur.setLength(0);
+                    out.add(ligne.toArray(new String[0])); ligne = new java.util.ArrayList<>();
+                } else if (c != '\r') cur.append(c);
+            }
+            if (cur.length() > 0 || !ligne.isEmpty()) { ligne.add(cur.toString()); out.add(ligne.toArray(new String[0])); }
+        }
+        if (!out.isEmpty()) out.remove(0); // en-tête
+        return out;
+    }
+
     private String descriptionChamp(int champ) {
         String[] d = champs.get(champ);
-        if (d == null) return "Champ " + champ + " : pas encore décrit dans la table (res/raw/lcp_champs.csv).";
-        return "Champ " + champ + " — " + d[0] + " (" + d[1] + ") — " + d[3] + "  [source : " + d[2] + "]";
+        if (d == null) return "Champ " + champ + " : absent de la table de l'Excel (res/raw/lcp_champs.csv).";
+        StringBuilder sb = new StringBuilder();
+        sb.append("Champ ").append(champ).append(" — ").append(d[0]).append('\n');
+        sb.append("  Niveau de sécurité : ").append(d[2]).append('\n');
+        String t = d[4].isEmpty() ? d[3] : d[4];
+        String[] tn = types.get(t);
+        sb.append("  Type : ").append(t);
+        if (tn != null) sb.append(" — ").append(tn[0]).append(" (").append(tn[1]).append(')');
+        if (!d[3].isEmpty() && !d[3].equals(d[4])) sb.append(" [type interne ").append(d[3]).append(']');
+        sb.append('\n');
+        sb.append("  Utilisé par : ").append(d[6]).append('\n');
+        sb.append("  Description : ").append(d[1]).append('\n');
+        if (!d[5].isEmpty()) sb.append("  Valeurs : ").append(d[5].replace("\n", "\n    ")).append('\n');
+        return sb.toString();
+    }
+
+    /** Taille en octets attendue pour un type de largeur fixe ; -1 si variable ou inconnue. */
+    private static int tailleType(String t) {
+        switch (t) {
+            case "LL": case "UB": case "SB": case "B": return 1;
+            case "SS": case "US": return 2;
+            case "F": case "LF": case "LM": case "LV": case "SL": case "UL": return 4;
+            case "D": return 8;
+            default: return -1;
+        }
     }
 
     // ───────────── interprétation humaine des trames ─────────────
@@ -357,23 +411,65 @@ public class RegisterConsoleActivity extends Activity {
         return sb.toString().trim();
     }
 
-    private static String decrire(int champ, byte[] v) {
+    private String decrire(int champ, byte[] v) {
         StringBuilder sb = new StringBuilder();
-        sb.append("Champ ").append(champ).append(" : données ").append(hex(v)).append('\n');
+        sb.append("Données reçues : ").append(hex(v)).append('\n');
         if (v == null || v.length == 0) return sb.toString();
-        if (v.length <= 4) sb.append("  entier (big-endian) : ").append(LcpLink.bigEndianInt(v)).append('\n');
-        if (v.length == 4) {
-            Float f = LcpLink.bigEndianFloat(v);
-            if (f != null) sb.append("  flottant : ").append(f).append('\n');
+        String[] d = champs.get(champ);
+        String t = d == null ? "" : (d[4].isEmpty() ? d[3] : d[4]);
+        int attendu = tailleType(t);
+        if (attendu > 0 && v.length != attendu) {
+            sb.append("  ⚠ taille reçue : ").append(v.length).append(" octet(s), le type ").append(t)
+              .append(" en attend ").append(attendu).append(" d'après l'Excel\n");
+        }
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(v).order(java.nio.ByteOrder.BIG_ENDIAN);
+        Long entier = null;
+        switch (t) {
+            case "SB": if (v.length >= 1) entier = (long) v[0]; break;
+            case "SS": if (v.length >= 2) entier = (long) bb.getShort(); break;
+            case "SL": case "LV": case "LF": case "LM": if (v.length >= 4) entier = (long) bb.getInt(); break;
+            case "UL": if (v.length >= 4) entier = bb.getInt() & 0xFFFFFFFFL; break;
+            case "US": if (v.length >= 2) entier = (long) (bb.getShort() & 0xFFFF); break;
+            case "LL": case "UB": default:
+                if (v.length <= 4) { long x = 0; for (byte b : v) x = (x << 8) | (b & 0xFF); entier = x; }
+        }
+        if (t.equals("F") && v.length >= 4) {
+            sb.append("  valeur (flottant) : ").append(bb.getFloat()).append('\n');
+        } else if (t.equals("D") && v.length >= 8) {
+            sb.append("  valeur (double) : ").append(bb.getDouble()).append('\n');
+        } else if (entier != null && !t.equals("AZ") && !t.equals("A")) {
+            sb.append("  valeur : ").append(entier);
+            if (t.equals("LV") || t.equals("LF") || t.equals("LM"))
+                sb.append("  (entier avec décimales implicites : voir le champ 39 « Decimals »)");
+            sb.append('\n');
+            String lib = libelle(d, entier);
+            if (lib != null) sb.append("  signification : ").append(entier).append(" = ").append(lib).append('\n');
         }
         boolean texte = true;
         int fin = v.length;
         while (fin > 0 && v[fin - 1] == 0) fin--;
         for (int i = 0; i < fin; i++) { int c = v[i] & 0xFF; if (c < 0x20 || c > 0x7E) { texte = false; break; } }
-        if (texte && fin > 0) sb.append("  texte : ").append(new String(v, 0, fin, StandardCharsets.ISO_8859_1)).append('\n');
-        if (champ == 56 && v.length <= 4) sb.append("  type d'imprimante : ").append(LcpLink.printerTypeName(LcpLink.bigEndianInt(v))).append('\n');
-        if (champ == 57 && v.length <= 4) sb.append("  compensation : ").append(LcpLink.compensationTypeName(LcpLink.bigEndianInt(v))).append('\n');
+        if ((t.equals("AZ") || t.equals("A") || d == null) && texte && fin > 0)
+            sb.append("  texte : ").append(new String(v, 0, fin, StandardCharsets.ISO_8859_1)).append('\n');
         return sb.toString();
+    }
+
+    /** Cherche « N = "libellé" » dans la colonne Valeurs de l'Excel. */
+    private static String libelle(String[] d, long n) {
+        if (d == null || d[5] == null) return null;
+        for (String ln : d[5].split("\n")) {
+            ln = ln.trim();
+            int eq = ln.indexOf('=');
+            if (eq < 0) continue;
+            try {
+                if (Long.parseLong(ln.substring(0, eq).trim()) == n) {
+                    String r = ln.substring(eq + 1).trim();
+                    if (r.length() >= 2 && r.startsWith("\"") && r.endsWith("\"")) r = r.substring(1, r.length() - 1);
+                    return r;
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+        return null;
     }
 
     private void aide() {
@@ -383,8 +479,7 @@ public class RegisterConsoleActivity extends Activity {
             + "  status        état machine (GET_MACHINE_STATUS)\n"
             + "  livraison     état de livraison (GET_DELIVERY_STATUS)\n"
             + "  effacer       vide l'écran\n"
-            + "Champs déjà utilisés par l'app ou donnés dans ton Excel : 22 (vente), 23 (ticket), 37 (TicketRequired), "
-            + "39 (décimales), 44 (gross), 45 (net), 56 (imprimante), 57-59 (compensation), 60 (logiciel), 80 (#série), 102 (node).\n"
-            + "Les autres champs de ton Excel se lisent aussi avec get <champ>. Aucune écriture.");
+            + "Les 352 champs de l'Excel LCR_Registers_Fields sont décrits : get <champ> affiche le nom, le niveau de sécurité, "
+            + "le type, la description et les valeurs possibles, puis la valeur lue. Aucune écriture.");
     }
 }
