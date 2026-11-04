@@ -1665,6 +1665,34 @@ tabRegisters = findViewById(R.id.tabRegisters);
                 startActivity(it);
             });
         }
+        // 4 nov 2026 (demande Paul) — Configurer : console registre (lecture seule) + connexion directe repliée par défaut.
+        Button btnConsoleRegistre = findViewById(R.id.btnConsoleRegistre);
+        if (btnConsoleRegistre != null) {
+            btnConsoleRegistre.setOnClickListener(v -> {
+                TabSpec sp = currentTabKey != null ? tabsByKey.get(currentTabKey) : null;
+                if (sp == null || sp.serialId == null || sp.serialId.trim().isEmpty()
+                        || sp.transportKey == null || sp.transportKey.trim().isEmpty()) {
+                    Toast.makeText(MainActivity.this,
+                        "Ouvre d'abord l'onglet du registre (connecté, avec son #série).", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                android.content.Intent it = new android.content.Intent(MainActivity.this, RegisterConsoleActivity.class);
+                it.putExtra("serial", sp.serialId.trim());
+                it.putExtra("node", sp.node);
+                it.putExtra("transportKey", sp.transportKey.trim());
+                it.putExtra("isLc3", sp.isLc3);
+                startActivity(it);
+            });
+        }
+        final Button btnToggleConnexion = findViewById(R.id.btnToggleConnexionDirecte);
+        final android.view.View containerConnexion = findViewById(R.id.containerConnexionDirecte);
+        if (btnToggleConnexion != null && containerConnexion != null) {
+            btnToggleConnexion.setOnClickListener(v -> {
+                boolean ouvrir = containerConnexion.getVisibility() != android.view.View.VISIBLE;
+                containerConnexion.setVisibility(ouvrir ? android.view.View.VISIBLE : android.view.View.GONE);
+                btnToggleConnexion.setText((ouvrir ? "▾" : "▸") + " Connexion directe (USB / Bluetooth / TCP)");
+            });
+        }
         // 29 oct 2026 (demande Paul) — Configurer → Imprimantes (ajout pilote + BT-MAC + citerne).
         Button btnConfigImprimantes = findViewById(R.id.btnConfigImprimantes);
         if (btnConfigImprimantes != null) {
@@ -6802,7 +6830,7 @@ private boolean ensureBtConnectPermission() {
                     } catch (java.io.IOException e) {
                         String m = String.valueOf(e.getMessage());
                         if (m.contains("rc=0x23")) {
-                            fin.accept(false, "le registre refuse (rc=0x23, protégé Poids et mesures). Mets le sélecteur en position CALIBRATION, puis réessaie. Rien n'a été modifié.");
+                            fin.accept(false, "le registre refuse (rc=0x23, champ protégé). Au script, l'écriture passait en RUN : vérifie le niveau de sécurité du registre. Rien n'a été modifié.");
                         } else {
                             fin.accept(false, "écriture refusée : " + m);
                         }

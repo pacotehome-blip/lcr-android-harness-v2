@@ -78,6 +78,7 @@ public class LcpLink {
     private static final byte MSG_GET_MACHINE_STATUS = 0x23;
     private static final byte MSG_ISSUE_COMMAND = 0x24;
     private static final byte MSG_GET_DELIVERY_STATUS = 0x28;
+    private static final byte MSG_GET_SECURITY = 0x27; // 4 nov 2026 (console registre, lecture seule)
     // ✅ AJOUTÉ (7 août 2026, demande Paul — "donne-moi l'info des deux pour
     // voir s'il y a une différence") — message générique LCP "Get Product
     // ID" (msgID=0x00, tout appareil LCP le supporte). Réponse : productID
@@ -677,6 +678,18 @@ public class LcpLink {
         System.arraycopy(ascii, 0, result, 0, ascii.length);
         result[ascii.length] = 0x00;
         return result;
+    }
+
+    /**
+     * 4 nov 2026 (demande Paul — console registre, lecture seule) : GET_SECURITY (0x27), même message que
+     * "--show-security" du script lcr_set_field.py. Retourne payload[2..] (niveau de sécurité).
+     */
+    public byte[] opGetSecurity() throws IOException {
+        Response r = sendRecv(buildPayload(MSG_GET_SECURITY, null), 3000);
+        ensureOk(r, "GET_SECURITY");
+        byte[] out = new byte[Math.max(0, r.payload.length - 2)];
+        System.arraycopy(r.payload, 2, out, 0, out.length);
+        return out;
     }
 
     public byte[] opGetField(int field) throws IOException {

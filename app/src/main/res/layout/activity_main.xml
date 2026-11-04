@@ -385,6 +385,24 @@
                     </ScrollView>
                 </LinearLayout>
 
+                <!-- 4 nov 2026 (demande Paul) : bouton ouvrant la console registre (lecture seule). -->
+                <Button
+                    android:id="@+id/btnConsoleRegistre"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="10dp"
+                    android:backgroundTint="#37474F"
+                    android:text="🖥 Console registre"/>
+
+                <!-- 4 nov 2026 (demande Paul) : connexion directe (USB / Bluetooth / TCP) repliée par défaut. -->
+                <Button
+                    android:id="@+id/btnToggleConnexionDirecte"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="6dp"
+                    android:backgroundTint="#455A64"
+                    android:text="▸ Connexion directe (USB / Bluetooth / TCP)"/>
+
                 <!-- ✅ RETIRÉ (20 août 2026, demande Paul — "ici j'avais
                      demandé de le retirer, car on va l'avoir par registre
                      détecté dans démarrer la validation sur chacun des
@@ -434,6 +452,12 @@
                     </LinearLayout>
                 </LinearLayout>
 
+                <LinearLayout
+                    android:id="@+id/containerConnexionDirecte"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
                 <!-- USB -->
                 <TextView
                     android:layout_width="match_parent"
@@ -1023,6 +1047,8 @@
                         android:textColor="#FFFFFF"
                         android:textSize="12sp"
                         android:text="Statut : —"/>
+
+                </LinearLayout>
 
                 </LinearLayout>
 

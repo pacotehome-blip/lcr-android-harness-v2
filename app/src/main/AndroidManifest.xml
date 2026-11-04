@@ -108,6 +108,12 @@
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden" />
         <activity
+            android:name="com.pa.lcrdemo.RegisterConsoleActivity"
+            android:label="Console registre"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+        <activity
             android:name="com.pa.lcrdemo.RegisterNodeActivity"
             android:label="Node du registre"
             android:exported="false"
