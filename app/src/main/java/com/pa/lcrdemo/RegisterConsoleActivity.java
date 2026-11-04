@@ -21,7 +21,12 @@ import com.pa.lcr.lcp.LcpNodeLocks;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.transport.TransportIo;
 
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Locale;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -41,6 +46,8 @@ public class RegisterConsoleActivity extends Activity {
     private int node;
     private String serial;
     private boolean isLc3;
+    // 4 nov 2026 (demande Paul) : table ressource des champs (res/raw/lcp_champs.csv) : champ -> {nom, type, source, description}.
+    private final Map<Integer, String[]> champs = new HashMap<>();
 
     @Override
     protected void onCreate(Bundle b) {
@@ -97,6 +104,7 @@ public class RegisterConsoleActivity extends Activity {
         row.addView(btnRun);
         root.addView(row);
         setContentView(root);
+        chargerChamps();
 
         etCmd.setOnEditorActionListener((v, actionId, ev) -> {
             if (actionId == EditorInfo.IME_ACTION_DONE
@@ -176,12 +184,17 @@ public class RegisterConsoleActivity extends Activity {
                 if (lock == null) { out.append("Verrou LCP indisponible (registre occupé).\n"); return; }
                 LcpLink lk = new LcpLink(io, node, 255, true);
                 lk.setTraceSink(line -> {
-                    if (line.startsWith("TX:") || line.startsWith("RX:")) out.append(line).append('\n');
+                    if (line.startsWith("TX:") || line.startsWith("RX:")) {
+                        out.append(line).append('\n');
+                        String it = interpreterTrame(line);
+                        if (it != null) out.append("   ").append(it).append('\n');
+                    }
                 });
                 try { LogBus.api(node, "[CONSOLE] " + ligne + " (#série=" + serial + ")"); } catch (Exception ignored) {}
                 switch (commande) {
                     case "get": {
                         byte[] v = lk.opGetField(champ, 3000);
+                        out.append(descriptionChamp(champ)).append('\n');
                         out.append(decrire(champ, v));
                         break;
                     }
@@ -213,6 +226,128 @@ public class RegisterConsoleActivity extends Activity {
                 });
             }
         }).start();
+    }
+
+
+    // ───────────── table ressource des champs ─────────────
+    private void chargerChamps() {
+        try (InputStream in = getResources().openRawResource(R.raw.lcp_champs);
+             BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+            String ln;
+            boolean premiere = true;
+            while ((ln = br.readLine()) != null) {
+                if (premiere) { premiere = false; continue; } // en-tête
+                if (ln.trim().isEmpty()) continue;
+                String[] p = ln.split(";", 5);
+                if (p.length < 5) continue;
+                try { champs.put(Integer.parseInt(p[0].trim()), new String[]{p[1], p[2], p[3], p[4]}); }
+                catch (NumberFormatException ignored) {}
+            }
+        } catch (Exception e) {
+            ajouter("Table des champs illisible : " + e.getMessage());
+        }
+    }
+
+    private String descriptionChamp(int champ) {
+        String[] d = champs.get(champ);
+        if (d == null) return "Champ " + champ + " : pas encore décrit dans la table (res/raw/lcp_champs.csv).";
+        return "Champ " + champ + " — " + d[0] + " (" + d[1] + ") — " + d[3] + "  [source : " + d[2] + "]";
+    }
+
+    // ───────────── interprétation humaine des trames ─────────────
+    private static String nomMessage(int m) {
+        switch (m) {
+            case 0x20: return "GET_FIELD (lire un champ)";
+            case 0x21: return "SET_FIELD (écrire un champ)";
+            case 0x22: return "PRINT_TEXT (imprimer une ligne)";
+            case 0x23: return "GET_MACHINE_STATUS (état machine)";
+            case 0x24: return "ISSUE_COMMAND (commande)";
+            case 0x27: return "GET_SECURITY (niveau de sécurité)";
+            case 0x28: return "GET_DELIVERY_STATUS (état de livraison)";
+            case 0x7C: return "SET_BAUD (vitesse)";
+            case 0x7D: return "CHECK (reprise d'une requête en file)";
+            default: return "message inconnu";
+        }
+    }
+
+    private static String nomRc(int rc) {
+        switch (rc) {
+            case 0x00: return "OK";
+            case 0x23: return "refusé (champ protégé : sélecteur/niveau de sécurité)";
+            case 0x26: return "requête mise en file d'attente";
+            case 0x27: return "aucune requête en cours";
+            case 0x28: return "requête abandonnée";
+            case 0x78: return "état non permis";
+            default: return "code non décrit dans l'app";
+        }
+    }
+
+    private static int crc16(byte[] d, int len) {
+        int crc = 0x7E7E;
+        for (int k = 0; k < len; k++) {
+            int b = d[k] & 0xFF;
+            for (int i = 7; i >= 0; i--) {
+                boolean x = (crc & 0x8000) != 0;
+                crc = ((crc << 1) & 0xFFFF) | ((b >> i) & 1);
+                if (x) crc ^= 0x1021;
+            }
+        }
+        return crc;
+    }
+
+    /** Traduit une ligne "TX: 7E 7E ..." / "RX: ..." en phrase lisible ; null si la ligne n'est pas une trame. */
+    private String interpreterTrame(String line) {
+        boolean tx = line.startsWith("TX:");
+        String[] tok = line.substring(3).trim().split("\\s+");
+        byte[] raw = new byte[tok.length];
+        try { for (int i = 0; i < tok.length; i++) raw[i] = (byte) Integer.parseInt(tok[i], 16); }
+        catch (NumberFormatException e) { return null; }
+        if (raw.length < 8 || raw[0] != 0x7E || raw[1] != 0x7E) return null;
+        // retire les échappements (0x1B) après la synchro
+        byte[] u = new byte[raw.length];
+        int n = 0;
+        for (int i = 2; i < raw.length; i++) {
+            int b = raw[i] & 0xFF;
+            if (b == 0x1B && i + 1 < raw.length) { i++; b = raw[i] & 0xFF; }
+            u[n++] = (byte) b;
+        }
+        if (n < 6) return "trame trop courte";
+        int to = u[0] & 0xFF, from = u[1] & 0xFF, st = u[2] & 0xFF, len = u[3] & 0xFF;
+        if (n < 4 + len + 2) return "trame incomplète (longueur annoncée " + len + ")";
+        int crcLu = (u[4 + len] & 0xFF) | ((u[5 + len] & 0xFF) << 8);
+        String crc = (crc16(u, 4 + len) == crcLu) ? "CRC ok" : String.format(Locale.ROOT, "CRC 0x%04X (différent du calcul, non vérifié)", crcLu);
+        StringBuilder sb = new StringBuilder();
+        sb.append(tx ? "envoi" : "réponse").append(" : vers 0x").append(String.format("%02X", to))
+          .append(" de 0x").append(String.format("%02X", from))
+          .append(", statut 0x").append(String.format("%02X", st))
+          .append(" (séquence ").append(st & 1).append(tx && (st & 2) != 0 ? ", synchro" : "").append("), longueur ").append(len);
+        if (len >= 1) {
+            int p0 = u[4] & 0xFF;
+            if (tx) {
+                sb.append(" — ").append(nomMessage(p0));
+                if ((p0 == 0x20 || p0 == 0x21) && len >= 2) {
+                    int ch = u[5] & 0xFF;
+                    String[] d = champs.get(ch);
+                    sb.append(" champ ").append(ch).append(d != null ? " « " + d[0] + " »" : "");
+                    if (p0 == 0x21 && len > 2) sb.append(", valeur envoyée ").append(len - 2).append(" octet(s)");
+                } else if (p0 == 0x24 && len >= 2) {
+                    sb.append(" n° ").append(u[5] & 0xFF);
+                } else if (p0 == 0x22) {
+                    sb.append(", ").append(len - 1).append(" caractère(s)");
+                }
+            } else {
+                sb.append(" — code retour 0x").append(String.format("%02X", p0)).append(" = ").append(nomRc(p0));
+                if (len >= 2) {
+                    int dev = u[5] & 0xFF;
+                    sb.append("; ").append(LcpLink.decodeDeviceStatus(dev).toString());
+                }
+                if (len > 2) {
+                    sb.append("; données ").append(len - 2).append(" octet(s)");
+                }
+            }
+        }
+        sb.append(" — ").append(crc);
+        return sb.toString();
     }
 
     private static String hex(byte[] b) {

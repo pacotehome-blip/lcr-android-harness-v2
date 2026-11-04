@@ -1,0 +1,15 @@
+champ;nom;type;source;description
+0;Produit actif;octet;code de l'app;Index du produit actif (slot 0 à 15). L'app l'écrit pour scanner les 16 produits ; le registre refuse (rc=0x71) un slot non configuré.
+22;Sale Number;entier;log de l'app;Numéro de vente du registre. Sert de numéro de ticket quand TicketRequired = 2 (jamais imprimer).
+23;Ticket Number;entier;log de l'app;Numéro de ticket. Reste à 0 quand le registre est réglé « jamais imprimer ».
+37;TicketRequired;octet;script lcr_set_field.py;0 = ticket obligatoire, 1 = non, 2 = jamais imprimer.
+39;Décimales;entier;code de l'app;Nombre de décimales des volumes (lu par getDecimalDigits).
+44;Gross;entier;code de l'app;Volume gross de la livraison (remis à zéro par le diagnostic net/gross de l'app).
+45;Net;entier;code de l'app;Volume net de la livraison (remis à zéro par le diagnostic net/gross de l'app).
+56;Printer;octet (0 à 6);Excel de Paul;Type d'imprimante configuré dans le registre.
+57;CompensationType;octet (0 à 9);Excel de Paul;Type de compensation.
+58;CompensationParam;flottant;Excel de Paul;Paramètre de compensation.
+59;BaseTemp;flottant;Excel de Paul;Température de base.
+60;Software;texte;Excel de Paul;Version du logiciel du registre.
+80;Numéro de série;texte;Excel de Paul;Numéro de série du registre (#série).
+102;Node (LCRNode);2 octets;Excel de Paul;Adresse du registre sur la liaison (1 à 250), écrite sur 2 octets big-endian.
