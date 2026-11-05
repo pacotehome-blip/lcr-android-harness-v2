@@ -1136,7 +1136,7 @@ public synchronized void start() throws Exception {
         // ✅ Ticket reprint (MEDIA-AWARE)
         // ✅ Impression texte ligne par ligne (MSG_PRINT_TEXT) -- appelee par le
         // service d'impression filgoprint. Corps : lcrnode, [from], [media],
-        // [bt_mac], [expected_serial_id], lines[] (chaines).
+        // [bt_mac], [expected_serial_id], [delay_ms], lines[] (chaines).
         if ("POST".equals(req.method) && "/v1/print/text".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
             Integer node = parseNodeDec(body);
@@ -1146,6 +1146,8 @@ public synchronized void start() throws Exception {
             if (arr != null) {
                 for (int i = 0; i < arr.length(); i++) lines.add(arr.optString(i, ""));
             }
+            // Pause entre deux lignes (ms), facultative : 150 si absente (comportement d'avant).
+            final int pauseMs = Math.max(0, Math.min(body.optInt("delay_ms", 150), 2000));
             return withAutoConnectRetry(body, () -> {
                 String media = resolveMediaDefault(body);
                 String btMac = resolveBtMacDefault(body);
@@ -1160,7 +1162,7 @@ public synchronized void start() throws Exception {
                         return ApiResult.fail("Serial mismatch: attendu=" + expSerial + " réel=" + actualSerial, "ERR_SERIAL_MISMATCH", ed);
                     }
                 }
-                return facade.api_printTextLines(node, from, media, btMac, lines);
+                return facade.api_printTextLines(node, from, media, btMac, lines, pauseMs);
             });
         }
 

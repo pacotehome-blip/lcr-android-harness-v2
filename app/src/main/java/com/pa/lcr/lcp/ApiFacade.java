@@ -408,4 +408,14 @@ public interface ApiFacade {
                                          java.util.List<String> lines) {
         return ApiResult.fail("api_printTextLines: not supported", "NOT_SUPPORTED");
     }
+
+    /**
+     * Meme chose avec une pause (ms) entre deux lignes choisie par l'appelant
+     * (corps JSON "delay_ms" de /v1/print/text). Par defaut : meme comportement que
+     * la version sans pause (150 ms dans MultiRegisterApiFacadeImpl).
+     */
+    default ApiResult api_printTextLines(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac,
+                                         java.util.List<String> lines, int pauseMs) {
+        return api_printTextLines(lcrnode_dec, from_dec, media, bt_mac, lines);
+    }
 }

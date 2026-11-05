@@ -2333,6 +2333,13 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     @Override
     public ApiResult api_printTextLines(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac,
                                         java.util.List<String> lines) {
+        return api_printTextLines(lcrnode_dec, from_dec, media, bt_mac, lines, 150);
+    }
+
+    /** Pause (ms) entre deux lignes choisie par l'appelant (champ "delay_ms" de /v1/print/text) ; 150 par defaut. */
+    @Override
+    public ApiResult api_printTextLines(Integer lcrnode_dec, Integer from_dec, String media, String bt_mac,
+                                        java.util.List<String> lines, int pauseMs) {
         if (lines == null || lines.isEmpty()) {
             return ApiResult.fail("PrintText: 0 - aucune ligne", "ERR_NO_LINES");
         }
@@ -2365,7 +2372,9 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                     String why = (r == null) ? "null" : r.msg;
                     return ApiResult.fail("PrintText: ligne " + (i + 1) + "/" + total + " en erreur — " + why, "PRINT_ERR");
                 }
-                try { Thread.sleep(150); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                if (pauseMs > 0) {
+                    try { Thread.sleep(pauseMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                }
             }
             org.json.JSONObject d = new org.json.JSONObject();
             try { d.put("lines", total); } catch (Exception ignored) {}
