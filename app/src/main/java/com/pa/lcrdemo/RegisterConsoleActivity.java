@@ -208,7 +208,18 @@ public class RegisterConsoleActivity extends Activity {
                     }
                     case "status": case "statut": {
                         LcpLink.MachineStatus ms = lk.opGetMachineStatus();
-                        out.append(String.valueOf(ms)).append('\n');
+                        out.append(String.format(Locale.ROOT, "rc=0x%02X\n", ms.rc));
+                        out.append(String.format(Locale.ROOT, "devStatus=0x%02X : %s\n", ms.devStatus,
+                            LcpLink.decodeDeviceStatus(ms.devStatus)));
+                        StringBuilder pb = new StringBuilder();
+                        if ((ms.prnStatus & 0x80) != 0) pb.append("occupée ");
+                        if ((ms.prnStatus & 0x40) != 0) pb.append("erreur ");
+                        if ((ms.prnStatus & 0x20) != 0) pb.append("hors ligne ");
+                        if ((ms.prnStatus & 0x10) != 0) pb.append("plus de papier ");
+                        out.append(String.format(Locale.ROOT, "prnStatus=0x%02X : %s(bits lus comme dans le test imprimante de l'app)\n",
+                            ms.prnStatus, pb.length() == 0 ? "aucun bit actif " : pb.toString()));
+                        out.append(String.format(Locale.ROOT, "delStatus=0x%04X (%s)\n", ms.delStatus, LcpLink.describeDelStatus(ms.delStatus)));
+                        out.append(String.format(Locale.ROOT, "delCode=0x%04X (%s)\n", ms.delCode, LcpLink.describeDelCode(ms.delCode)));
                         break;
                     }
                     default: { // livraison / delivery
