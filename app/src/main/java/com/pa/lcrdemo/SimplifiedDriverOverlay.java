@@ -478,41 +478,56 @@ final class SimplifiedDriverOverlay {
     // ------------------------------------------------------------------ Admin
 
     private void demanderMotDePasse() {
+        // NB : la version avec TextInputLayout (demanderMotDePasseMaterial) plantait à la mesure de la
+        // boîte (logcat 6 nov, AlertDialogLayout.onMeasure) — erreur hors de portée d'un try/catch.
+        // On utilise donc des vues de base : champ masqué + bouton œil à droite.
         try {
-            demanderMotDePasseMaterial();
+            demanderMotDePasseSimple();
         } catch (Throwable t) {
-            // Filet : si le champ Material (œil) échoue, on bascule sur un champ simple + case « Afficher »
-            Log.e(TAG, "demanderMotDePasse Material ERR → repli champ simple", t);
-            try {
-                demanderMotDePasseSimple();
-            } catch (Throwable t2) {
-                Log.e(TAG, "demanderMotDePasse repli ERR", t2);
-                Toast.makeText(holder.getContext(), "Impossible d’ouvrir la saisie du mot de passe", Toast.LENGTH_LONG).show();
-            }
+            Log.e(TAG, "demanderMotDePasse ERR", t);
+            Toast.makeText(holder.getContext(), "Impossible d’ouvrir la saisie du mot de passe", Toast.LENGTH_LONG).show();
         }
     }
 
     private void demanderMotDePasseSimple() {
         final Context ctx = holder.getContext();
+        final float dp = ctx.getResources().getDisplayMetrics().density;
         final android.widget.EditText saisie = new android.widget.EditText(ctx);
         saisie.setHint("Mot de passe");
         saisie.setSingleLine(true);
         saisie.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        final android.widget.CheckBox voir = new android.widget.CheckBox(ctx);
-        voir.setText("Afficher le mot de passe");
-        voir.setOnCheckedChangeListener((b, on) -> {
-            saisie.setInputType(InputType.TYPE_CLASS_TEXT
-                    | (on ? InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD : InputType.TYPE_TEXT_VARIATION_PASSWORD));
-            saisie.setSelection(saisie.getText().length());
+        final android.widget.ImageButton oeil = new android.widget.ImageButton(ctx);
+        oeil.setImageResource(android.R.drawable.ic_menu_view);
+        oeil.setBackgroundColor(Color.TRANSPARENT);
+        oeil.setContentDescription("Afficher / cacher le mot de passe");
+        oeil.setOnClickListener(new View.OnClickListener() {
+            boolean visible = false;
+            @Override public void onClick(View v) {
+                visible = !visible;
+                saisie.setInputType(InputType.TYPE_CLASS_TEXT
+                        | (visible ? InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD : InputType.TYPE_TEXT_VARIATION_PASSWORD));
+                saisie.setSelection(saisie.getText().length());
+                oeil.setAlpha(visible ? 1f : 0.55f);
+            }
         });
+        oeil.setAlpha(0.55f);
+        android.widget.LinearLayout ligne = new android.widget.LinearLayout(ctx);
+        ligne.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        ligne.setGravity(Gravity.CENTER_VERTICAL);
+        ligne.addView(saisie, new android.widget.LinearLayout.LayoutParams(0,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        ligne.addView(oeil, new android.widget.LinearLayout.LayoutParams((int) (48 * dp), (int) (48 * dp)));
         android.widget.LinearLayout box = new android.widget.LinearLayout(ctx);
         box.setOrientation(android.widget.LinearLayout.VERTICAL);
-        int pad = (int) (20 * ctx.getResources().getDisplayMetrics().density);
+        int pad = (int) (20 * dp);
         box.setPadding(pad, pad / 2, pad, 0);
-        box.addView(saisie);
-        box.addView(voir);
+        box.addView(ligne, new android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT));
         new android.app.AlertDialog.Builder(ctx)
                 .setTitle("Accès Admin")
+                .setMessage("Entrez le mot de passe pour afficher l’interface complète. "
+                        + "L’écran simplifié sera désactivé jusqu’au retour.")
                 .setView(box)
                 .setNegativeButton("Annuler", null)
                 .setPositiveButton("Entrer", (d, w) -> {
