@@ -222,6 +222,9 @@ final class SimplifiedDriverOverlay {
         if (o != builtOrientation) build(o);
 
         boolean admin = adminUnlocked;
+        // Barre du haut, onglets Main/API/Configure/Support et Quit : cachés en mode simplifié
+        android.app.Activity act = host.getActivity();
+        if (act instanceof MainActivity) ((MainActivity) act).appliquerModeSimplifie(!admin);
         holder.setVisibility(admin ? View.GONE : View.VISIBLE);
         btnRetourSimple.setVisibility(admin ? View.VISIBLE : View.GONE);
         if (admin) { arreterAnimations(); dernierEtat = null; return; }

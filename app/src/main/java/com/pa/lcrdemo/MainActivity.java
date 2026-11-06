@@ -1851,7 +1851,39 @@ private void setupTabsTop() {
         });
     }
 
+    // ✅ AJOUTÉ (6 nov 2026, demande Paul — "je cacherais toute la partie main, api, configure,
+    // support... la partie Livraison et quit devrait aussi être masquée pour garder que le registre
+    // actif") — mode simplifié chauffeur : null = pas encore appliqué, TRUE = barre du haut, onglets
+    // et éléments de la page Main masqués ; FALSE = mode Admin (interface actuelle complète).
+    private Boolean modeSimplifieApplique = null;
+
+    /**
+     * Appelé par SimplifiedDriverOverlay (toutes les 250 ms, idempotent). Ne fait que montrer/cacher
+     * des vues existantes : aucune logique de l'app n'est modifiée.
+     */
+    public void appliquerModeSimplifie(boolean simple) {
+        if (Boolean.valueOf(simple).equals(modeSimplifieApplique)) return;
+        modeSimplifieApplique = simple;
+        int vis = simple ? View.GONE : View.VISIBLE;
+        int[] ids = { R.id.headerFilgo, R.id.tabLayout, R.id.txtActiveNode, R.id.tabRegisters,
+                R.id.cbShowLog, R.id.txtVersionBuildMain };
+        for (int id : ids) {
+            View v = findViewById(id);
+            if (v != null) v.setVisibility(vis);
+        }
+        // Le panneau de log suit la case « Afficher log global » (comme le fait déjà l'app)
+        if (logPanel != null) {
+            logPanel.setVisibility(simple ? View.GONE : (cbShowLog != null && cbShowLog.isChecked() ? View.VISIBLE : View.GONE));
+        }
+        if (simple) showPage(0);
+    }
+
     public void showPage(int index) {
+        // En mode simplifié, aucune autre page que Main n'est accessible (plus d'onglets pour revenir).
+        if (Boolean.TRUE.equals(modeSimplifieApplique) && index != 0) {
+            android.util.Log.i("MainActivity", "showPage(" + index + ") ramené à Main — mode simplifié actif");
+            index = 0;
+        }
         if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
         if (pageConfigure != null) pageConfigure.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
