@@ -36,6 +36,13 @@ final class FlammeView extends View {
     private ValueAnimator anim;
     private ValueAnimator respiration;
     private ValueAnimator salut;
+    private ValueAnimator animCogne;
+    private float cogneT = -1f;             // -1 = pas de coup ; 0..1 = la flamme cogne dans la vitre (700 ms, coups à 250 et 450 ms)
+    private float proche = 0f;             // 0..1 : le bras s'étire vers la vitre (la main grossit en s'approchant)
+    private float pulse = 0f;               // 0..1 : force du coup en cours
+    private float mainX, mainY;             // position de la main qui cogne (pour l'onde d'impact)
+    static final long DUREE_COGNE_MS = 700L;
+    static final long COUP1_MS = 250L, COUP2_MS = 450L;
     private float vague = 0f;              // 0..1 : bras qui font signe « ici ! »
     private float souffle = 0f;             // 0..1 : petit balancement au repos
 
@@ -99,11 +106,36 @@ final class FlammeView extends View {
         if (respiration != null) respiration.cancel();
         if (anim != null) anim.cancel();
         if (salut != null) { salut.cancel(); salut = null; }
+        if (animCogne != null) animCogne.cancel();
+    }
+
+    /**
+     * La flamme cogne DEUX fois dans la « vitre » (l'écran) avec sa main, puis appelle fin
+     * (en général : exploser()). Les coups tombent à 250 ms et 450 ms — le son « toc-toc » doit
+     * démarrer à 250 ms.
+     */
+    void cogner(final Runnable fin) {
+        if (animCogne != null) animCogne.cancel();
+        if (!ValueAnimator.areAnimatorsEnabled()) { if (fin != null) fin.run(); return; }
+        animCogne = ValueAnimator.ofFloat(0f, 1f);
+        animCogne.setDuration(DUREE_COGNE_MS);
+        animCogne.setInterpolator(new LinearInterpolator());
+        animCogne.addUpdateListener(a -> { cogneT = (float) a.getAnimatedValue(); invalidate(); });
+        animCogne.addListener(new android.animation.AnimatorListenerAdapter() {
+            private boolean annule = false;
+            @Override public void onAnimationCancel(android.animation.Animator animation) { annule = true; cogneT = -1f; pulse = 0f; }
+            @Override public void onAnimationEnd(android.animation.Animator animation) {
+                cogneT = -1f; pulse = 0f; invalidate();
+                if (!annule && fin != null) fin.run();
+            }
+        });
+        animCogne.start();
     }
 
     /** La flamme gonfle, éclate en étincelles, puis se reforme (inquiète). */
     void exploser() {
         if (anim != null) anim.cancel();
+        if (animCogne != null) animCogne.cancel();
         inquiet = true;
         majSalut();
         if (!ValueAnimator.areAnimatorsEnabled()) { explosion = -1f; invalidate(); return; }
@@ -135,8 +167,20 @@ final class FlammeView extends View {
         float H = h * 0.54f, W = w * 0.46f;
         if (mini) { base = h * 0.94f; H = h * 0.88f; W = w * 0.64f; }
         float echelle = 1f, alpha = 1f;
+        pulse = 0f;
+        proche = 0f;
+        if (cogneT >= 0f) {
+            float tms = cogneT * DUREE_COGNE_MS;
+            // Le bras s'étire jusqu'à la vitre (coup 1 à 250 ms), recule un peu, repart (coup 2 à 450 ms), puis se rétracte
+            if (tms < COUP1_MS) { float u = tms / COUP1_MS; proche = u * u; }
+            else if (tms < 340f) { float u = (tms - COUP1_MS) / (340f - COUP1_MS); proche = 1f - 0.55f * u; }
+            else if (tms < COUP2_MS) { float u = (tms - 340f) / (COUP2_MS - 340f); proche = 0.45f + 0.55f * u * u; }
+            else { float u = (tms - COUP2_MS) / (DUREE_COGNE_MS - COUP2_MS); proche = Math.max(0f, 1f - u); }
+            float a1 = (tms - COUP1_MS) / 45f, a2 = (tms - COUP2_MS) / 45f;
+            pulse = (float) Math.max(Math.exp(-a1 * a1), Math.exp(-a2 * a2));
+        }
         if (explosion < 0f) {
-            echelle = 1f + 0.04f * souffle;                      // respiration au repos
+            echelle = 1f + 0.04f * souffle + 0.06f * pulse;                      // respiration au repos
         } else {
             float t = explosion;
             if (t < 0.30f) { echelle = 1f + 0.55f * (t / 0.30f); }
@@ -162,6 +206,7 @@ final class FlammeView extends View {
             dessinerVisage(c, cx, base, W, H, alpha);
             c.restore();
         }
+        dessinerImpact(c);
         if (explosion >= 0.25f) {                                // étincelles
             float t = (explosion - 0.25f) / 0.75f;
             float sortie = 1f - (1f - t) * (1f - t);
@@ -178,6 +223,23 @@ final class FlammeView extends View {
                 c.drawCircle(x, y, Math.max(1f, w * 0.035f * (1f - t * 0.6f)), pEtincelle);
             }
         }
+    }
+
+    private void dessinerImpact(Canvas c) {
+        if (cogneT < 0f || pulse < 0.12f) return;
+        pMembre.setStyle(Paint.Style.STROKE);
+        int ancienA = pMembre.getAlpha(); int ancienC = pMembre.getColor(); float ancienW = pMembre.getStrokeWidth();
+        pMembre.setColor(Color.WHITE);
+        pMembre.setAlpha((int) (200 * pulse));
+        pMembre.setStrokeWidth(Math.max(2f, getWidth() * 0.025f));
+        float rayon = getWidth() * (0.10f + 0.12f * (1f - pulse));
+        c.drawCircle(mainX, mainY, rayon, pMembre);
+        for (int i = 0; i < 3; i++) {                              // petites lignes d'impact
+            double a = -Math.PI / 2 + (i - 1) * 0.7;
+            c.drawLine(mainX + (float) Math.cos(a) * rayon * 1.3f, mainY + (float) Math.sin(a) * rayon * 1.3f,
+                    mainX + (float) Math.cos(a) * rayon * 1.9f, mainY + (float) Math.sin(a) * rayon * 1.9f, pMembre);
+        }
+        pMembre.setColor(ancienC); pMembre.setAlpha(ancienA); pMembre.setStrokeWidth(ancienW);
     }
 
     /** Deux bras et deux jambes. Content : bras le long du corps qui se balancent ; inquiet : bras levés qui s'agitent. */
@@ -201,7 +263,10 @@ final class FlammeView extends View {
             float ex = cx + cote * W * 0.46f;
             float ey = base - H * 0.30f;
             float mx, my;
-            if (inquiet) {                                         // bras levés : ils font signe, en alternance
+            if (cogneT >= 0f && cote == 1) {                      // le bras droit cogne dans la vitre (devant la flamme)
+                mx = cx + W * (0.52f + 0.10f * proche);              // le bras s'allonge vers l'avant
+                my = base - H * (0.50f + 0.14f * proche);
+            } else if (inquiet) {                                  // bras levés : ils font signe, en alternance
                 float sw = (vague - 0.5f) * 2f;                    // -1..1
                 mx = cx + cote * W * 0.68f + cote * sw * W * 0.12f;
                 my = base - H * 0.72f + sw * cote * H * 0.10f;
@@ -212,8 +277,13 @@ final class FlammeView extends View {
             Path bras = new Path();
             bras.moveTo(ex, ey);
             bras.quadTo(ex + cote * W * 0.30f, (ey + my) / 2f + H * 0.06f, mx, my);
+            float largeurBras = pMembre.getStrokeWidth();
+            if (cogneT >= 0f && cote == 1) pMembre.setStrokeWidth(largeurBras * (1f + 0.9f * proche));   // plus près = plus épais
             c.drawPath(bras, pMembre);
-            dessinerMain(c, mx, my, (float) Math.atan2(my - ey, mx - ex), rm * 1.35f);
+            pMembre.setStrokeWidth(largeurBras);
+            float rMain = rm * 1.35f * ((cogneT >= 0f && cote == 1) ? (1f + 1.3f * proche) : 1f);   // la main GROSSIT en s'approchant de la vitre
+            if (cogneT >= 0f && cote == 1) { mainX = mx; mainY = my; }
+            dessinerMain(c, mx, my, (float) Math.atan2(my - ey, mx - ex), rMain);
         }
     }
 

@@ -397,12 +397,14 @@ final class SimplifiedDriverOverlay {
     }
 
     // ------------------------------------------------------------------ la flamme explose
-    /** La flamme gonfle, éclate en étincelles puis se reforme inquiète ; le son accompagne l'éclatement. */
+    /** La flamme cogne deux fois dans la vitre (toc-toc), puis explose en étincelles et se reforme inquiète. */
     private void cognerEcran() {
         if (bFlamme == null || !bulleVisible) return;
-        bFlamme.setInquiet(true);
-        bFlamme.exploser();
-        if (SimplifiedConfig.SON_ALERTE_ACTIF) ui.postDelayed(this::jouerToc, ValueAnimator.areAnimatorsEnabled() ? 250L : 0L);
+        bFlamme.setInquiet(false);
+        final boolean anime = ValueAnimator.areAnimatorsEnabled();
+        bFlamme.cogner(() -> { if (bFlamme != null && bulleVisible) bFlamme.exploser(); });
+        // Le son (deux petits coups espacés de 200 ms) démarre au premier coup de la flamme
+        if (SimplifiedConfig.SON_ALERTE_ACTIF) ui.postDelayed(this::jouerToc, anime ? FlammeView.COUP1_MS : 0L);
     }
 
     // ------------------------------------------------------------------ son : « toc-toc » de clé sur une vitre
