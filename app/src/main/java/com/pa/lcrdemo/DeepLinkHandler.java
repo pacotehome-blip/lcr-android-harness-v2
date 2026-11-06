@@ -300,6 +300,12 @@ public class DeepLinkHandler {
             // Lus ICI, après le verrou PENDING — un lien refusé n'écrase donc rien.
             String stopId    = nettoyerGuidDeepLink(data.getQueryParameter("stopid"));
             String productId = nettoyerGuidDeepLink(data.getQueryParameter("productid"));
+            // ✅ AJOUTÉ (6 nov 2026, demande Paul — "la description viendra du deeplink", affichage
+            // seulement) — description du produit FieldService pour l'écran simplifié chauffeur.
+            // Gardée en mémoire seulement (jamais en base ni en JSON) ; absente = vide = rien affiché.
+            // Lue ici, après le verrou PENDING : un lien refusé n'écrase donc rien.
+            SimplifiedUiState.setFsProduitDesc(woNum,
+                    data.getQueryParameter(SimplifiedConfig.DEEPLINK_PARAM_PRODUIT_DESC));
 
             // ✅ Configurer l'environnement selon l'URL Dataverse reçue de FSM
             // Un seul APK pour DEV / QA / STAGING / PROD

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Écran simplifié / demande de support : pièces jointes (journal .txt, message vocal .m4a)
+     écrites dans le cache de l'app (sous-dossier support/) puis partagées via FileProvider. -->
+<paths>
+    <cache-path name="support" path="support/" />
+</paths>

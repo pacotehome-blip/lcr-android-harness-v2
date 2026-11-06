@@ -3635,6 +3635,34 @@ public class RegisterTabFragment extends Fragment {
         controller = null;
         attemptedAutoAttachOnce = false;  // ← ajouter cette ligne
     }
+    // ✅ AJOUTÉ (6 nov 2026, demande Paul) — ÉCRAN SIMPLIFIÉ CHAUFFEUR (SimplifiedDriverOverlay).
+    // Surcouche en lecture posée par-dessus cet onglet ; elle ne modifie rien ici. Seuls ces accès
+    // lui sont donnés : WO courant, état du média, et la demande de permission micro (message
+    // vocal de la demande de support).
+    String getWoNumPourSimplifie() { return currentWoNum; }
+    boolean isMediaReadyPourSimplifie() { return tabMediaReady; }
+
+    private Runnable micAccordeCb = null;
+    private final androidx.activity.result.ActivityResultLauncher<String> micPermLauncher =
+            registerForActivityResult(new androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+                    accorde -> {
+                        Runnable cb = micAccordeCb;
+                        micAccordeCb = null;
+                        if (accorde && cb != null) {
+                            cb.run();
+                        } else if (!accorde && getContext() != null) {
+                            android.widget.Toast.makeText(getContext(),
+                                    "Permission du micro refusée — message vocal impossible",
+                                    android.widget.Toast.LENGTH_LONG).show();
+                        }
+                    });
+
+    /** Demande la permission du micro, puis exécute {@code apresAccord} si elle est accordée. */
+    void demanderMicroPourSimplifie(Runnable apresAccord) {
+        micAccordeCb = apresAccord;
+        micPermLauncher.launch(android.Manifest.permission.RECORD_AUDIO);
+    }
+
     @Nullable
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater,
@@ -3660,6 +3688,14 @@ public class RegisterTabFragment extends Fragment {
         wrapper.addView(v, new android.widget.FrameLayout.LayoutParams(
                 android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
                 android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+
+        // ✅ AJOUTÉ (6 nov 2026, demande Paul) — écran simplifié chauffeur, posé AVANT le guide
+        // d'init pour que celui-ci reste affiché par-dessus. Mode Admin = interface actuelle.
+        try {
+            SimplifiedDriverOverlay.attach(this, wrapper, v);
+        } catch (Exception eSimple) {
+            android.util.Log.w("RegisterTabFragment", "écran simplifié non posé (non-bloquant): " + eSimple.getMessage());
+        }
 
         txtInitGuide = new android.widget.TextView(requireContext());
         txtInitGuide.setPadding(24, 16, 24, 16);

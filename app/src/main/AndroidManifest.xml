@@ -9,6 +9,14 @@
         android:name="android.permission.MANAGE_USB"
         tools:ignore="ProtectedPermissions" />
 
+    <!-- ✅ AJOUTÉ (6 nov 2026, demande Paul) — message vocal de la demande de support (trombone).
+         Demandée au chauffeur seulement à la première utilisation du bouton « Enregistrer ».
+         microphone non requis : l'APK s'installe aussi sur un appareil sans micro. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+
     <!-- API loopback -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -172,6 +180,18 @@
         <meta-data
             android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
             android:resource="@xml/usb_device_filter" />
+
+        <!-- ✅ AJOUTÉ (6 nov 2026, demande Paul) — partage des pièces jointes de la demande de
+             support (journal .txt, message vocal .m4a) : cache de l'app seulement (xml/file_paths). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 </manifest>
