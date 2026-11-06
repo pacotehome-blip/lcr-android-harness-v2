@@ -210,9 +210,57 @@ final class SimplifiedDriverOverlay {
         sBtnLancer.setOnClickListener(v -> cliquer(btnRetourWO));
         sBtnRetour.setOnClickListener(v -> cliquer(btnRetourWO));
         sPanelWo.setOnClickListener(v -> cliquer(panelWoCumul));
-        sBtnSupport.setOnClickListener(v -> ouvrirSupport());
+        sBtnSupport.setOnClickListener(v -> { rebondTrombone(); ouvrirSupport(); });
         sBtnAdmin.setOnClickListener(v -> demanderMotDePasse());
         sTxtRegistre.setOnClickListener(v -> choisirRegistre());
+    }
+
+    // ------------------------------------------------------------------ trombone animée
+
+    private static final long TROMBONE_PERIODE_MS = 10_000L;
+    private static final long SONDE_PERIODE_MS = 15_000L;
+    private volatile boolean printActif = true;
+    private volatile boolean sondeEnCours = false;
+    private long dernierSondageMs = 0L;
+    private long dernierBalanceMs = 0L;
+
+    /** Teste (en arrière-plan) si le service d'impression écoute : simple connexion TCP, aucune requête. */
+    private void sonderServiceImpression() {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (sondeEnCours || now - dernierSondageMs < SONDE_PERIODE_MS) return;
+        sondeEnCours = true;
+        dernierSondageMs = now;
+        new Thread(() -> {
+            boolean ok = false;
+            try (java.net.Socket s = new java.net.Socket()) {
+                s.connect(new java.net.InetSocketAddress("127.0.0.1", 9182), 800);
+                ok = true;
+            } catch (Exception ignored) {
+            }
+            printActif = ok;
+            sondeEnCours = false;
+        }, "simplifie-sonde-print").start();
+    }
+
+    private void balancerTrombone() {
+        if (sBtnSupport == null || !ValueAnimator.areAnimatorsEnabled()) return;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - dernierBalanceMs < TROMBONE_PERIODE_MS) return;
+        dernierBalanceMs = now;
+        sBtnSupport.setPivotX(sBtnSupport.getWidth() / 2f);
+        sBtnSupport.setPivotY(sBtnSupport.getHeight() * 0.25f);
+        ObjectAnimator a = ObjectAnimator.ofFloat(sBtnSupport, View.ROTATION, 0f, -16f, 14f, -10f, 8f, -4f, 0f);
+        a.setDuration(900);
+        a.start();
+    }
+
+    private void rebondTrombone() {
+        if (sBtnSupport == null || !ValueAnimator.areAnimatorsEnabled()) return;
+        ObjectAnimator a = ObjectAnimator.ofPropertyValuesHolder(sBtnSupport,
+                PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.25f, 1f),
+                PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.25f, 1f));
+        a.setDuration(250);
+        a.start();
     }
 
     /** Sélecteur de registre (la barre d'onglets est cachée en mode simplifié). */
@@ -290,6 +338,10 @@ final class SimplifiedDriverOverlay {
         sTxtRegistre.setClickable(plusieurs);
         sTxtRegistre.setPadding(0, plusieurs ? 8 : 0, 0, plusieurs ? 8 : 0);
         boolean coupe = live.contains("DISCONNECTED");
+        // Trombone : se balance de temps en temps si le registre est déconnecté OU si le service
+        // d'impression (127.0.0.1:9182) ne répond pas. Immobile sinon.
+        sonderServiceImpression();
+        if (coupe || !printActif) balancerTrombone();
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION
                 ? (coupe ? "Reconnexion au registre nécessaire" : "Connexion en cours…")
                 : "Connecté");
