@@ -286,6 +286,7 @@ final class SimplifiedDriverOverlay {
     private LinearLayout bCarte;           // le message d'erreur (carte blanche) — affiché APRÈS l'explosion
     private MaterialButton btnReconnecter;
     private boolean carteVisible = false;
+    private boolean oublieErreur = false;      // « Oublie-moi » : silence total jusqu'à la PROCHAINE erreur
 
     private void construireBulle(Context ctx, FrameLayout wrapper) {
         final float dp = ctx.getResources().getDisplayMetrics().density;
@@ -373,6 +374,22 @@ final class SimplifiedDriverOverlay {
         secondaires.addView(plusTard);
         secondaires.addView(contacter, lpb);
         bCarte.addView(secondaires);
+
+        MaterialButton oublie = new MaterialButton(ctx, null, com.google.android.material.R.attr.borderlessButtonStyle);
+        oublie.setText("Oublie-moi jusqu’à la prochaine erreur");
+        oublie.setAllCaps(false);
+        oublie.setTextSize(13f);
+        oublie.setTextColor(Color.parseColor("#185FA5"));
+        oublie.setOnClickListener(v -> {
+            oublieErreur = true;
+            snoozeCle = cleAlerte;
+            snoozeJusquaMs = Long.MAX_VALUE;     // jusqu'à ce que l'erreur disparaisse puis revienne (ou change)
+            cacherBulle();
+        });
+        LinearLayout ligneOublie = new LinearLayout(ctx);
+        ligneOublie.setGravity(Gravity.END);
+        ligneOublie.addView(oublie);
+        bCarte.addView(ligneOublie);
         bulle.addView(bCarte, new LinearLayout.LayoutParams((int) Math.min(360 * dp,
                 ctx.getResources().getDisplayMetrics().widthPixels * 0.9f), LinearLayout.LayoutParams.WRAP_CONTENT));
 
@@ -401,7 +418,7 @@ final class SimplifiedDriverOverlay {
     /** Toucher la mascotte : réaffiche l'erreur en cours, sinon ouvre la demande de support. */
     private void clicMascotte() {
         if (!cleAlerte.isEmpty() && !bulleVisible) {
-            snoozeCle = ""; snoozeJusquaMs = 0L;
+            snoozeCle = ""; snoozeJusquaMs = 0L; oublieErreur = false;
             afficherBulle();
             montrerCarte(true);
         } else if (cleAlerte.isEmpty()) {
@@ -432,6 +449,7 @@ final class SimplifiedDriverOverlay {
         if (cle.isEmpty()) {          // tout va bien : on range et on remet à zéro
             cacherBulle();
             cleAlerte = ""; snoozeCle = ""; alerteContexte = ""; dernierSonMs = 0L;
+            oublieErreur = false;             // l'erreur est terminée : la prochaine sera annoncée normalement
             return;
         }
         if (enLivraison) { cacherBulle(); return; }
@@ -439,6 +457,7 @@ final class SimplifiedDriverOverlay {
         if (!cle.equals(cleAlerte)) {
             cleAlerte = cle;
             dernierSonMs = 0L;
+            oublieErreur = false;             // nouvelle erreur (ou autre type) : on prévient de nouveau
             triageCle = null; triageAction = null; triageNiveau = null; triageDiag = null;
         }
         String titre, action;
@@ -792,7 +811,7 @@ final class SimplifiedDriverOverlay {
         }
         boolean echecDeepLink = !coupe
                 && SimplifiedUiState.getEchecsDeepLink(woCourant()) >= SimplifiedConfig.DEEPLINK_ECHECS_AVANT_ALERTE;
-        if (coupe || echecDeepLink) balancerTrombone();
+        if ((coupe || echecDeepLink) && !oublieErreur) balancerTrombone();
         gererAssistant(coupe, echecDeepLink, etat);
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION
                 ? (coupe ? "Reconnexion au registre nécessaire" : "Connexion en cours…")
