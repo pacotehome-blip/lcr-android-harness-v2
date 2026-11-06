@@ -31,6 +31,7 @@ final class FlammeView extends View {
     private final RectF rect = new RectF();
 
     private boolean inquiet = false;
+    private boolean mini = false;           // version « icône » : visage seul, sans bras ni jambes
     private float explosion = -1f;          // -1 = au repos, 0..1 = en cours
     private ValueAnimator anim;
     private ValueAnimator respiration;
@@ -53,6 +54,9 @@ final class FlammeView extends View {
         pMembre.setStrokeCap(Paint.Cap.ROUND);
         pMain.setColor(Color.parseColor("#FFC93C"));
     }
+
+    /** Version icône (bouton de support) : la flamme remplit la vue, sans bras ni jambes. */
+    void setMini(boolean v) { mini = v; invalidate(); }
 
     void setInquiet(boolean v) {
         if (inquiet != v) { inquiet = v; invalidate(); }
@@ -129,6 +133,7 @@ final class FlammeView extends View {
         float cx = w / 2f;
         float base = h * 0.72f;
         float H = h * 0.54f, W = w * 0.46f;
+        if (mini) { base = h * 0.94f; H = h * 0.88f; W = w * 0.64f; }
         float echelle = 1f, alpha = 1f;
         if (explosion < 0f) {
             echelle = 1f + 0.04f * souffle;                      // respiration au repos
@@ -147,7 +152,7 @@ final class FlammeView extends View {
             c.save();
             c.scale(echelle, echelle, cx, base);
             if (inquiet && explosion < 0f && salut != null) c.translate(0f, -Math.abs(vague - 0.5f) * 2f * H * 0.05f);   // petit saut
-            dessinerMembres(c, cx, base, W, H, alpha);
+            if (!mini) dessinerMembres(c, cx, base, W, H, alpha);
             pExt.setAlpha((int) (255 * alpha));
             tracerFlamme(chemin, cx, base, W, H);
             c.drawPath(chemin, pExt);

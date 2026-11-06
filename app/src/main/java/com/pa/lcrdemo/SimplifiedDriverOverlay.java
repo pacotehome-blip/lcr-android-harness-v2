@@ -86,7 +86,8 @@ final class SimplifiedDriverOverlay {
     private View sDot, sBlocProdFs, sPanelWo;
     private MaterialCardView sBanner;
     private ProgressBar sProgConn;
-    private MaterialButton sBtnTerminer, sBtnAnnuler, sBtnLancer, sBtnRetour, sBtnSupport, sBtnAdmin;
+    private MaterialButton sBtnTerminer, sBtnAnnuler, sBtnLancer, sBtnRetour, sBtnAdmin;
+    private View sBtnSupport;   // mini flamme (remplace l'ancienne icône trombone)
 
     private Etat dernierEtat = null;
     private boolean dernierPulseTerminer = false;
@@ -207,7 +208,22 @@ final class SimplifiedDriverOverlay {
         sBtnAnnuler = root.findViewById(R.id.sBtnAnnuler);
         sBtnLancer = root.findViewById(R.id.sBtnLancer);
         sBtnRetour = root.findViewById(R.id.sBtnRetour);
-        sBtnSupport = root.findViewById(R.id.sBtnSupport);
+        // Bouton de support : la trombone est remplacée par une mini flamme Filgo (même emplacement, même clic)
+        View ancienSupport = root.findViewById(R.id.sBtnSupport);
+        FlammeView mini = new FlammeView(ctx);
+        mini.setMini(true);
+        mini.setContentDescription("Demander du support");
+        if (ancienSupport != null && ancienSupport.getParent() instanceof android.view.ViewGroup) {
+            android.view.ViewGroup parent = (android.view.ViewGroup) ancienSupport.getParent();
+            int idx = parent.indexOfChild(ancienSupport);
+            android.view.ViewGroup.LayoutParams nlp = ancienSupport.getLayoutParams();
+            float dpi = ctx.getResources().getDisplayMetrics().density;
+            nlp.width = (int) (48 * dpi);
+            nlp.height = (int) (48 * dpi);
+            parent.removeView(ancienSupport);
+            parent.addView(mini, idx, nlp);
+        }
+        sBtnSupport = mini;
         sBtnAdmin = root.findViewById(R.id.sBtnAdmin);
 
         // Les boutons d'action délèguent aux boutons existants de l'onglet.
@@ -332,6 +348,7 @@ final class SimplifiedDriverOverlay {
         boolean enLivraison = etat == Etat.DEBIT || etat == Etat.CONFIRM
                 || etat == Etat.PAUSE || etat == Etat.ENDING;
         String cle = coupe ? "COMM" : (echecDeepLink ? "DEEPLINK" : (!printActif ? "PRINT" : ""));
+        if (sBtnSupport instanceof FlammeView) ((FlammeView) sBtnSupport).setInquiet(!cle.isEmpty());
         if (cle.isEmpty()) {          // tout va bien : on range et on remet à zéro
             cacherBulle();
             cleAlerte = ""; snoozeCle = ""; alerteContexte = ""; dernierSonMs = 0L;
@@ -580,7 +597,7 @@ final class SimplifiedDriverOverlay {
         if (now - dernierBalanceMs < TROMBONE_PERIODE_MS) return;
         dernierBalanceMs = now;
         sBtnSupport.setPivotX(sBtnSupport.getWidth() / 2f);
-        sBtnSupport.setPivotY(sBtnSupport.getHeight() * 0.25f);
+        sBtnSupport.setPivotY(sBtnSupport.getHeight() * 0.9f);
         ObjectAnimator a = ObjectAnimator.ofFloat(sBtnSupport, View.ROTATION, 0f, -16f, 14f, -10f, 8f, -4f, 0f);
         a.setDuration(900);
         a.start();
