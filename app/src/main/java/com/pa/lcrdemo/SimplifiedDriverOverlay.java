@@ -212,6 +212,51 @@ final class SimplifiedDriverOverlay {
         sPanelWo.setOnClickListener(v -> cliquer(panelWoCumul));
         sBtnSupport.setOnClickListener(v -> ouvrirSupport());
         sBtnAdmin.setOnClickListener(v -> demanderMotDePasse());
+        sTxtRegistre.setOnClickListener(v -> choisirRegistre());
+    }
+
+    /** Sélecteur de registre (la barre d'onglets est cachée en mode simplifié). */
+    private void choisirRegistre() {
+        try {
+            android.app.Activity act = host.getActivity();
+            if (!(act instanceof MainActivity)) return;
+            if (dernierEtat == Etat.DEBIT || dernierEtat == Etat.CONFIRM
+                    || dernierEtat == Etat.PAUSE || dernierEtat == Etat.ENDING) {
+                Toast.makeText(act, "Livraison en cours — terminez-la avant de changer de registre",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+            final MainActivity ma = (MainActivity) act;
+            final java.util.List<String[]> regs = ma.registresPourSimplifie();
+            if (regs.size() < 2) return;
+            String[] libelles = new String[regs.size()];
+            int courant = 0;
+            for (int i = 0; i < regs.size(); i++) {
+                boolean actif = "1".equals(regs.get(i)[2]);
+                if (actif) courant = i;
+                libelles[i] = (actif ? "✓  " : "      ") + regs.get(i)[1];
+            }
+            new android.app.AlertDialog.Builder(act)
+                    .setTitle("Changer de registre")
+                    .setSingleChoiceItems(libelles, courant, (d, which) -> {
+                        d.dismiss();
+                        if (which != regs.size() && !"1".equals(regs.get(which)[2])) {
+                            ma.choisirRegistrePourSimplifie(regs.get(which)[0]);
+                        }
+                    })
+                    .setNegativeButton("Fermer", null)
+                    .show();
+        } catch (Throwable t) {
+            Log.e(TAG, "choisirRegistre ERR", t);
+        }
+    }
+
+    /** Nombre de registres ouverts (0 si inconnu). */
+    private int nbRegistres() {
+        try {
+            android.app.Activity act = host.getActivity();
+            return act instanceof MainActivity ? ((MainActivity) act).registresPourSimplifie().size() : 0;
+        } catch (Throwable t) { return 0; }
     }
 
     private void cliquer(View cible) {
@@ -240,7 +285,10 @@ final class SimplifiedDriverOverlay {
         // --- Registre
         String serie = apresDeuxPoints(txtSerialId);
         String node = apresDeuxPoints(txtLcrNode);
-        sTxtRegistre.setText("Registre #" + serie + " · Node " + node);
+        boolean plusieurs = nbRegistres() > 1;
+        sTxtRegistre.setText("Registre #" + serie + " · Node " + node + (plusieurs ? "  ▾" : ""));
+        sTxtRegistre.setClickable(plusieurs);
+        sTxtRegistre.setPadding(0, plusieurs ? 8 : 0, 0, plusieurs ? 8 : 0);
         boolean coupe = live.contains("DISCONNECTED");
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION
                 ? (coupe ? "Reconnexion au registre nécessaire" : "Connexion en cours…")

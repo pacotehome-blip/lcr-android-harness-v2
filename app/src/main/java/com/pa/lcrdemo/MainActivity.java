@@ -3979,6 +3979,38 @@ private void setupTabsTop() {
         }
     }
 
+    /** ✅ AJOUTÉ (6 nov 2026, demande Paul — écran simplifié) — liste des registres ouverts, pour le
+     *  sélecteur de l'écran simplifié (la barre d'onglets est cachée). Chaque entrée :
+     *  {tabKey, libellé, "1" si c'est l'onglet actif sinon "0"}. */
+    public java.util.List<String[]> registresPourSimplifie() {
+        java.util.List<String[]> out = new java.util.ArrayList<>();
+        try {
+            if (tabRegisters == null) return out;
+            int sel = tabRegisters.getSelectedTabPosition();
+            for (int i = 0; i < tabRegisters.getTabCount(); i++) {
+                TabLayout.Tab t = tabRegisters.getTabAt(i);
+                if (t == null || !(t.getTag() instanceof String)) continue;
+                String label = "";
+                View custom = t.getCustomView();
+                if (custom != null) {
+                    TextView tv = custom.findViewById(R.id.txtTabLabel);
+                    if (tv != null && tv.getText() != null) label = tv.getText().toString();
+                }
+                if (label.isEmpty() && t.getText() != null) label = t.getText().toString();
+                if (label.isEmpty()) label = "Registre " + (i + 1);
+                out.add(new String[] { (String) t.getTag(), label, i == sel ? "1" : "0" });
+            }
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "registresPourSimplifie ERR: " + e.getMessage());
+        }
+        return out;
+    }
+
+    /** Bascule sur un autre registre (même chemin que le toucher d'un onglet). */
+    public void choisirRegistrePourSimplifie(String tabKey) {
+        selectRegisterTabByKey(tabKey);
+    }
+
     private void showRegisterFragmentByKey(String tabKey) {
         // ✅ AJOUTÉ (26 août 2026, demande Paul — traçage du scan qui ne se
         // déclenche jamais) — trouvé : ce garde était complètement
