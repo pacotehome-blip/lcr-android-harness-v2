@@ -1866,11 +1866,15 @@ private void setupTabsTop() {
         modeSimplifieApplique = simple;
         int vis = simple ? View.GONE : View.VISIBLE;
         int[] ids = { R.id.headerFilgo, R.id.tabLayout, R.id.txtActiveNode, R.id.tabRegisters,
-                R.id.cbShowLog, R.id.txtVersionBuildMain };
+                R.id.txtVersionBuildMain };
         for (int id : ids) {
             View v = findViewById(id);
             if (v != null) v.setVisibility(vis);
         }
+        // « Afficher log global » : on utilise le champ lié au démarrage (cbShowLog), PAS
+        // findViewById(R.id.cbShowLog) — le layout de l'onglet registre porte le même id et sa
+        // case serait trouvée en premier (c'est pourquoi la case restait visible).
+        if (cbShowLog != null) cbShowLog.setVisibility(vis);
         // Le panneau de log suit la case « Afficher log global » (comme le fait déjà l'app)
         if (logPanel != null) {
             logPanel.setVisibility(simple ? View.GONE : (cbShowLog != null && cbShowLog.isChecked() ? View.VISIBLE : View.GONE));

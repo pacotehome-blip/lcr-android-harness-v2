@@ -478,6 +478,51 @@ final class SimplifiedDriverOverlay {
     // ------------------------------------------------------------------ Admin
 
     private void demanderMotDePasse() {
+        try {
+            demanderMotDePasseMaterial();
+        } catch (Throwable t) {
+            // Filet : si le champ Material (œil) échoue, on bascule sur un champ simple + case « Afficher »
+            Log.e(TAG, "demanderMotDePasse Material ERR → repli champ simple", t);
+            try {
+                demanderMotDePasseSimple();
+            } catch (Throwable t2) {
+                Log.e(TAG, "demanderMotDePasse repli ERR", t2);
+                Toast.makeText(holder.getContext(), "Impossible d’ouvrir la saisie du mot de passe", Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
+    private void demanderMotDePasseSimple() {
+        final Context ctx = holder.getContext();
+        final android.widget.EditText saisie = new android.widget.EditText(ctx);
+        saisie.setHint("Mot de passe");
+        saisie.setSingleLine(true);
+        saisie.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        final android.widget.CheckBox voir = new android.widget.CheckBox(ctx);
+        voir.setText("Afficher le mot de passe");
+        voir.setOnCheckedChangeListener((b, on) -> {
+            saisie.setInputType(InputType.TYPE_CLASS_TEXT
+                    | (on ? InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD : InputType.TYPE_TEXT_VARIATION_PASSWORD));
+            saisie.setSelection(saisie.getText().length());
+        });
+        android.widget.LinearLayout box = new android.widget.LinearLayout(ctx);
+        box.setOrientation(android.widget.LinearLayout.VERTICAL);
+        int pad = (int) (20 * ctx.getResources().getDisplayMetrics().density);
+        box.setPadding(pad, pad / 2, pad, 0);
+        box.addView(saisie);
+        box.addView(voir);
+        new android.app.AlertDialog.Builder(ctx)
+                .setTitle("Accès Admin")
+                .setView(box)
+                .setNegativeButton("Annuler", null)
+                .setPositiveButton("Entrer", (d, w) -> {
+                    if (saisie.getText().toString().equals(SimplifiedConfig.ADMIN_PASSWORD)) adminUnlocked = true;
+                    else Toast.makeText(ctx, "Mot de passe incorrect", Toast.LENGTH_SHORT).show();
+                })
+                .show();
+    }
+
+    private void demanderMotDePasseMaterial() {
         Context ctx = holder.getContext();
         // Saisie masquée, avec un œil à droite du champ pour afficher / cacher le mot de passe
         final TextInputLayout champ = new TextInputLayout(ctx);
