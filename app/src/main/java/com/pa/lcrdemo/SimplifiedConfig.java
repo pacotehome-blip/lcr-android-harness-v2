@@ -33,6 +33,13 @@ final class SimplifiedConfig {
     /** Durée maximale du message vocal, en secondes (valeur proposée : 60). */
     static final int AUDIO_MAX_SECONDS = 60;
 
+    /** Son de l'alerte (bruit de clé qui tapote doucement une vitre, généré par l'app — aucun fichier audio). */
+    public static final boolean SON_ALERTE_ACTIF = true;
+    /** Premier son à l'apparition de la bulle, puis un rappel toutes les N ms tant que le problème dure. */
+    public static final long SON_ALERTE_RAPPEL_MS = 60_000L;
+    /** Volume du son (0.0 – 1.0), appliqué en plus du volume « notifications » de la tablette. */
+    public static final float SON_ALERTE_VOLUME = 0.7f;
+
     static final String OUTLOOK_PACKAGE = "com.microsoft.office.outlook";
     static final String TEAMS_PACKAGE   = "com.microsoft.teams";
 }

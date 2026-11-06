@@ -325,13 +325,14 @@ final class SimplifiedDriverOverlay {
         String cle = coupe ? "COMM" : (!printActif ? "PRINT" : "");
         if (cle.isEmpty()) {          // tout va bien : on range et on remet à zéro
             cacherBulle();
-            cleAlerte = ""; snoozeCle = ""; alerteContexte = "";
+            cleAlerte = ""; snoozeCle = ""; alerteContexte = ""; dernierSonMs = 0L;
             return;
         }
         if (enLivraison) { cacherBulle(); return; }
         if (cle.equals(snoozeCle) && android.os.SystemClock.elapsedRealtime() < snoozeJusquaMs) return;
         if (!cle.equals(cleAlerte)) {
             cleAlerte = cle;
+            dernierSonMs = 0L;
             triageCle = null; triageAction = null; triageNiveau = null; triageDiag = null;
         }
         String titre, action;
@@ -354,6 +355,80 @@ final class SimplifiedDriverOverlay {
         bTitre.setText(titre);
         bAction.setText(action);
         afficherBulle();
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (SimplifiedConfig.SON_ALERTE_ACTIF
+                && (dernierSonMs == 0L || now - dernierSonMs >= SimplifiedConfig.SON_ALERTE_RAPPEL_MS)) {
+            dernierSonMs = now;
+            jouerToc();
+        }
+    }
+
+    // ------------------------------------------------------------------ son : « toc-toc » de clé sur une vitre
+    private long dernierSonMs = 0L;
+    private short[] pcmToc = null;
+
+    /** Fabrique (une fois) deux petits coups secs : bruit très bref + résonances aiguës qui s'éteignent vite. */
+    private short[] fabriquerToc() {
+        final int sr = 22050;
+        final int espace = (int) (0.20f * sr);              // 200 ms entre les deux coups
+        final int duree = (int) (0.14f * sr);               // 140 ms par coup
+        final int total = espace + duree;
+        float[] buf = new float[total];
+        java.util.Random rnd = new java.util.Random(7);
+        double[] freqs = { 2150.0, 3300.0, 5200.0 };
+        double[] gains = { 0.55, 0.35, 0.20 };
+        double[] amorts = { 38.0, 55.0, 80.0 };             // plus c'est grand, plus ça s'éteint vite
+        for (int coup = 0; coup < 2; coup++) {
+            int debut = coup * espace;
+            float force = coup == 0 ? 1.0f : 0.8f;          // le deuxième coup un peu plus léger
+            for (int i = 0; i < duree; i++) {
+                double t = i / (double) sr;
+                double v = 0;
+                for (int k = 0; k < freqs.length; k++) {
+                    v += gains[k] * Math.exp(-amorts[k] * t) * Math.sin(2 * Math.PI * freqs[k] * t);
+                }
+                if (i < (int) (0.003 * sr)) v += (rnd.nextDouble() * 2 - 1) * 0.9 * (1.0 - i / (0.003 * sr)); // « clic » initial
+                int idx = debut + i;
+                if (idx < total) buf[idx] += (float) (v * force);
+            }
+        }
+        float max = 0f;
+        for (float f : buf) max = Math.max(max, Math.abs(f));
+        short[] out = new short[total];
+        float k = max > 0 ? (0.85f * SimplifiedConfig.SON_ALERTE_VOLUME * 32767f) / max : 0f;
+        for (int i = 0; i < total; i++) out[i] = (short) Math.max(-32768, Math.min(32767, buf[i] * k));
+        return out;
+    }
+
+    private void jouerToc() {
+        try {
+            Context ctx = holder.getContext();
+            android.media.AudioManager am = (android.media.AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                if (am.getRingerMode() != android.media.AudioManager.RINGER_MODE_NORMAL) return;   // silencieux / vibreur
+                if (am.getStreamVolume(android.media.AudioManager.STREAM_NOTIFICATION) == 0) return;
+            }
+            if (pcmToc == null) pcmToc = fabriquerToc();
+            final short[] pcm = pcmToc;
+            final android.media.AudioTrack track = new android.media.AudioTrack.Builder()
+                    .setAudioAttributes(new android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build())
+                    .setAudioFormat(new android.media.AudioFormat.Builder()
+                            .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(22050)
+                            .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO)
+                            .build())
+                    .setBufferSizeInBytes(pcm.length * 2)
+                    .setTransferMode(android.media.AudioTrack.MODE_STATIC)
+                    .build();
+            track.write(pcm, 0, pcm.length);
+            track.play();
+            ui.postDelayed(() -> { try { track.release(); } catch (Throwable ignored) { } }, 1500);
+        } catch (Throwable t) {
+            Log.w(TAG, "jouerToc ERR (non-bloquant): " + t.getMessage());
+        }
     }
 
     /** Triage de l'onglet Support (lecture seule du journal) — une fois par épisode d'alerte, en arrière-plan. */
