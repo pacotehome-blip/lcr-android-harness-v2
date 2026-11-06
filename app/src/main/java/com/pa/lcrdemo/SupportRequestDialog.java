@@ -162,6 +162,12 @@ final class SupportRequestDialog {
             }
             col.addView(canaux);
 
+            // Lien SOTI MobiControl (ouvre l'agent de gestion de la tablette)
+            LinearLayout rangeeSoti = new LinearLayout(act);
+            rangeeSoti.setOrientation(LinearLayout.HORIZONTAL);
+            rangeeSoti.addView(boutonCanal("Ouvrir SOTI MobiControl", v -> ouvrirSoti()), paramsCanal(false));
+            col.addView(rangeeSoti);
+
             ScrollView sv = new ScrollView(act);
             sv.addView(col);
 
@@ -290,7 +296,8 @@ final class SupportRequestDialog {
                     final StringBuilder corps = new StringBuilder(contexte);
                     if (!commentaire.isEmpty()) corps.append("\n\nCommentaire :\n").append(commentaire);
                     if (avecAudio) corps.append("\n\n(Message vocal joint)");
-                    final String sujet = "Support Filgo-Registre — WO " + (wo.isEmpty() ? "—" : wo)
+                    final String sujet = "Support Filgo-Registre — " + SimplifiedUiState.nomTablette(act)
+                            + " — WO " + (wo.isEmpty() ? "—" : wo)
                             + " — #" + serie + " Node " + node;
 
                     act.runOnUiThread(() -> lancerPartage(paquet, sujet, corps.toString(), uris));
@@ -323,6 +330,20 @@ final class SupportRequestDialog {
                 } catch (Exception e2) {
                     Toast.makeText(act, "Aucune application disponible pour l’envoi", Toast.LENGTH_LONG).show();
                 }
+            }
+        }
+
+        void ouvrirSoti() {
+            try {
+                Intent i = act.getPackageManager().getLaunchIntentForPackage(SimplifiedConfig.SOTI_PACKAGE);
+                if (i != null) { act.startActivity(i); return; }
+                if (!SimplifiedConfig.SOTI_URL.isEmpty()) {
+                    act.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(SimplifiedConfig.SOTI_URL)));
+                    return;
+                }
+                Toast.makeText(act, "SOTI MobiControl n’est pas installé sur cette tablette", Toast.LENGTH_LONG).show();
+            } catch (Exception e) {
+                Toast.makeText(act, "Impossible d’ouvrir SOTI MobiControl", Toast.LENGTH_SHORT).show();
             }
         }
 

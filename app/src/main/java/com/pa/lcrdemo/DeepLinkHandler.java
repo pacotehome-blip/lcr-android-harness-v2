@@ -4961,6 +4961,15 @@ public class DeepLinkHandler {
     }
 
     private void logError(String serialId, String woNum, String code, String message) {
+        // Écran simplifié : compte les échecs de détection / connexion du registre (trombone d'aide)
+        try {
+            if ("REGISTER_NOT_READY".equals(code) || "MEDIA_NOT_READY".equals(code)
+                    || "BT_CONNECT_ERROR".equals(code) || "REGISTER_INVALID".equals(code)) {
+                SimplifiedUiState.signalerEchecDeepLink(woNum, 1);
+            } else if ("NO_TRANSPORT".equals(code)) {
+                SimplifiedUiState.signalerEchecDeepLink(woNum, SimplifiedConfig.DEEPLINK_ECHECS_AVANT_ALERTE);
+            }
+        } catch (Throwable ignored) {}
         if (deliveryStore == null) return;
         try {
             String errorJson = new JSONObject()
