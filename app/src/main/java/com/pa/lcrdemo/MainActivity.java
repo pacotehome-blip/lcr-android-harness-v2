@@ -5765,6 +5765,9 @@ private void scanUsb() {
     // ✅ Compatibilité Android 9-15 (API 28-35) : finish() et
     // Process.killProcess() sont des API stables depuis l'API 16 — aucune
     // branche SDK_INT nécessaire ici.
+    /** Écran simplifié : le bouton « Quitter » (le bouton Quit de la barre du haut est caché). */
+    public void confirmQuitPourSimplifie() { confirmQuit(); }
+
     private void confirmQuit() {
         new androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Quitter l'application")

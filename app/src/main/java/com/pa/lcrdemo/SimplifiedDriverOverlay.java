@@ -87,7 +87,10 @@ final class SimplifiedDriverOverlay {
     private MaterialCardView sBanner;
     private ProgressBar sProgConn;
     private MaterialButton sBtnTerminer, sBtnAnnuler, sBtnLancer, sBtnRetour, sBtnAdmin;
-    private View sBtnSupport;   // mini flamme (remplace l'ancienne icône trombone)
+    private View sBtnSupport;   // bouton « Support » (trombone) — gardé
+    private FlammeView sMascotte; // mini mascotte à côté : verte, orange seulement en cas d'ERREUR
+    private MaterialButton sBtnQuitter;
+    private boolean erreurActive = false;
 
     private Etat dernierEtat = null;
     private boolean dernierPulseTerminer = false;
@@ -208,23 +211,38 @@ final class SimplifiedDriverOverlay {
         sBtnAnnuler = root.findViewById(R.id.sBtnAnnuler);
         sBtnLancer = root.findViewById(R.id.sBtnLancer);
         sBtnRetour = root.findViewById(R.id.sBtnRetour);
-        // Bouton de support : la trombone est remplacée par une mini flamme Filgo (même emplacement, même clic)
-        View ancienSupport = root.findViewById(R.id.sBtnSupport);
-        FlammeView mini = new FlammeView(ctx);
-        mini.setMini(true);
-        mini.setContentDescription("Demander du support");
-        if (ancienSupport != null && ancienSupport.getParent() instanceof android.view.ViewGroup) {
-            android.view.ViewGroup parent = (android.view.ViewGroup) ancienSupport.getParent();
-            int idx = parent.indexOfChild(ancienSupport);
-            android.view.ViewGroup.LayoutParams nlp = ancienSupport.getLayoutParams();
-            float dpi = ctx.getResources().getDisplayMetrics().density;
-            nlp.width = (int) (48 * dpi);
-            nlp.height = (int) (48 * dpi);
-            parent.removeView(ancienSupport);
-            parent.addView(mini, idx, nlp);
-        }
-        sBtnSupport = mini;
+        sBtnSupport = root.findViewById(R.id.sBtnSupport);
         sBtnAdmin = root.findViewById(R.id.sBtnAdmin);
+        final float dpi = ctx.getResources().getDisplayMetrics().density;
+        // Mascotte (mini flamme) à côté du bouton Support : VERTE ; elle ne change de couleur qu'en cas d'ERREUR
+        sMascotte = new FlammeView(ctx);
+        sMascotte.setMini(true);
+        sMascotte.setErreur(erreurActive);
+        sMascotte.setInquiet(erreurActive);
+        sMascotte.setContentDescription("Assistant Filgo");
+        if (sBtnSupport != null && sBtnSupport.getParent() instanceof android.view.ViewGroup) {
+            android.view.ViewGroup parent = (android.view.ViewGroup) sBtnSupport.getParent();
+            LinearLayout.LayoutParams lpm = new LinearLayout.LayoutParams((int) (48 * dpi), (int) (48 * dpi));
+            lpm.setMargins(0, 0, (int) (6 * dpi), 0);
+            parent.addView(sMascotte, parent.indexOfChild(sBtnSupport), lpm);
+        }
+        // Bouton Quitter (la barre du haut avec Quit est cachée en mode simplifié), après Admin
+        if (sBtnAdmin != null && sBtnAdmin.getParent() instanceof android.view.ViewGroup) {
+            android.view.ViewGroup parent = (android.view.ViewGroup) sBtnAdmin.getParent();
+            sBtnQuitter = new MaterialButton(ctx, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
+            sBtnQuitter.setText("Quitter");
+            sBtnQuitter.setAllCaps(false);
+            sBtnQuitter.setTextColor(Color.WHITE);
+            sBtnQuitter.setTextSize(13f);
+            sBtnQuitter.setInsetTop(0);
+            sBtnQuitter.setInsetBottom(0);
+            sBtnQuitter.setMinWidth(0);
+            sBtnQuitter.setStrokeColor(ColorStateList.valueOf(Color.parseColor("#80FFFFFF")));
+            LinearLayout.LayoutParams lpq = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, (int) (44 * dpi));
+            lpq.setMargins((int) (8 * dpi), 0, 0, 0);
+            parent.addView(sBtnQuitter, parent.indexOfChild(sBtnAdmin) + 1, lpq);
+        }
 
         // Les boutons d'action délèguent aux boutons existants de l'onglet.
         sBtnTerminer.setOnClickListener(v -> cliquer(btnFinish));
@@ -233,6 +251,11 @@ final class SimplifiedDriverOverlay {
         sBtnRetour.setOnClickListener(v -> cliquer(btnRetourWO));
         sPanelWo.setOnClickListener(v -> cliquer(panelWoCumul));
         sBtnSupport.setOnClickListener(v -> { rebondTrombone(); ouvrirSupport(); });
+        sMascotte.setOnClickListener(v -> clicMascotte());
+        if (sBtnQuitter != null) sBtnQuitter.setOnClickListener(v -> {
+            android.app.Activity act = host.getActivity();
+            if (act instanceof MainActivity) ((MainActivity) act).confirmQuitPourSimplifie();
+        });
         sBtnAdmin.setOnClickListener(v -> demanderMotDePasse());
         sTxtRegistre.setOnClickListener(v -> choisirRegistre());
     }
@@ -260,44 +283,69 @@ final class SimplifiedDriverOverlay {
     private volatile String triageNiveau = null;
     private volatile String triageDiag = null;
 
+    private LinearLayout bCarte;           // le message d'erreur (carte blanche) — affiché APRÈS l'explosion
+    private MaterialButton btnReconnecter;
+    private boolean carteVisible = false;
+
     private void construireBulle(Context ctx, FrameLayout wrapper) {
         final float dp = ctx.getResources().getDisplayMetrics().density;
+        // « bulle » = la mascotte seule (sans boîte) ; la carte du message vient en dessous, plus tard
         bulle = new LinearLayout(ctx);
         bulle.setOrientation(LinearLayout.VERTICAL);
+        bulle.setPadding((int) (4 * dp), 0, 0, 0);
+        bFlamme = new FlammeView(ctx);
+        bulle.addView(bFlamme, new LinearLayout.LayoutParams((int) (140 * dp), (int) (140 * dp)));
+
+        bCarte = new LinearLayout(ctx);
+        bCarte.setOrientation(LinearLayout.VERTICAL);
         int pad = (int) (14 * dp);
-        bulle.setPadding(pad, pad, pad, pad / 2);
+        bCarte.setPadding(pad, pad, pad, pad / 2);
         android.graphics.drawable.GradientDrawable fond = new android.graphics.drawable.GradientDrawable();
         fond.setColor(Color.WHITE);
         fond.setCornerRadius(16 * dp);
         fond.setStroke((int) (2 * dp), Color.parseColor("#185FA5"));
-        bulle.setBackground(fond);
-        bulle.setElevation(24f);
+        bCarte.setBackground(fond);
+        bCarte.setElevation(24f);
+        bCarte.setVisibility(View.GONE);
 
-        LinearLayout entete = new LinearLayout(ctx);
-        entete.setOrientation(LinearLayout.HORIZONTAL);
-        entete.setGravity(Gravity.CENTER_VERTICAL);
-        // Mascotte Filgo : une flamme (dessinée au Canvas, aucune image)
-        bFlamme = new FlammeView(ctx);
-        entete.addView(bFlamme, new LinearLayout.LayoutParams((int) (84 * dp), (int) (84 * dp)));
         bTitre = new TextView(ctx);
         bTitre.setTextColor(Color.parseColor("#0B2A4A"));
-        bTitre.setTextSize(17f);
+        bTitre.setTextSize(18f);
         bTitre.setTypeface(null, android.graphics.Typeface.BOLD);
-        LinearLayout.LayoutParams lpt = new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        lpt.setMargins((int) (10 * dp), 0, 0, 0);
-        entete.addView(bTitre, lpt);
-        bulle.addView(entete);
+        bCarte.addView(bTitre);
 
         bAction = new TextView(ctx);
         bAction.setTextColor(Color.parseColor("#33475B"));
         bAction.setTextSize(15f);
-        bAction.setPadding(0, (int) (8 * dp), 0, (int) (8 * dp));
-        bulle.addView(bAction);
+        bAction.setPadding(0, (int) (8 * dp), 0, (int) (10 * dp));
+        bCarte.addView(bAction);
 
-        LinearLayout boutons = new LinearLayout(ctx);
-        boutons.setOrientation(LinearLayout.HORIZONTAL);
-        boutons.setGravity(Gravity.END);
+        // Action principale : Reconnecter (erreur registre) ou Démarrer l'impression (avertissement)
+        LinearLayout principal = new LinearLayout(ctx);
+        principal.setOrientation(LinearLayout.HORIZONTAL);
+        btnReconnecter = new MaterialButton(ctx);
+        btnReconnecter.setText("Reconnecter");
+        btnReconnecter.setAllCaps(false);
+        btnReconnecter.setTextColor(Color.WHITE);
+        btnReconnecter.setBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#185FA5")));
+        btnReconnecter.setVisibility(View.GONE);
+        btnReconnecter.setOnClickListener(v -> reconnecterRegistre());
+        principal.addView(btnReconnecter, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        btnPrint = new MaterialButton(ctx);
+        btnPrint.setText("Démarrer l’impression");
+        btnPrint.setAllCaps(false);
+        btnPrint.setTextColor(Color.WHITE);
+        btnPrint.setBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#185FA5")));
+        btnPrint.setVisibility(View.GONE);
+        btnPrint.setOnClickListener(v -> demarrerServiceImpression());
+        principal.addView(btnPrint, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        bCarte.addView(principal);
+
+        LinearLayout secondaires = new LinearLayout(ctx);
+        secondaires.setOrientation(LinearLayout.HORIZONTAL);
+        secondaires.setGravity(Gravity.END);
         MaterialButton plusTard = new MaterialButton(ctx);
         plusTard.setText("Plus tard");
         plusTard.setAllCaps(false);
@@ -322,33 +370,65 @@ final class SimplifiedDriverOverlay {
         LinearLayout.LayoutParams lpb = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         lpb.setMargins((int) (8 * dp), 0, 0, 0);
-        btnPrint = new MaterialButton(ctx);
-        btnPrint.setText("Démarrer l’impression");
-        btnPrint.setAllCaps(false);
-        btnPrint.setTextColor(Color.WHITE);
-        btnPrint.setBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#185FA5")));
-        btnPrint.setVisibility(View.GONE);
-        btnPrint.setOnClickListener(v -> demarrerServiceImpression());
-        boutons.addView(btnPrint);
-        boutons.addView(plusTard);
-        boutons.addView(contacter, lpb);
-        bulle.addView(boutons);
+        secondaires.addView(plusTard);
+        secondaires.addView(contacter, lpb);
+        bCarte.addView(secondaires);
+        bulle.addView(bCarte, new LinearLayout.LayoutParams((int) Math.min(360 * dp,
+                ctx.getResources().getDisplayMetrics().widthPixels * 0.9f), LinearLayout.LayoutParams.WRAP_CONTENT));
 
-        int largeur = (int) Math.min(360 * dp, ctx.getResources().getDisplayMetrics().widthPixels * 0.9f);
-        FrameLayout.LayoutParams lpBulle = new FrameLayout.LayoutParams(largeur,
-                FrameLayout.LayoutParams.WRAP_CONTENT);
+        FrameLayout.LayoutParams lpBulle = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
         lpBulle.gravity = Gravity.TOP | Gravity.START;
-        lpBulle.setMargins((int) (12 * dp), (int) (84 * dp), 0, 0);
+        lpBulle.setMargins((int) (12 * dp), (int) (76 * dp), 0, 0);
         bulle.setVisibility(View.GONE);
         wrapper.addView(bulle, lpBulle);
+    }
+
+    /** Même geste que le long press « Reconnect » d'un onglet de registre. */
+    private void reconnecterRegistre() {
+        try {
+            snoozeCle = cleAlerte;
+            snoozeJusquaMs = android.os.SystemClock.elapsedRealtime() + 60_000L;   // laisse 60 s à la reconnexion
+            cacherBulle();
+            Toast.makeText(holder.getContext(), "Reconnexion au registre…", Toast.LENGTH_SHORT).show();
+            host.reconnectFromDialog();
+        } catch (Throwable t) {
+            Log.e(TAG, "reconnecterRegistre ERR", t);
+            Toast.makeText(holder.getContext(), "Impossible de relancer la reconnexion", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** Toucher la mascotte : réaffiche l'erreur en cours, sinon ouvre la demande de support. */
+    private void clicMascotte() {
+        if (!cleAlerte.isEmpty() && !bulleVisible) {
+            snoozeCle = ""; snoozeJusquaMs = 0L;
+            afficherBulle();
+            montrerCarte(true);
+        } else if (cleAlerte.isEmpty()) {
+            ouvrirSupport();
+        }
+    }
+
+    private void montrerCarte(boolean voir) {
+        if (bCarte == null || carteVisible == voir) return;
+        carteVisible = voir;
+        if (!voir) { bCarte.setVisibility(View.GONE); return; }
+        bCarte.setVisibility(View.VISIBLE);
+        if (!ValueAnimator.areAnimatorsEnabled()) return;
+        bCarte.setAlpha(0f);
+        bCarte.setTranslationY(-12 * bCarte.getResources().getDisplayMetrics().density);
+        bCarte.animate().alpha(1f).translationY(0f).setDuration(280).start();
     }
 
     private void gererAssistant(boolean coupe, boolean echecDeepLink, Etat etat) {
         if (bulle == null) return;
         boolean enLivraison = etat == Etat.DEBIT || etat == Etat.CONFIRM
                 || etat == Etat.PAUSE || etat == Etat.ENDING;
+        // ERREUR = communication perdue ou registre introuvable ; AVERTISSEMENT = impression (mascotte reste verte)
+        boolean erreur = coupe || echecDeepLink;
         String cle = coupe ? "COMM" : (echecDeepLink ? "DEEPLINK" : (!printActif ? "PRINT" : ""));
-        if (sBtnSupport instanceof FlammeView) ((FlammeView) sBtnSupport).setInquiet(!cle.isEmpty());
+        erreurActive = erreur;
+        if (sMascotte != null) { sMascotte.setErreur(erreur); sMascotte.setInquiet(erreur); }
         if (cle.isEmpty()) {          // tout va bien : on range et on remet à zéro
             cacherBulle();
             cleAlerte = ""; snoozeCle = ""; alerteContexte = ""; dernierSonMs = 0L;
@@ -367,14 +447,14 @@ final class SimplifiedDriverOverlay {
             titre = "Communication perdue avec le registre";
             String a = cle.equals(triageCle) ? triageAction : null;
             action = (a != null && !a.trim().isEmpty()) ? a.trim()
-                    : "Vérifiez le câble ou la connexion du registre, puis touchez Status. Sinon, contactez le support.";
+                    : "Touchez Reconnecter. Si le problème continue, vérifiez le câble ou le Bluetooth du registre, puis contactez le support.";
         } else if ("DEEPLINK".equals(cle)) {
             titre = "Registre introuvable";
-            action = "Le registre n’a pas répondu après plusieurs essais. Branchez le câble USB-C ou activez le "
-                    + "Bluetooth du registre, puis relancez depuis Field Service. Sinon, contactez le support.";
+            action = "Le registre n’a pas répondu après plusieurs essais. Touchez Reconnecter, ou branchez le câble USB-C / "
+                    + "activez le Bluetooth du registre. Sinon, contactez le support.";
         } else {
             titre = "Impression indisponible";
-            action = "Le service d’impression ne répond pas. Redémarrez la tablette ou contactez le support.";
+            action = "Le service d’impression ne répond pas. Touchez Démarrer l’impression, ou redémarrez la tablette.";
         }
         StringBuilder ctxA = new StringBuilder(titre).append(" — ").append(action);
         String niv = cle.equals(triageCle) ? triageNiveau : null;
@@ -384,26 +464,37 @@ final class SimplifiedDriverOverlay {
         alerteContexte = ctxA.toString();
         bTitre.setText(titre);
         bAction.setText(action);
+        if (btnReconnecter != null) btnReconnecter.setVisibility(erreur ? View.VISIBLE : View.GONE);
         if (btnPrint != null) btnPrint.setVisibility("PRINT".equals(cle) ? View.VISIBLE : View.GONE);
+        bFlamme.setVisibility(erreur ? View.VISIBLE : View.GONE);
         boolean nouvelle = !bulleVisible;
         afficherBulle();
+        if (!erreur) {                 // simple avertissement : carte directe, sans mascotte, sans son
+            montrerCarte(true);
+            return;
+        }
         long now = android.os.SystemClock.elapsedRealtime();
         if (dernierSonMs == 0L || now - dernierSonMs >= SimplifiedConfig.SON_ALERTE_RAPPEL_MS) {
             dernierSonMs = now;
-            // Laisse la bulle finir son entrée (500 ms) avant de « cogner »
+            // Laisse la mascotte finir son entrée (500 ms) avant de « cogner »
             final long delai = nouvelle && ValueAnimator.areAnimatorsEnabled() ? 550L : 0L;
-            ui.postDelayed(this::cognerEcran, delai);
+            final boolean premiere = nouvelle;
+            ui.postDelayed(() -> cognerEcran(premiere), delai);
         }
     }
 
-    // ------------------------------------------------------------------ la flamme explose
-    /** La flamme cogne deux fois dans la vitre (toc-toc), puis explose en étincelles et se reforme inquiète. */
-    private void cognerEcran() {
+    // ------------------------------------------------------------------ la mascotte cogne, explose, puis l'erreur s'affiche
+    /** Elle cogne deux fois dans la vitre (toc-toc), explose en étincelles, se reforme inquiète ; ENSUITE la carte d'erreur apparaît. */
+    private void cognerEcran(final boolean premiere) {
         if (bFlamme == null || !bulleVisible) return;
+        if (premiere) montrerCarte(false);          // première fois : le message n'apparaît qu'après l'explosion
         bFlamme.setInquiet(false);
         final boolean anime = ValueAnimator.areAnimatorsEnabled();
-        bFlamme.cogner(() -> { if (bFlamme != null && bulleVisible) bFlamme.exploser(); });
-        // Le son (deux petits coups espacés de 200 ms) démarre au premier coup de la flamme
+        bFlamme.cogner(() -> {
+            if (bFlamme == null || !bulleVisible) return;
+            bFlamme.exploser(() -> { if (bulleVisible) montrerCarte(true); });
+        });
+        // Le son (deux petits coups espacés de 200 ms) démarre au premier coup de la mascotte
         if (SimplifiedConfig.SON_ALERTE_ACTIF) ui.postDelayed(this::jouerToc, anime ? FlammeView.COUP1_MS : 0L);
     }
 
@@ -560,6 +651,8 @@ final class SimplifiedDriverOverlay {
     private void cacherBulle() {
         if (bulle == null || !bulleVisible) return;
         bulleVisible = false;
+        carteVisible = false;
+        if (bCarte != null) bCarte.setVisibility(View.GONE);
         if (!ValueAnimator.areAnimatorsEnabled()) { bulle.setVisibility(View.GONE); return; }
         float dp = bulle.getResources().getDisplayMetrics().density;
         bulle.animate().alpha(0f).scaleX(0.2f).scaleY(0.2f).translationX(-40 * dp).translationY(-70 * dp)
@@ -594,13 +687,13 @@ final class SimplifiedDriverOverlay {
     }
 
     private void balancerTrombone() {
-        if (sBtnSupport == null || !ValueAnimator.areAnimatorsEnabled()) return;
+        if (sMascotte == null || !ValueAnimator.areAnimatorsEnabled()) return;
         long now = android.os.SystemClock.elapsedRealtime();
         if (now - dernierBalanceMs < TROMBONE_PERIODE_MS) return;
         dernierBalanceMs = now;
-        sBtnSupport.setPivotX(sBtnSupport.getWidth() / 2f);
-        sBtnSupport.setPivotY(sBtnSupport.getHeight() * 0.9f);
-        ObjectAnimator a = ObjectAnimator.ofFloat(sBtnSupport, View.ROTATION, 0f, -16f, 14f, -10f, 8f, -4f, 0f);
+        sMascotte.setPivotX(sMascotte.getWidth() / 2f);
+        sMascotte.setPivotY(sMascotte.getHeight() * 0.9f);
+        ObjectAnimator a = ObjectAnimator.ofFloat(sMascotte, View.ROTATION, 0f, -16f, 14f, -10f, 8f, -4f, 0f);
         a.setDuration(900);
         a.start();
     }
@@ -699,7 +792,7 @@ final class SimplifiedDriverOverlay {
         }
         boolean echecDeepLink = !coupe
                 && SimplifiedUiState.getEchecsDeepLink(woCourant()) >= SimplifiedConfig.DEEPLINK_ECHECS_AVANT_ALERTE;
-        if (coupe || echecDeepLink || !printActif) balancerTrombone();
+        if (coupe || echecDeepLink) balancerTrombone();
         gererAssistant(coupe, echecDeepLink, etat);
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION
                 ? (coupe ? "Reconnexion au registre nécessaire" : "Connexion en cours…")

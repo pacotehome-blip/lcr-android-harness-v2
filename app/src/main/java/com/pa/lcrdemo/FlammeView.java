@@ -31,6 +31,7 @@ final class FlammeView extends View {
     private final RectF rect = new RectF();
 
     private boolean inquiet = false;
+    private boolean erreur = true;         // true = flamme orange (erreur) ; false = verte (tout va bien)
     private boolean mini = false;           // version « icône » : visage seul, sans bras ni jambes
     private float explosion = -1f;          // -1 = au repos, 0..1 = en cours
     private ValueAnimator anim;
@@ -60,6 +61,14 @@ final class FlammeView extends View {
         pMembre.setStyle(Paint.Style.STROKE);
         pMembre.setStrokeCap(Paint.Cap.ROUND);
         pMain.setColor(Color.parseColor("#FFC93C"));
+    }
+
+    /** Palette : orange = erreur, verte = tout va bien (mascotte à côté du bouton Support). */
+    void setErreur(boolean e) {
+        erreur = e;
+        pExt.setColor(Color.parseColor(e ? "#FF7A1A" : "#1E9E6A"));
+        pInt.setColor(Color.parseColor(e ? "#FFC93C" : "#9BE3BC"));
+        invalidate();
     }
 
     /** Version icône (bouton de support) : la flamme remplit la vue, sans bras ni jambes. */
@@ -133,19 +142,26 @@ final class FlammeView extends View {
     }
 
     /** La flamme gonfle, éclate en étincelles, puis se reforme (inquiète). */
-    void exploser() {
+    void exploser() { exploser(null); }
+
+    /** Idem, et appelle fin quand la flamme s'est reformée. */
+    void exploser(final Runnable fin) {
         if (anim != null) anim.cancel();
         if (animCogne != null) animCogne.cancel();
         inquiet = true;
         majSalut();
-        if (!ValueAnimator.areAnimatorsEnabled()) { explosion = -1f; invalidate(); return; }
+        if (!ValueAnimator.areAnimatorsEnabled()) { explosion = -1f; invalidate(); if (fin != null) fin.run(); return; }
         anim = ValueAnimator.ofFloat(0f, 1f);
         anim.setDuration(900);
         anim.setInterpolator(new LinearInterpolator());
         anim.addUpdateListener(a -> { explosion = (float) a.getAnimatedValue(); invalidate(); });
         anim.addListener(new android.animation.AnimatorListenerAdapter() {
-            @Override public void onAnimationEnd(android.animation.Animator animation) { explosion = -1f; invalidate(); }
-            @Override public void onAnimationCancel(android.animation.Animator animation) { explosion = -1f; }
+            private boolean annule = false;
+            @Override public void onAnimationEnd(android.animation.Animator animation) {
+                explosion = -1f; invalidate();
+                if (!annule && fin != null) fin.run();
+            }
+            @Override public void onAnimationCancel(android.animation.Animator animation) { annule = true; explosion = -1f; }
         });
         anim.start();
     }
