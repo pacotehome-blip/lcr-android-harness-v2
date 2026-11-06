@@ -230,6 +230,7 @@ final class SimplifiedDriverOverlay {
     private static final long SNOOZE_MS = 10 * 60 * 1000L;
     private LinearLayout bulle;
     private TextView bTitre, bAction;
+    private android.widget.ImageView bIcone;
     private boolean bulleVisible = false;
     private String cleAlerte = "";
     private String snoozeCle = "";
@@ -257,11 +258,12 @@ final class SimplifiedDriverOverlay {
         LinearLayout entete = new LinearLayout(ctx);
         entete.setOrientation(LinearLayout.HORIZONTAL);
         entete.setGravity(Gravity.CENTER_VERTICAL);
-        android.widget.ImageView icone = new android.widget.ImageView(ctx);
+        final android.widget.ImageView icone = new android.widget.ImageView(ctx);
+        bIcone = icone;
         icone.setImageResource(R.drawable.ic_attach);
         icone.setColorFilter(Color.parseColor("#024B3C"));
         icone.setRotation(-20f);
-        entete.addView(icone, new LinearLayout.LayoutParams((int) (30 * dp), (int) (30 * dp)));
+        entete.addView(icone, new LinearLayout.LayoutParams((int) (36 * dp), (int) (36 * dp)));
         bTitre = new TextView(ctx);
         bTitre.setTextColor(Color.parseColor("#0B2A4A"));
         bTitre.setTextSize(17f);
@@ -354,13 +356,45 @@ final class SimplifiedDriverOverlay {
         alerteContexte = ctxA.toString();
         bTitre.setText(titre);
         bAction.setText(action);
+        boolean nouvelle = !bulleVisible;
         afficherBulle();
         long now = android.os.SystemClock.elapsedRealtime();
-        if (SimplifiedConfig.SON_ALERTE_ACTIF
-                && (dernierSonMs == 0L || now - dernierSonMs >= SimplifiedConfig.SON_ALERTE_RAPPEL_MS)) {
+        if (dernierSonMs == 0L || now - dernierSonMs >= SimplifiedConfig.SON_ALERTE_RAPPEL_MS) {
             dernierSonMs = now;
-            jouerToc();
+            // Laisse la bulle finir son entrée (500 ms) avant de « cogner »
+            final long delai = nouvelle && ValueAnimator.areAnimatorsEnabled() ? 550L : 0L;
+            ui.postDelayed(this::cognerEcran, delai);
         }
+    }
+
+    // ------------------------------------------------------------------ la trombone cogne l'écran
+    /** La trombone se recule, puis frappe l'écran avec le bout de sa queue — deux coups, synchronisés avec le son. */
+    private void cognerEcran() {
+        if (bIcone == null || !bulleVisible) return;
+        if (!ValueAnimator.areAnimatorsEnabled()) {
+            if (SimplifiedConfig.SON_ALERTE_ACTIF) jouerToc();
+            return;
+        }
+        final float repos = -20f;
+        bIcone.setPivotX(bIcone.getWidth() / 2f);
+        bIcone.setPivotY(bIcone.getHeight() * 0.95f);          // la rotation part du bout de la queue
+        ObjectAnimator recul1 = ObjectAnimator.ofFloat(bIcone, View.ROTATION, repos, -48f);
+        recul1.setDuration(180);
+        recul1.setInterpolator(new android.view.animation.DecelerateInterpolator());
+        ObjectAnimator coup1 = ObjectAnimator.ofFloat(bIcone, View.ROTATION, -48f, repos);
+        coup1.setDuration(60);
+        coup1.setInterpolator(new android.view.animation.AccelerateInterpolator());
+        ObjectAnimator recul2 = ObjectAnimator.ofFloat(bIcone, View.ROTATION, repos, -38f);
+        recul2.setDuration(140);
+        recul2.setInterpolator(new android.view.animation.DecelerateInterpolator());
+        ObjectAnimator coup2 = ObjectAnimator.ofFloat(bIcone, View.ROTATION, -38f, repos);
+        coup2.setDuration(60);
+        coup2.setInterpolator(new android.view.animation.AccelerateInterpolator());
+        android.animation.AnimatorSet seq = new android.animation.AnimatorSet();
+        seq.playSequentially(recul1, coup1, recul2, coup2);
+        seq.start();
+        // Impacts à 240 ms et 440 ms : le son (deux coups espacés de 200 ms) démarre au premier impact
+        if (SimplifiedConfig.SON_ALERTE_ACTIF) ui.postDelayed(this::jouerToc, 240L);
     }
 
     // ------------------------------------------------------------------ son : « toc-toc » de clé sur une vitre
