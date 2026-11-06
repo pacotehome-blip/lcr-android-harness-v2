@@ -17,6 +17,7 @@ import android.view.View;
 import android.view.animation.LinearInterpolator;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -26,6 +27,9 @@ import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.textfield.TextInputEditText;
 import com.google.android.material.textfield.TextInputLayout;
+
+import com.pa.lcr.lcp.diagnostic.DiagnosticMatch;
+import com.pa.lcr.lcp.diagnostic.SupportTriageEngine;
 
 import java.util.Locale;
 import java.util.regex.Matcher;
@@ -143,6 +147,7 @@ final class SimplifiedDriverOverlay {
         int m = (int) (8 * ctx.getResources().getDisplayMetrics().density);
         lp.setMargins(m, m, m, m);
         wrapper.addView(btnRetourSimple, lp);
+        construireBulle(ctx, wrapper);
 
         holder.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override public void onViewAttachedToWindow(View v) { start(); }
@@ -213,6 +218,197 @@ final class SimplifiedDriverOverlay {
         sBtnSupport.setOnClickListener(v -> { rebondTrombone(); ouvrirSupport(); });
         sBtnAdmin.setOnClickListener(v -> demanderMotDePasse());
         sTxtRegistre.setOnClickListener(v -> choisirRegistre());
+    }
+
+
+    // ------------------------------------------------------------------ assistant (trombone + bulle)
+    // Quand le registre est déconnecté OU que le service d'impression ne répond pas, la trombone
+    // « sort » du logo Filgo avec une bulle : titre du problème + action recommandée (diagnostic des
+    // règles de l'onglet Support : SupportTriageEngine) + « Contacter le support » / « Plus tard ».
+    // Jamais pendant une livraison (débit / pause / fin) ; « Plus tard » = silence 10 min pour ce problème.
+
+    private static final long SNOOZE_MS = 10 * 60 * 1000L;
+    private LinearLayout bulle;
+    private TextView bTitre, bAction;
+    private boolean bulleVisible = false;
+    private String cleAlerte = "";
+    private String snoozeCle = "";
+    private long snoozeJusquaMs = 0L;
+    private String alerteContexte = "";
+    private volatile boolean triageEnCours = false;
+    private volatile String triageCle = null;
+    private volatile String triageAction = null;
+    private volatile String triageNiveau = null;
+    private volatile String triageDiag = null;
+
+    private void construireBulle(Context ctx, FrameLayout wrapper) {
+        final float dp = ctx.getResources().getDisplayMetrics().density;
+        bulle = new LinearLayout(ctx);
+        bulle.setOrientation(LinearLayout.VERTICAL);
+        int pad = (int) (14 * dp);
+        bulle.setPadding(pad, pad, pad, pad / 2);
+        android.graphics.drawable.GradientDrawable fond = new android.graphics.drawable.GradientDrawable();
+        fond.setColor(Color.WHITE);
+        fond.setCornerRadius(16 * dp);
+        fond.setStroke((int) (2 * dp), Color.parseColor("#185FA5"));
+        bulle.setBackground(fond);
+        bulle.setElevation(24f);
+
+        LinearLayout entete = new LinearLayout(ctx);
+        entete.setOrientation(LinearLayout.HORIZONTAL);
+        entete.setGravity(Gravity.CENTER_VERTICAL);
+        android.widget.ImageView icone = new android.widget.ImageView(ctx);
+        icone.setImageResource(R.drawable.ic_attach);
+        icone.setColorFilter(Color.parseColor("#024B3C"));
+        icone.setRotation(-20f);
+        entete.addView(icone, new LinearLayout.LayoutParams((int) (30 * dp), (int) (30 * dp)));
+        bTitre = new TextView(ctx);
+        bTitre.setTextColor(Color.parseColor("#0B2A4A"));
+        bTitre.setTextSize(17f);
+        bTitre.setTypeface(null, android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams lpt = new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        lpt.setMargins((int) (10 * dp), 0, 0, 0);
+        entete.addView(bTitre, lpt);
+        bulle.addView(entete);
+
+        bAction = new TextView(ctx);
+        bAction.setTextColor(Color.parseColor("#33475B"));
+        bAction.setTextSize(15f);
+        bAction.setPadding(0, (int) (8 * dp), 0, (int) (8 * dp));
+        bulle.addView(bAction);
+
+        LinearLayout boutons = new LinearLayout(ctx);
+        boutons.setOrientation(LinearLayout.HORIZONTAL);
+        boutons.setGravity(Gravity.END);
+        MaterialButton plusTard = new MaterialButton(ctx);
+        plusTard.setText("Plus tard");
+        plusTard.setAllCaps(false);
+        plusTard.setTextColor(Color.parseColor("#0B2A4A"));
+        plusTard.setBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#E6EEF5")));
+        plusTard.setOnClickListener(v -> {
+            snoozeCle = cleAlerte;
+            snoozeJusquaMs = android.os.SystemClock.elapsedRealtime() + SNOOZE_MS;
+            cacherBulle();
+        });
+        MaterialButton contacter = new MaterialButton(ctx);
+        contacter.setText("Contacter le support");
+        contacter.setAllCaps(false);
+        contacter.setTextColor(Color.WHITE);
+        contacter.setBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#024B3C")));
+        contacter.setOnClickListener(v -> {
+            snoozeCle = cleAlerte;
+            snoozeJusquaMs = android.os.SystemClock.elapsedRealtime() + SNOOZE_MS;
+            cacherBulle();
+            ouvrirSupport();
+        });
+        LinearLayout.LayoutParams lpb = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lpb.setMargins((int) (8 * dp), 0, 0, 0);
+        boutons.addView(plusTard);
+        boutons.addView(contacter, lpb);
+        bulle.addView(boutons);
+
+        int largeur = (int) Math.min(360 * dp, ctx.getResources().getDisplayMetrics().widthPixels * 0.9f);
+        FrameLayout.LayoutParams lpBulle = new FrameLayout.LayoutParams(largeur,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        lpBulle.gravity = Gravity.TOP | Gravity.START;
+        lpBulle.setMargins((int) (12 * dp), (int) (84 * dp), 0, 0);
+        bulle.setVisibility(View.GONE);
+        wrapper.addView(bulle, lpBulle);
+    }
+
+    private void gererAssistant(boolean coupe, Etat etat) {
+        if (bulle == null) return;
+        boolean enLivraison = etat == Etat.DEBIT || etat == Etat.CONFIRM
+                || etat == Etat.PAUSE || etat == Etat.ENDING;
+        String cle = coupe ? "COMM" : (!printActif ? "PRINT" : "");
+        if (cle.isEmpty()) {          // tout va bien : on range et on remet à zéro
+            cacherBulle();
+            cleAlerte = ""; snoozeCle = ""; alerteContexte = "";
+            return;
+        }
+        if (enLivraison) { cacherBulle(); return; }
+        if (cle.equals(snoozeCle) && android.os.SystemClock.elapsedRealtime() < snoozeJusquaMs) return;
+        if (!cle.equals(cleAlerte)) {
+            cleAlerte = cle;
+            triageCle = null; triageAction = null; triageNiveau = null; triageDiag = null;
+        }
+        String titre, action;
+        if ("COMM".equals(cle)) {
+            lancerTriage(cle);
+            titre = "Communication perdue avec le registre";
+            String a = cle.equals(triageCle) ? triageAction : null;
+            action = (a != null && !a.trim().isEmpty()) ? a.trim()
+                    : "Vérifiez le câble ou la connexion du registre, puis touchez Status. Sinon, contactez le support.";
+        } else {
+            titre = "Impression indisponible";
+            action = "Le service d’impression ne répond pas. Redémarrez la tablette ou contactez le support.";
+        }
+        StringBuilder ctxA = new StringBuilder(titre).append(" — ").append(action);
+        String niv = cle.equals(triageCle) ? triageNiveau : null;
+        if (niv != null && !niv.isEmpty()) ctxA.append(" [").append(niv).append(']');
+        String diag = cle.equals(triageCle) ? triageDiag : null;
+        if (diag != null && !diag.trim().isEmpty()) ctxA.append(" | Diagnostic : ").append(diag.trim());
+        alerteContexte = ctxA.toString();
+        bTitre.setText(titre);
+        bAction.setText(action);
+        afficherBulle();
+    }
+
+    /** Triage de l'onglet Support (lecture seule du journal) — une fois par épisode d'alerte, en arrière-plan. */
+    private void lancerTriage(final String cle) {
+        if (triageEnCours || cle.equals(triageCle)) return;
+        triageEnCours = true;
+        final Context app = holder.getContext().getApplicationContext();
+        String t = apresDeuxPoints(txtTicketNo);
+        final String ticket = "—".equals(t) ? "" : t;
+        String n = apresDeuxPoints(txtLcrNode);
+        final String node = "—".equals(n) ? "" : n;
+        new Thread(() -> {
+            String action = null, niveau = null, diag = null;
+            try {
+                SupportTriageEngine.TriageResult r = SupportTriageEngine.computeTriage(app, ticket, node);
+                DiagnosticMatch meilleur = null;
+                for (DiagnosticMatch m : r.matches) {
+                    if (meilleur == null || (m.supportLevel != null && meilleur.supportLevel != null
+                            && m.supportLevel.compareTo(meilleur.supportLevel) > 0)) meilleur = m;
+                }
+                niveau = r.supportLevel;
+                if (meilleur != null) { action = meilleur.recommendedAction; diag = meilleur.diagnostic; }
+            } catch (Throwable ignored) {
+            }
+            triageAction = action; triageNiveau = niveau; triageDiag = diag;
+            triageCle = cle;
+            triageEnCours = false;
+        }, "simplifie-triage").start();
+    }
+
+    private void afficherBulle() {
+        if (bulle == null || bulleVisible) return;
+        bulleVisible = true;
+        bulle.setVisibility(View.VISIBLE);
+        if (!ValueAnimator.areAnimatorsEnabled()) return;
+        // Sort du logo Filgo (coin haut-gauche) : petit, décalé vers le logo, puis grandit avec un rebond
+        float dp = bulle.getResources().getDisplayMetrics().density;
+        bulle.setPivotX(0f);
+        bulle.setPivotY(0f);
+        bulle.setAlpha(0f);
+        bulle.setScaleX(0.2f);
+        bulle.setScaleY(0.2f);
+        bulle.setTranslationX(-40 * dp);
+        bulle.setTranslationY(-70 * dp);
+        bulle.animate().alpha(1f).scaleX(1f).scaleY(1f).translationX(0f).translationY(0f)
+                .setDuration(500).setInterpolator(new android.view.animation.OvershootInterpolator(1.1f)).start();
+    }
+
+    private void cacherBulle() {
+        if (bulle == null || !bulleVisible) return;
+        bulleVisible = false;
+        if (!ValueAnimator.areAnimatorsEnabled()) { bulle.setVisibility(View.GONE); return; }
+        float dp = bulle.getResources().getDisplayMetrics().density;
+        bulle.animate().alpha(0f).scaleX(0.2f).scaleY(0.2f).translationX(-40 * dp).translationY(-70 * dp)
+                .setDuration(300).withEndAction(() -> { if (!bulleVisible) bulle.setVisibility(View.GONE); }).start();
     }
 
     // ------------------------------------------------------------------ trombone animée
@@ -323,7 +519,7 @@ final class SimplifiedDriverOverlay {
         if (act instanceof MainActivity) ((MainActivity) act).appliquerModeSimplifie(!admin);
         holder.setVisibility(admin ? View.GONE : View.VISIBLE);
         btnRetourSimple.setVisibility(admin ? View.VISIBLE : View.GONE);
-        if (admin) { arreterAnimations(); dernierEtat = null; return; }
+        if (admin) { arreterAnimations(); dernierEtat = null; cacherBulle(); return; }
 
         String live = txt(txtLive).toUpperCase(Locale.ROOT);
         double net = nombre(txtQtyNet);
@@ -342,6 +538,7 @@ final class SimplifiedDriverOverlay {
         // d'impression (127.0.0.1:9182) ne répond pas. Immobile sinon.
         sonderServiceImpression();
         if (coupe || !printActif) balancerTrombone();
+        gererAssistant(coupe, etat);
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION
                 ? (coupe ? "Reconnexion au registre nécessaire" : "Connexion en cours…")
                 : "Connecté");
@@ -689,6 +886,7 @@ final class SimplifiedDriverOverlay {
             if (!fs.isEmpty()) sb.append("Produit (FieldService) : ").append(fs).append('\n');
             sb.append("Net : ").append(txt(txtQtyNet)).append(" · ").append(txt(txtQtyGross)).append('\n');
             sb.append("Live : ").append(txt(txtLive));
+            if (!alerteContexte.isEmpty()) sb.append('\n').append("Alerte : ").append(alerteContexte);
             SupportRequestDialog.show(host.requireActivity(), sb.toString(), serie, node, wo,
                     host::demanderMicroPourSimplifie);
         } catch (Exception e) {
