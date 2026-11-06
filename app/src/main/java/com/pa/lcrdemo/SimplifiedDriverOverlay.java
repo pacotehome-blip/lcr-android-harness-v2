@@ -5,6 +5,7 @@ import android.animation.ObjectAnimator;
 import android.animation.PropertyValuesHolder;
 import android.animation.ValueAnimator;
 import android.content.Context;
+import android.content.Intent;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.os.Handler;
@@ -230,7 +231,8 @@ final class SimplifiedDriverOverlay {
     private static final long SNOOZE_MS = 10 * 60 * 1000L;
     private LinearLayout bulle;
     private TextView bTitre, bAction;
-    private android.widget.ImageView bIcone;
+    private FlammeView bFlamme;
+    private MaterialButton btnPrint;
     private boolean bulleVisible = false;
     private String cleAlerte = "";
     private String snoozeCle = "";
@@ -258,12 +260,9 @@ final class SimplifiedDriverOverlay {
         LinearLayout entete = new LinearLayout(ctx);
         entete.setOrientation(LinearLayout.HORIZONTAL);
         entete.setGravity(Gravity.CENTER_VERTICAL);
-        final android.widget.ImageView icone = new android.widget.ImageView(ctx);
-        bIcone = icone;
-        icone.setImageResource(R.drawable.ic_attach);
-        icone.setColorFilter(Color.parseColor("#024B3C"));
-        icone.setRotation(-20f);
-        entete.addView(icone, new LinearLayout.LayoutParams((int) (36 * dp), (int) (36 * dp)));
+        // Mascotte Filgo : une flamme (dessinée au Canvas, aucune image)
+        bFlamme = new FlammeView(ctx);
+        entete.addView(bFlamme, new LinearLayout.LayoutParams((int) (84 * dp), (int) (84 * dp)));
         bTitre = new TextView(ctx);
         bTitre.setTextColor(Color.parseColor("#0B2A4A"));
         bTitre.setTextSize(17f);
@@ -307,6 +306,14 @@ final class SimplifiedDriverOverlay {
         LinearLayout.LayoutParams lpb = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         lpb.setMargins((int) (8 * dp), 0, 0, 0);
+        btnPrint = new MaterialButton(ctx);
+        btnPrint.setText("Démarrer l’impression");
+        btnPrint.setAllCaps(false);
+        btnPrint.setTextColor(Color.WHITE);
+        btnPrint.setBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#185FA5")));
+        btnPrint.setVisibility(View.GONE);
+        btnPrint.setOnClickListener(v -> demarrerServiceImpression());
+        boutons.addView(btnPrint);
         boutons.addView(plusTard);
         boutons.addView(contacter, lpb);
         bulle.addView(boutons);
@@ -320,11 +327,11 @@ final class SimplifiedDriverOverlay {
         wrapper.addView(bulle, lpBulle);
     }
 
-    private void gererAssistant(boolean coupe, Etat etat) {
+    private void gererAssistant(boolean coupe, boolean echecDeepLink, Etat etat) {
         if (bulle == null) return;
         boolean enLivraison = etat == Etat.DEBIT || etat == Etat.CONFIRM
                 || etat == Etat.PAUSE || etat == Etat.ENDING;
-        String cle = coupe ? "COMM" : (!printActif ? "PRINT" : "");
+        String cle = coupe ? "COMM" : (echecDeepLink ? "DEEPLINK" : (!printActif ? "PRINT" : ""));
         if (cle.isEmpty()) {          // tout va bien : on range et on remet à zéro
             cacherBulle();
             cleAlerte = ""; snoozeCle = ""; alerteContexte = ""; dernierSonMs = 0L;
@@ -344,6 +351,10 @@ final class SimplifiedDriverOverlay {
             String a = cle.equals(triageCle) ? triageAction : null;
             action = (a != null && !a.trim().isEmpty()) ? a.trim()
                     : "Vérifiez le câble ou la connexion du registre, puis touchez Status. Sinon, contactez le support.";
+        } else if ("DEEPLINK".equals(cle)) {
+            titre = "Registre introuvable";
+            action = "Le registre n’a pas répondu après plusieurs essais. Branchez le câble USB-C ou activez le "
+                    + "Bluetooth du registre, puis relancez depuis Field Service. Sinon, contactez le support.";
         } else {
             titre = "Impression indisponible";
             action = "Le service d’impression ne répond pas. Redémarrez la tablette ou contactez le support.";
@@ -356,6 +367,7 @@ final class SimplifiedDriverOverlay {
         alerteContexte = ctxA.toString();
         bTitre.setText(titre);
         bAction.setText(action);
+        if (btnPrint != null) btnPrint.setVisibility("PRINT".equals(cle) ? View.VISIBLE : View.GONE);
         boolean nouvelle = !bulleVisible;
         afficherBulle();
         long now = android.os.SystemClock.elapsedRealtime();
@@ -367,34 +379,13 @@ final class SimplifiedDriverOverlay {
         }
     }
 
-    // ------------------------------------------------------------------ la trombone cogne l'écran
-    /** La trombone se recule, puis frappe l'écran avec le bout de sa queue — deux coups, synchronisés avec le son. */
+    // ------------------------------------------------------------------ la flamme explose
+    /** La flamme gonfle, éclate en étincelles puis se reforme inquiète ; le son accompagne l'éclatement. */
     private void cognerEcran() {
-        if (bIcone == null || !bulleVisible) return;
-        if (!ValueAnimator.areAnimatorsEnabled()) {
-            if (SimplifiedConfig.SON_ALERTE_ACTIF) jouerToc();
-            return;
-        }
-        final float repos = -20f;
-        bIcone.setPivotX(bIcone.getWidth() / 2f);
-        bIcone.setPivotY(bIcone.getHeight() * 0.95f);          // la rotation part du bout de la queue
-        ObjectAnimator recul1 = ObjectAnimator.ofFloat(bIcone, View.ROTATION, repos, -48f);
-        recul1.setDuration(180);
-        recul1.setInterpolator(new android.view.animation.DecelerateInterpolator());
-        ObjectAnimator coup1 = ObjectAnimator.ofFloat(bIcone, View.ROTATION, -48f, repos);
-        coup1.setDuration(60);
-        coup1.setInterpolator(new android.view.animation.AccelerateInterpolator());
-        ObjectAnimator recul2 = ObjectAnimator.ofFloat(bIcone, View.ROTATION, repos, -38f);
-        recul2.setDuration(140);
-        recul2.setInterpolator(new android.view.animation.DecelerateInterpolator());
-        ObjectAnimator coup2 = ObjectAnimator.ofFloat(bIcone, View.ROTATION, -38f, repos);
-        coup2.setDuration(60);
-        coup2.setInterpolator(new android.view.animation.AccelerateInterpolator());
-        android.animation.AnimatorSet seq = new android.animation.AnimatorSet();
-        seq.playSequentially(recul1, coup1, recul2, coup2);
-        seq.start();
-        // Impacts à 240 ms et 440 ms : le son (deux coups espacés de 200 ms) démarre au premier impact
-        if (SimplifiedConfig.SON_ALERTE_ACTIF) ui.postDelayed(this::jouerToc, 240L);
+        if (bFlamme == null || !bulleVisible) return;
+        bFlamme.setInquiet(true);
+        bFlamme.exploser();
+        if (SimplifiedConfig.SON_ALERTE_ACTIF) ui.postDelayed(this::jouerToc, ValueAnimator.areAnimatorsEnabled() ? 250L : 0L);
     }
 
     // ------------------------------------------------------------------ son : « toc-toc » de clé sur une vitre
@@ -491,6 +482,42 @@ final class SimplifiedDriverOverlay {
             triageCle = cle;
             triageEnCours = false;
         }, "simplifie-triage").start();
+    }
+
+    /** Un toucher pour relancer le service d'impression (com.filgo.printspooler). */
+    private void demarrerServiceImpression() {
+        final Context ctx = holder.getContext();
+        boolean ok = false;
+        try {
+            if (!SimplifiedConfig.PRINT_SERVICE_CLASS.isEmpty()) {
+                try {
+                    Intent svc = new Intent();
+                    svc.setClassName(SimplifiedConfig.PRINT_PACKAGE, SimplifiedConfig.PRINT_SERVICE_CLASS);
+                    if (android.os.Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(svc);
+                    else ctx.startService(svc);
+                    ok = true;
+                } catch (Throwable t) {
+                    Log.w(TAG, "demarrerServiceImpression: démarrage direct impossible → ouverture de l'app: " + t.getMessage());
+                }
+            }
+            if (!ok) {
+                Intent li = ctx.getPackageManager().getLaunchIntentForPackage(SimplifiedConfig.PRINT_PACKAGE);
+                if (li != null) {
+                    li.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    ctx.startActivity(li);
+                    ok = true;
+                }
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "demarrerServiceImpression ERR", t);
+        }
+        if (ok) {
+            Toast.makeText(ctx, "Démarrage du service d’impression…", Toast.LENGTH_SHORT).show();
+            dernierSondageMs = 0L;                    // re-teste tout de suite : la bulle se range si le service répond
+            cleAlerte = ""; dernierSonMs = 0L;
+        } else {
+            Toast.makeText(ctx, "Service d’impression introuvable sur cette tablette", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void afficherBulle() {
@@ -646,8 +673,15 @@ final class SimplifiedDriverOverlay {
         // Trombone : se balance de temps en temps si le registre est déconnecté OU si le service
         // d'impression (127.0.0.1:9182) ne répond pas. Immobile sinon.
         sonderServiceImpression();
-        if (coupe || !printActif) balancerTrombone();
-        gererAssistant(coupe, etat);
+        // Registre rétabli / livraison avancée : on oublie les échecs de détection du deeplink
+        if (etat == Etat.PRET || etat == Etat.DEBIT || etat == Etat.CONFIRM || etat == Etat.PAUSE
+                || etat == Etat.ENDING || etat == Etat.TICKET || etat == Etat.FIN) {
+            SimplifiedUiState.reinitialiserEchecsDeepLink();
+        }
+        boolean echecDeepLink = !coupe
+                && SimplifiedUiState.getEchecsDeepLink(woCourant()) >= SimplifiedConfig.DEEPLINK_ECHECS_AVANT_ALERTE;
+        if (coupe || echecDeepLink || !printActif) balancerTrombone();
+        gererAssistant(coupe, echecDeepLink, etat);
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION
                 ? (coupe ? "Reconnexion au registre nécessaire" : "Connexion en cours…")
                 : "Connecté");
@@ -829,7 +863,8 @@ final class SimplifiedDriverOverlay {
         // Bande bleue qui défile : pendant la connexion, ou tant qu'un message d'initialisation est en cours
         String msgInit = host.getInitGuideMessagePourSimplifie();
         boolean aMsgInit = msgInit != null && !msgInit.trim().isEmpty();
-        sProgConn.setVisibility(e == Etat.CONNEXION || aMsgInit ? View.VISIBLE : View.GONE);
+        // (demande Paul 6 nov) : une fois « Vous pouvez revenir au bon de travail » affiché, la bande ne défile plus
+        sProgConn.setVisibility(e == Etat.CONNEXION || (aMsgInit && e != Etat.FIN) ? View.VISIBLE : View.GONE);
         sProgConn.setIndeterminateTintList(ColorStateList.valueOf(Color.parseColor("#185FA5")));
         sTxtInit.setVisibility(aMsgInit ? View.VISIBLE : View.GONE);
         if (aMsgInit) {
@@ -984,6 +1019,7 @@ final class SimplifiedDriverOverlay {
             String serie = apresDeuxPoints(txtSerialId);
             String node = apresDeuxPoints(txtLcrNode);
             StringBuilder sb = new StringBuilder();
+            sb.append("Tablette : ").append(SimplifiedUiState.nomTablette(holder.getContext())).append('\n');
             sb.append("Registre : #").append(serie).append(" · Node ").append(node).append('\n');
             sb.append("WO : ").append(wo.isEmpty() ? "—" : wo).append('\n');
             sb.append("État : ").append(sTxtTitre.getText()).append('\n');

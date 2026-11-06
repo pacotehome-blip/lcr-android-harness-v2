@@ -40,6 +40,23 @@ final class SimplifiedConfig {
     /** Volume du son (0.0 – 1.0), appliqué en plus du volume « notifications » de la tablette. */
     public static final float SON_ALERTE_VOLUME = 0.7f;
 
+    /** Application SOTI MobiControl (agent Android Enterprise) — lien « SOTI » de la demande de support. */
+    public static final String SOTI_PACKAGE = "net.soti.mobicontrol.androidwork";
+    /** Repli facultatif si l'agent n'est pas installé (ex. portail web SOTI de Filgo). Vide = pas de repli. */
+    public static final String SOTI_URL = "";
+
+    /** Nombre d'échecs de détection du registre (après un deeplink) avant d'afficher la trombone. */
+    public static final int DEEPLINK_ECHECS_AVANT_ALERTE = 2;
+
+    /** Service d'impression (autre APK, sur la même tablette). */
+    public static final String PRINT_PACKAGE = "com.filgo.printspooler";
+    /**
+     * Classe du service HTTP d'impression, pour le démarrer SANS quitter Filgo-Registre
+     * (ex. "com.filgo.printspooler.PrintHttpService" — À CONFIRMER, le service doit être exporté).
+     * Vide = on ouvre l'application d'impression à la place.
+     */
+    public static final String PRINT_SERVICE_CLASS = "";
+
     static final String OUTLOOK_PACKAGE = "com.microsoft.office.outlook";
     static final String TEAMS_PACKAGE   = "com.microsoft.teams";
 }

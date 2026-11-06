@@ -67,6 +67,15 @@
     <!-- ✅ Exclure des optimisations batterie -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- ✅ AJOUTÉ (6 nov 2026) — visibilité (Android 11+) des applications ouvertes par la demande de
+         support : Outlook, Teams, agent SOTI MobiControl. -->
+    <queries>
+        <package android:name="com.microsoft.office.outlook" />
+        <package android:name="com.microsoft.teams" />
+        <package android:name="net.soti.mobicontrol.androidwork" />
+        <package android:name="com.filgo.printspooler" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:supportsRtl="true"
