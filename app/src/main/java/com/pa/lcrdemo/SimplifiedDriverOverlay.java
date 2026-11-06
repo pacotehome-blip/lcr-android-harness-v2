@@ -24,6 +24,8 @@ import android.widget.Toast;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.textfield.TextInputEditText;
+import com.google.android.material.textfield.TextInputLayout;
 
 import java.util.Locale;
 import java.util.regex.Matcher;
@@ -75,7 +77,7 @@ final class SimplifiedDriverOverlay {
     // Vues de la surcouche
     private View root;
     private TextView sTxtRegistre, sTxtRegistreEtat, sTxtTitre, sTxtSous, sTxtNet, sTxtGross, sTxtDejaLivre;
-    private TextView sTxtWo, sTxtPreset, sTxtProdFs, sTxtProdReg, sTxtTicket, sTxtVente, sTxtWoCumul;
+    private TextView sTxtWo, sTxtPreset, sTxtProdFs, sTxtProdReg, sTxtTicket, sTxtVente, sTxtWoCumul, sTxtInit;
     private View sDot, sBlocProdFs, sPanelWo;
     private MaterialCardView sBanner;
     private ProgressBar sProgConn;
@@ -189,6 +191,7 @@ final class SimplifiedDriverOverlay {
         sTxtTicket = root.findViewById(R.id.sTxtTicket);
         sTxtVente = root.findViewById(R.id.sTxtVente);
         sTxtWoCumul = root.findViewById(R.id.sTxtWoCumul);
+        sTxtInit = root.findViewById(R.id.sTxtInit);
         sDot = root.findViewById(R.id.sDot);
         sBlocProdFs = root.findViewById(R.id.sBlocProdFs);
         sPanelWo = root.findViewById(R.id.sPanelWo);
@@ -417,8 +420,16 @@ final class SimplifiedDriverOverlay {
         sBanner.setCardBackgroundColor(Color.parseColor(c[1]));
         sBanner.setStrokeColor(couleur);
         sDot.setBackgroundTintList(ColorStateList.valueOf(couleur));
-        sProgConn.setVisibility(e == Etat.CONNEXION ? View.VISIBLE : View.GONE);
-        sProgConn.setIndeterminateTintList(ColorStateList.valueOf(couleur));
+        // Bande bleue qui défile : pendant la connexion, ou tant qu'un message d'initialisation est en cours
+        String msgInit = host.getInitGuideMessagePourSimplifie();
+        boolean aMsgInit = msgInit != null && !msgInit.trim().isEmpty();
+        sProgConn.setVisibility(e == Etat.CONNEXION || aMsgInit ? View.VISIBLE : View.GONE);
+        sProgConn.setIndeterminateTintList(ColorStateList.valueOf(Color.parseColor("#185FA5")));
+        sTxtInit.setVisibility(aMsgInit ? View.VISIBLE : View.GONE);
+        if (aMsgInit) {
+            sTxtInit.setText(msgInit);
+            sTxtInit.setTextColor(Color.parseColor(c[2]));
+        }
     }
 
     // ------------------------------------------------------------------ animations
@@ -468,14 +479,19 @@ final class SimplifiedDriverOverlay {
 
     private void demanderMotDePasse() {
         Context ctx = holder.getContext();
-        final EditText saisie = new EditText(ctx);
+        // Saisie masquée, avec un œil à droite du champ pour afficher / cacher le mot de passe
+        final TextInputLayout champ = new TextInputLayout(ctx);
+        champ.setHint("Mot de passe");
+        champ.setEndIconMode(TextInputLayout.END_ICON_PASSWORD_TOGGLE);
+        final TextInputEditText saisie = new TextInputEditText(champ.getContext());
         saisie.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        saisie.setHint("Mot de passe");
         saisie.setSingleLine(true);
+        champ.addView(saisie, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
         int pad = (int) (20 * ctx.getResources().getDisplayMetrics().density);
         FrameLayout box = new FrameLayout(ctx);
         box.setPadding(pad, pad / 2, pad, 0);
-        box.addView(saisie, new FrameLayout.LayoutParams(
+        box.addView(champ, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
         new MaterialAlertDialogBuilder(ctx)
                 .setTitle("Accès Admin")

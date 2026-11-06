@@ -606,11 +606,21 @@ public class RegisterTabFragment extends Fragment {
         }
     }
 
+    // ✅ AJOUTÉ (6 nov 2026, demande Paul — "ces messages je l'inclurais en dessous de la bande bleue
+    // qui défile le temps que tout soit complété et doit disparaître lorsque terminé") — message du
+    // guide d'init en cours, lu par l'écran simplifié (SimplifiedDriverOverlay) qui l'affiche sous la
+    // bande bleue. null = aucun message. En mode simplifié, le bandeau flottant d'origine n'est plus
+    // affiché (il se superposait à l'en-tête) ; en mode Admin il reste tel quel.
+    private volatile String initGuideMsgPourSimplifie = null;
+    String getInitGuideMessagePourSimplifie() { return initGuideMsgPourSimplifie; }
+
     private void showInitGuide(String texteAmical) {
         if (ui == null) return;
+        initGuideMsgPourSimplifie = texteAmical;
         ui.post(() -> {
             if (txtInitGuide == null || !isAdded()) return;
             txtInitGuide.setText(texteAmical);
+            if (!SimplifiedDriverOverlay.adminUnlocked) return; // mode simplifié : affiché sous la bande bleue
             txtInitGuide.animate().cancel();
             txtInitGuide.setVisibility(View.VISIBLE);
             txtInitGuide.animate().alpha(1f).setDuration(150).start();
@@ -620,6 +630,7 @@ public class RegisterTabFragment extends Fragment {
     private void fadeOutInitGuide() {
         if (ui == null) return;
         ui.postDelayed(() -> {
+            initGuideMsgPourSimplifie = null; // l'écran simplifié efface son message en même temps
             if (txtInitGuide == null || !isAdded()) return;
             txtInitGuide.animate().cancel();
             txtInitGuide.animate().alpha(0f).setDuration(400)
