@@ -41,9 +41,10 @@ final class SimplifiedConfig {
     static final String SUPPORT_TICKET_REGEX =
             "(?i)(?:ticket|billet|incident|case|INC|REQ|TKT)\\s*(?:n[°o]\\s*)?[#:\\-]?\\s*([A-Z]*-?\\d{4,10})";
 
-    /** Intervalle entre deux vérifications de la réponse du support, et nombre maximal d'essais (20 × 15 s = 5 min). */
+    /** Intervalle entre deux vérifications de la réponse du support. */
     static final long SUPPORT_TICKET_SONDE_MS = 15_000L;
-    static final int SUPPORT_TICKET_ESSAIS_MAX = 20;
+    /** Une demande sans réponse est surveillée pendant ce nombre d'heures (même si l'écran de support est fermé). */
+    static final int SUPPORT_SUIVI_HEURES = 24;
 
     /** Taille max des pièces jointes du courriel Graph (octets, avant base64). Au-delà : le journal est tronqué. */
     static final int SUPPORT_MAX_PJ_OCTETS = 2_500_000;

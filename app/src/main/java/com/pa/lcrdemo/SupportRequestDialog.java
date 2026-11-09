@@ -26,6 +26,7 @@ import androidx.core.content.FileProvider;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.pa.lcr.lcp.log.LogBus;
+import com.pa.lcr.lcp.storage.DemandeSupportStore;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -74,6 +75,31 @@ final class SupportRequestDialog {
         File fichierAudio = null;
         long debutEnregistrement = 0L;
         boolean enregistre = false;     // un fichier audio valide existe
+        /** Demandes déjà envoyées (n° de ticket ou « en attente »). Ouvrir l'écran = réponses vues → flamme normale. */
+        void ajouterDemandesRecentes(LinearLayout col) {
+            try {
+                DemandeSupportStore st = new DemandeSupportStore(act);
+                List<DemandeSupportStore.Row> l = st.recentes(3);
+                if (l.isEmpty()) return;
+                col.addView(etiquette("VOS DEMANDES RÉCENTES"));
+                SimpleDateFormat df = new SimpleDateFormat("d MMM HH:mm", Locale.CANADA_FRENCH);
+                for (DemandeSupportStore.Row d : l) {
+                    TextView t = new TextView(act);
+                    String etat = DemandeSupportStore.REPONDUE.equals(d.statut)
+                            ? (d.ticket != null && !d.ticket.isEmpty() ? "Ticket #" + d.ticket.replaceFirst("^#", "") : "Réponse reçue")
+                            : "en attente de réponse";
+                    t.setText(df.format(new Date(d.envoyeLe)) + " — " + d.reference + "\n" + etat);
+                    t.setTextSize(13f);
+                    t.setTextColor(Color.parseColor(DemandeSupportStore.REPONDUE.equals(d.statut) ? "#1E78C8" : "#3A3A3A"));
+                    t.setPadding(0, 0, 0, (int) dp(6));
+                    col.addView(t);
+                }
+                if (st.aReponseNonVue()) { st.marquerToutVu(); SupportSuivi.avertir(); }
+            } catch (Exception e) {
+                Log.w(TAG, "demandes récentes ERR: " + e.getMessage());
+            }
+        }
+
         MaterialButton btnRec;
         MaterialButton btnEnvoyer;
         TextView txtTimer;
@@ -118,6 +144,8 @@ final class SupportRequestDialog {
             col.setOrientation(LinearLayout.VERTICAL);
             int p = (int) dp(20);
             col.setPadding(p, (int) dp(4), p, (int) dp(8));
+
+            ajouterDemandesRecentes(col);
 
             col.addView(etiquette("JOINT AUTOMATIQUEMENT"));
             TextView ctx = new TextView(act);
@@ -174,7 +202,7 @@ final class SupportRequestDialog {
                     .setTitle("Demander du support")
                     .setView(sv)
                     .setNegativeButton("Annuler", null)
-                    .setOnDismissListener(d -> arreterEnregistrement(false))
+                    .setOnDismissListener(d -> { arreterEnregistrement(false); if (ecouteurTicket != null) SupportSuivi.retirer(ecouteurTicket); })
                     .show();
         }
 
@@ -294,7 +322,17 @@ final class SupportRequestDialog {
                     SupportGraphSender.envoyer(act, sujet, corps.toString(), lienSoti, journal, audio,
                             new SupportGraphSender.Resultat() {
                         @Override public void courrielEnvoye(boolean teamsOk) {
-                            act.runOnUiThread(() -> afficherConfirmation(reference, teamsOk, envoyeLe));
+                            try {
+                                DemandeSupportStore.Row d = new DemandeSupportStore.Row();
+                                d.reference = reference; d.sujet = sujet; d.contexte = contexte;
+                                d.commentaire = commentaire; d.avecAudio = avecAudio; d.teamsOk = teamsOk;
+                                d.envoyeLe = envoyeLe;
+                                new DemandeSupportStore(act).enregistrer(d);
+                                SupportSuivi.demarrer(act);
+                            } catch (Exception e) {
+                                Log.w(TAG, "enregistrement BD ERR: " + e.getMessage());
+                            }
+                            act.runOnUiThread(() -> afficherConfirmation(reference, teamsOk));
                         }
                         @Override public void echec(String raison) {
                             Log.w(TAG, "Graph indisponible → repli courriel : " + raison);
@@ -344,7 +382,7 @@ final class SupportRequestDialog {
 
         TextView txtTicket;
 
-        void afficherConfirmation(final String reference, boolean teamsOk, final long envoyeLe) {
+        void afficherConfirmation(final String reference, boolean teamsOk) {
             LinearLayout col = new LinearLayout(act);
             col.setOrientation(LinearLayout.VERTICAL);
             col.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -396,32 +434,27 @@ final class SupportRequestDialog {
             try { dialogue.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).setText("Fermer"); }
             catch (Exception ignored) {}
 
-            ui.postDelayed(() -> sonderTicket(reference, envoyeLe, 1), 5_000L);
+            ecouteurTicket = () -> act.runOnUiThread(() -> majTicketAffiche(reference));
+            SupportSuivi.ecouter(ecouteurTicket);
         }
 
-        void sonderTicket(final String reference, final long envoyeLe, final int essai) {
-            if (dialogue == null || !dialogue.isShowing()) return;   // fermé : on arrête
-            SupportGraphSender.chercherTicket(act, reference, envoyeLe, new SupportGraphSender.Ticket() {
-                @Override public void trouve(String numero) {
-                    act.runOnUiThread(() -> {
-                        if (txtTicket == null) return;
-                        txtTicket.setText(numero != null && !numero.isEmpty()
-                                ? "Ticket #" + numero.replaceFirst("^#", "")
-                                : "Réponse du support reçue (consultez votre courriel)");
-                    });
+        Runnable ecouteurTicket;
+
+        /** Affiche le n° de ticket une fois la réponse du support reçue (surveillée par SupportSuivi). */
+        void majTicketAffiche(String reference) {
+            if (txtTicket == null) return;
+            DemandeSupportStore st = new DemandeSupportStore(act);
+            for (DemandeSupportStore.Row d : st.recentes(10)) {
+                if (!reference.equals(d.reference)) continue;
+                if (DemandeSupportStore.REPONDUE.equals(d.statut)) {
+                    txtTicket.setText(d.ticket != null && !d.ticket.isEmpty()
+                            ? "Ticket #" + d.ticket.replaceFirst("^#", "")
+                            : "Réponse du support reçue (consultez votre courriel)");
+                    // Le chauffeur la voit à l'écran : la flamme n'a pas à rester bleue.
+                    if (st.aReponseNonVue()) { st.marquerToutVu(); SupportSuivi.avertir(); }
                 }
-                @Override public void aucun() {
-                    act.runOnUiThread(() -> {
-                        if (dialogue == null || !dialogue.isShowing() || txtTicket == null) return;
-                        if (essai < SimplifiedConfig.SUPPORT_TICKET_ESSAIS_MAX) {
-                            ui.postDelayed(() -> sonderTicket(reference, envoyeLe, essai + 1),
-                                    SimplifiedConfig.SUPPORT_TICKET_SONDE_MS);
-                        } else {
-                            txtTicket.setText("Le n° de ticket n’est pas encore arrivé : il vous sera envoyé par courriel.");
-                        }
-                    });
-                }
-            });
+                return;
+            }
         }
 
         void reactiverBouton() {

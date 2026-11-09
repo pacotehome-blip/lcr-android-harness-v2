@@ -63,11 +63,25 @@ final class FlammeView extends View {
         pMain.setColor(Color.parseColor("#FFC93C"));
     }
 
-    /** Palette : orange = erreur, verte = tout va bien (mascotte à côté du bouton Support). */
+    private boolean reponse = false;
+
+    /** Palette : orange = erreur, bleue = réponse du support reçue (pas encore consultée), verte = tout va bien. */
     void setErreur(boolean e) {
         erreur = e;
-        pExt.setColor(Color.parseColor(e ? "#FF7A1A" : "#1E9E6A"));
-        pInt.setColor(Color.parseColor(e ? "#FFC93C" : "#9BE3BC"));
+        majPalette();
+    }
+
+    /** Teinte bleue : le support a répondu à une demande que le chauffeur n'a pas encore consultée. */
+    void setReponse(boolean r) {
+        if (reponse == r) return;
+        reponse = r;
+        majPalette();
+    }
+
+    private void majPalette() {
+        if (erreur) { pExt.setColor(Color.parseColor("#FF7A1A")); pInt.setColor(Color.parseColor("#FFC93C")); }
+        else if (reponse) { pExt.setColor(Color.parseColor("#1E78C8")); pInt.setColor(Color.parseColor("#9CCBF2")); }
+        else { pExt.setColor(Color.parseColor("#1E9E6A")); pInt.setColor(Color.parseColor("#9BE3BC")); }
         invalidate();
     }
 

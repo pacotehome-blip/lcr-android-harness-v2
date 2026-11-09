@@ -49,7 +49,7 @@ final class SupportGraphSender {
     private static volatile MsalTokenProvider prov;
 
     /** Jeton Graph SILENCIEUX pour les scopes donnés. Verrou MSAL tenu seulement pendant l'obtention du jeton. */
-    private static void jeton(Activity act, final String[] scopes, final Jeton j) {
+    private static void jeton(android.content.Context act, final String[] scopes, final Jeton j) {
         try {
             MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
         } catch (InterruptedException e) {
@@ -58,7 +58,7 @@ final class SupportGraphSender {
         }
         final MsalTokenProvider p = prov;
         if (p != null) { jetonAvec(p, scopes, j); return; }
-        final MsalTokenProvider neuf = new MsalTokenProvider(act);
+        final MsalTokenProvider neuf = new MsalTokenProvider(act.getApplicationContext());
         neuf.init(new MsalTokenProvider.InitCallback() {
             @Override public void onReady() { prov = neuf; jetonAvec(neuf, scopes, j); }
             @Override public void onError(Exception e) {
@@ -81,7 +81,7 @@ final class SupportGraphSender {
         });
     }
 
-    static void envoyer(Activity act, final String sujet, final String corps, final String lienSoti,
+    static void envoyer(android.content.Context act, final String sujet, final String corps, final String lienSoti,
                         final File journal, final File audio, final Resultat cb) {
         jeton(act, MsalTokenProvider.GRAPH_SCOPES, new Jeton() {
             @Override public void ok(String token) { poster(token, sujet, corps, lienSoti, journal, audio, cb); }
@@ -92,52 +92,56 @@ final class SupportGraphSender {
     // ------------------------------------------------------------------ n° de ticket
 
     interface Ticket {
-        /** Réponse trouvée ; {@code numero} peut être null si la réponse ne contient pas de n° reconnu. */
-        void trouve(String numero);
-        /** Pas (encore) de réponse, ou lecture impossible (permission Mail.Read absente, hors-ligne…). */
-        void aucun();
+        /** Réponse trouvée pour {@code reference} ; {@code numero} peut être null si aucun n° n'est reconnu. */
+        void trouve(String reference, String numero);
+        /** Vérification terminée (qu'il y ait eu des réponses ou non, ou que la lecture ait échoué). */
+        void termine();
     }
 
     /**
-     * Cherche dans la boîte de réception la réponse du support qui reprend la référence de la demande,
-     * puis en extrait le n° de ticket (SimplifiedConfig.SUPPORT_TICKET_REGEX).
+     * Cherche dans la boîte de réception, parmi les messages reçus depuis {@code depuisMs}, la réponse du
+     * support qui reprend la référence de chacune des demandes en attente, puis en extrait le n° de ticket
+     * (SimplifiedConfig.SUPPORT_TICKET_REGEX). Appelle {@code trouve} par demande résolue, puis {@code termine}.
      */
-    static void chercherTicket(Activity act, final String reference, final long depuisMs, final Ticket cb) {
-        jeton(act, MsalTokenProvider.GRAPH_SCOPES_LECTURE, new Jeton() {
+    static void chercherTicket(android.content.Context ctx, final java.util.List<com.pa.lcr.lcp.storage.DemandeSupportStore.Row> attente,
+                               final long depuisMs, final Ticket cb) {
+        jeton(ctx, MsalTokenProvider.GRAPH_SCOPES_LECTURE, new Jeton() {
             @Override public void ok(final String token) {
                 new Thread(() -> {
-                    try { lire(token, reference, depuisMs, cb); }
-                    catch (Exception e) { Log.w(TAG, "ticket ERR : " + e.getMessage()); cb.aucun(); }
+                    try { lire(token, attente, depuisMs, cb); }
+                    catch (Exception e) { Log.w(TAG, "ticket ERR : " + e.getMessage()); }
+                    finally { cb.termine(); }
                 }, "support-ticket").start();
             }
-            @Override public void ko(String raison) { Log.w(TAG, "ticket : " + raison); cb.aucun(); }
+            @Override public void ko(String raison) { Log.w(TAG, "ticket : " + raison); cb.termine(); }
         });
     }
 
-    private static void lire(String token, String reference, long depuisMs, Ticket cb) throws Exception {
+    private static void lire(String token, java.util.List<com.pa.lcr.lcp.storage.DemandeSupportStore.Row> attente,
+                             long depuisMs, Ticket cb) throws Exception {
         java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.ROOT);
         iso.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
         String filtre = "receivedDateTime ge " + iso.format(new java.util.Date(depuisMs - 60_000L));
         String url = GRAPH + "/me/mailFolders/inbox/messages?$select=subject,bodyPreview,receivedDateTime"
                 + "&$orderby=" + URLEncoder.encode("receivedDateTime desc", "UTF-8")
-                + "&$top=25&$filter=" + URLEncoder.encode(filtre, "UTF-8");
+                + "&$top=50&$filter=" + URLEncoder.encode(filtre, "UTF-8");
         String rep = get(token, url);
-        if (rep == null) { cb.aucun(); return; }
+        if (rep == null) return;
         JSONArray vals = new JSONObject(rep).optJSONArray("value");
-        if (vals == null) { cb.aucun(); return; }
+        if (vals == null) return;
         java.util.regex.Pattern motif = java.util.regex.Pattern.compile(SimplifiedConfig.SUPPORT_TICKET_REGEX);
-        for (int i = 0; i < vals.length(); i++) {
-            JSONObject m = vals.getJSONObject(i);
-            String texte = m.optString("subject", "") + "\n" + m.optString("bodyPreview", "");
-            if (!texte.contains(reference)) continue;
-            String sansRef = texte.replace(reference, "");
-            java.util.regex.Matcher mt = motif.matcher(sansRef);
-            String numero = null;
-            if (mt.find()) numero = mt.groupCount() >= 1 && mt.group(1) != null ? mt.group(1) : mt.group();
-            cb.trouve(numero);
-            return;
+        for (com.pa.lcr.lcp.storage.DemandeSupportStore.Row d : attente) {
+            for (int i = 0; i < vals.length(); i++) {
+                JSONObject m = vals.getJSONObject(i);
+                String texte = m.optString("subject", "") + "\n" + m.optString("bodyPreview", "");
+                if (!texte.contains(d.reference)) continue;
+                java.util.regex.Matcher mt = motif.matcher(texte.replace(d.reference, ""));
+                String numero = null;
+                if (mt.find()) numero = mt.groupCount() >= 1 && mt.group(1) != null ? mt.group(1) : mt.group();
+                cb.trouve(d.reference, numero);
+                break;
+            }
         }
-        cb.aucun();
     }
 
     /** @return le corps de la réponse (2xx) ou null. */

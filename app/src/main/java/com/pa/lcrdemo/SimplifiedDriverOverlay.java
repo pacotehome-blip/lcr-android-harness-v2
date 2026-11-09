@@ -220,6 +220,20 @@ final class SimplifiedDriverOverlay {
         sMascotte.setErreur(erreurActive);
         sMascotte.setInquiet(erreurActive);
         sMascotte.setContentDescription("Support Filgo");
+        // Flamme BLEUE tant qu'une réponse du support n'a pas été consultée (table demande_support).
+        final Runnable majReponseSupport = () -> {
+            try {
+                final boolean bleue = new com.pa.lcr.lcp.storage.DemandeSupportStore(ctx).aReponseNonVue();
+                if (sMascotte != null) sMascotte.post(() -> sMascotte.setReponse(bleue));
+            } catch (Throwable t) { Log.w(TAG, "flamme bleue ERR: " + t.getMessage()); }
+        };
+        SupportSuivi.ecouter(majReponseSupport);
+        sMascotte.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View v) { SupportSuivi.ecouter(majReponseSupport); majReponseSupport.run(); }
+            @Override public void onViewDetachedFromWindow(View v) { SupportSuivi.retirer(majReponseSupport); }
+        });
+        SupportSuivi.demarrer(ctx);   // reprend la surveillance des demandes encore sans réponse (après redémarrage)
+        majReponseSupport.run();
         if (sBtnSupport != null && sBtnSupport.getParent() instanceof android.view.ViewGroup) {
             android.view.ViewGroup parent = (android.view.ViewGroup) sBtnSupport.getParent();
             LinearLayout.LayoutParams lpm = new LinearLayout.LayoutParams((int) (48 * dpi), (int) (48 * dpi));

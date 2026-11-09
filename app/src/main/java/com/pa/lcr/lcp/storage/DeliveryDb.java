@@ -52,7 +52,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      Dataverse (formulaire_impression avec le PDF en BLOB, banniere_impression avec le logo en BLOB). Dans cette
     //      BD pour etre dans l'export / la sauvegarde de lcr_delivery.db. Les formulaires sont envoyes au service
     //      d'impression (/print-form) ; les bannieres seulement gardees pour plus tard.
-    public static final int DB_VERSION = 32;
+    public static final int DB_VERSION = 33;
 
     private static final String TAG = "DeliveryDb";
 
@@ -89,6 +89,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
         createImprimanteCiterneTable(db);
         createFormulaireImpressionTable(db);
         createBanniereImpressionTable(db);
+        createDemandeSupportTable(db);
         createApiTraceTable(db);
         createDiagnosticEventsView(db);
         createDiagnosticRulesTable(db);
@@ -302,6 +303,30 @@ public class DeliveryDb extends SQLiteOpenHelper {
         if (oldVersion < 32) {
             addColumnIfMissing(db, "registre", "type_imprimante", "INTEGER");
         }
+        // v33 (9 nov 2026, demande Paul) — demandes de support envoyées (suivi du n° de ticket, flamme bleue).
+        if (oldVersion < 33) {
+            createDemandeSupportTable(db);
+        }
+    }
+
+    // Demandes de support envoyées depuis l'écran simplifié. statut : ENVOYEE (en attente de la réponse du
+    // support) puis REPONDUE (réponse reçue, ticket renseigné si reconnu). vu = 0 tant que le chauffeur n'a pas
+    // rouvert l'écran de support (la flamme reste bleue jusque-là).
+    private static void createDemandeSupportTable(SQLiteDatabase db) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS demande_support (" +
+            "id           INTEGER PRIMARY KEY AUTOINCREMENT," +
+            "reference    TEXT    NOT NULL UNIQUE," +
+            "sujet        TEXT," +
+            "contexte     TEXT," +
+            "commentaire  TEXT," +
+            "avec_audio   INTEGER NOT NULL DEFAULT 0," +
+            "teams_ok     INTEGER NOT NULL DEFAULT 0," +
+            "envoye_le    INTEGER NOT NULL," +
+            "statut       TEXT    NOT NULL DEFAULT 'ENVOYEE'," +
+            "ticket       TEXT," +
+            "repondu_le   INTEGER," +
+            "vu           INTEGER NOT NULL DEFAULT 0)");
     }
 
     // =========================================================
