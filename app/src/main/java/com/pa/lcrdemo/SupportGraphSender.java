@@ -43,32 +43,122 @@ final class SupportGraphSender {
 
     private SupportGraphSender() {}
 
-    static void envoyer(Activity act, String sujet, String corps, String lienSoti, File journal, File audio, Resultat cb) {
-        final MsalTokenProvider msal = new MsalTokenProvider(act);
+    private interface Jeton { void ok(String t); void ko(String raison); }
+
+    /** Instance MSAL conservée (une seule, évite de multiplier les instances qui se disputent le cache). */
+    private static volatile MsalTokenProvider prov;
+
+    /** Jeton Graph SILENCIEUX pour les scopes donnés. Verrou MSAL tenu seulement pendant l'obtention du jeton. */
+    private static void jeton(Activity act, final String[] scopes, final Jeton j) {
         try {
             MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
         } catch (InterruptedException e) {
-            cb.echec("interrompu");
+            j.ko("interrompu");
             return;
         }
-        msal.init(new MsalTokenProvider.InitCallback() {
-            @Override public void onReady() {
-                msal.acquireGraphTokenSilent(new MsalTokenProvider.TokenCallback() {
-                    @Override public void onSuccess(String token) {
-                        MsalTokenProvider.MSAL_SERIAL_LOCK.release();
-                        poster(token, sujet, corps, lienSoti, journal, audio, cb);
-                    }
-                    @Override public void onError(Exception e) {
-                        MsalTokenProvider.MSAL_SERIAL_LOCK.release();
-                        cb.echec("token Graph : " + e.getMessage());
-                    }
-                });
+        final MsalTokenProvider p = prov;
+        if (p != null) { jetonAvec(p, scopes, j); return; }
+        final MsalTokenProvider neuf = new MsalTokenProvider(act);
+        neuf.init(new MsalTokenProvider.InitCallback() {
+            @Override public void onReady() { prov = neuf; jetonAvec(neuf, scopes, j); }
+            @Override public void onError(Exception e) {
+                MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                j.ko("MSAL : " + e.getMessage());
+            }
+        });
+    }
+
+    private static void jetonAvec(MsalTokenProvider p, String[] scopes, final Jeton j) {
+        p.acquireGraphTokenSilent(scopes, new MsalTokenProvider.TokenCallback() {
+            @Override public void onSuccess(String token) {
+                MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                j.ok(token);
             }
             @Override public void onError(Exception e) {
                 MsalTokenProvider.MSAL_SERIAL_LOCK.release();
-                cb.echec("MSAL : " + e.getMessage());
+                j.ko("token Graph : " + e.getMessage());
             }
         });
+    }
+
+    static void envoyer(Activity act, final String sujet, final String corps, final String lienSoti,
+                        final File journal, final File audio, final Resultat cb) {
+        jeton(act, MsalTokenProvider.GRAPH_SCOPES, new Jeton() {
+            @Override public void ok(String token) { poster(token, sujet, corps, lienSoti, journal, audio, cb); }
+            @Override public void ko(String raison) { cb.echec(raison); }
+        });
+    }
+
+    // ------------------------------------------------------------------ n° de ticket
+
+    interface Ticket {
+        /** Réponse trouvée ; {@code numero} peut être null si la réponse ne contient pas de n° reconnu. */
+        void trouve(String numero);
+        /** Pas (encore) de réponse, ou lecture impossible (permission Mail.Read absente, hors-ligne…). */
+        void aucun();
+    }
+
+    /**
+     * Cherche dans la boîte de réception la réponse du support qui reprend la référence de la demande,
+     * puis en extrait le n° de ticket (SimplifiedConfig.SUPPORT_TICKET_REGEX).
+     */
+    static void chercherTicket(Activity act, final String reference, final long depuisMs, final Ticket cb) {
+        jeton(act, MsalTokenProvider.GRAPH_SCOPES_LECTURE, new Jeton() {
+            @Override public void ok(final String token) {
+                new Thread(() -> {
+                    try { lire(token, reference, depuisMs, cb); }
+                    catch (Exception e) { Log.w(TAG, "ticket ERR : " + e.getMessage()); cb.aucun(); }
+                }, "support-ticket").start();
+            }
+            @Override public void ko(String raison) { Log.w(TAG, "ticket : " + raison); cb.aucun(); }
+        });
+    }
+
+    private static void lire(String token, String reference, long depuisMs, Ticket cb) throws Exception {
+        java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.ROOT);
+        iso.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        String filtre = "receivedDateTime ge " + iso.format(new java.util.Date(depuisMs - 60_000L));
+        String url = GRAPH + "/me/mailFolders/inbox/messages?$select=subject,bodyPreview,receivedDateTime"
+                + "&$orderby=" + URLEncoder.encode("receivedDateTime desc", "UTF-8")
+                + "&$top=25&$filter=" + URLEncoder.encode(filtre, "UTF-8");
+        String rep = get(token, url);
+        if (rep == null) { cb.aucun(); return; }
+        JSONArray vals = new JSONObject(rep).optJSONArray("value");
+        if (vals == null) { cb.aucun(); return; }
+        java.util.regex.Pattern motif = java.util.regex.Pattern.compile(SimplifiedConfig.SUPPORT_TICKET_REGEX);
+        for (int i = 0; i < vals.length(); i++) {
+            JSONObject m = vals.getJSONObject(i);
+            String texte = m.optString("subject", "") + "\n" + m.optString("bodyPreview", "");
+            if (!texte.contains(reference)) continue;
+            String sansRef = texte.replace(reference, "");
+            java.util.regex.Matcher mt = motif.matcher(sansRef);
+            String numero = null;
+            if (mt.find()) numero = mt.groupCount() >= 1 && mt.group(1) != null ? mt.group(1) : mt.group();
+            cb.trouve(numero);
+            return;
+        }
+        cb.aucun();
+    }
+
+    /** @return le corps de la réponse (2xx) ou null. */
+    private static String get(String token, String url) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        try {
+            c.setRequestMethod("GET");
+            c.setConnectTimeout(10_000);
+            c.setReadTimeout(20_000);
+            c.setRequestProperty("Authorization", "Bearer " + token);
+            int code = c.getResponseCode();
+            if (code < 200 || code >= 300) { Log.w(TAG, "GET HTTP " + code); return null; }
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            try (InputStream in = c.getInputStream()) {
+                byte[] buf = new byte[8192]; int n;
+                while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+            }
+            return bo.toString("UTF-8");
+        } finally {
+            c.disconnect();
+        }
     }
 
     private static void poster(final String token, final String sujet, final String corps, final String lienSoti,

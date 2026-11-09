@@ -34,6 +34,17 @@ final class SimplifiedConfig {
             "https://a0026528.mobicontrol.cloud/MobiControl/WebConsole/home/dashboard/devices"
             + "?search=Text%20AlmostEqual%20%22{ID}%22&subGroups=false&count=250";
 
+    /**
+     * Extraction du n° de ticket dans la réponse automatique du support (objet + début du corps).
+     * Le 1er groupe capturé est le n°. PROVISOIRE : à ajuster avec un vrai exemple de réponse.
+     */
+    static final String SUPPORT_TICKET_REGEX =
+            "(?i)(?:ticket|billet|incident|case|INC|REQ|TKT)\\s*(?:n[°o]\\s*)?[#:\\-]?\\s*([A-Z]*-?\\d{4,10})";
+
+    /** Intervalle entre deux vérifications de la réponse du support, et nombre maximal d'essais (20 × 15 s = 5 min). */
+    static final long SUPPORT_TICKET_SONDE_MS = 15_000L;
+    static final int SUPPORT_TICKET_ESSAIS_MAX = 20;
+
     /** Taille max des pièces jointes du courriel Graph (octets, avant base64). Au-delà : le journal est tronqué. */
     static final int SUPPORT_MAX_PJ_OCTETS = 2_500_000;
 

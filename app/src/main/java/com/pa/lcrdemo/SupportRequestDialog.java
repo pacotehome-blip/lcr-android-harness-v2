@@ -79,6 +79,7 @@ final class SupportRequestDialog {
         TextView txtTimer;
         EditText edtComment;
         androidx.appcompat.app.AlertDialog dialogue;
+        ScrollView sv;
 
         final Runnable tickTimer = new Runnable() {
             @Override public void run() {
@@ -166,7 +167,7 @@ final class SupportRequestDialog {
             lpEnv.topMargin = (int) dp(18);
             col.addView(btnEnvoyer, lpEnv);
 
-            ScrollView sv = new ScrollView(act);
+            sv = new ScrollView(act);
             sv.addView(col);
 
             dialogue = new MaterialAlertDialogBuilder(act)
@@ -283,7 +284,9 @@ final class SupportRequestDialog {
                          .append(idSoti());
                     final String lienSoti = lienSoti();
                     if (!lienSoti.isEmpty()) corps.append("\nLien SOTI : ").append(lienSoti);
-                    final String sujet = "Support Filgo-Registre — " + SimplifiedUiState.nomTablette(act)
+                    final long envoyeLe = System.currentTimeMillis();
+                    final String reference = "SUP-" + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(new Date(envoyeLe));
+                    final String sujet = "[" + reference + "] Support Filgo-Registre — " + SimplifiedUiState.nomTablette(act)
                             + " — WO " + (wo.isEmpty() ? "—" : wo)
                             + " — #" + serie + " Node " + node;
 
@@ -291,12 +294,7 @@ final class SupportRequestDialog {
                     SupportGraphSender.envoyer(act, sujet, corps.toString(), lienSoti, journal, audio,
                             new SupportGraphSender.Resultat() {
                         @Override public void courrielEnvoye(boolean teamsOk) {
-                            act.runOnUiThread(() -> {
-                                Toast.makeText(act, teamsOk
-                                        ? "Demande envoyée au support (courriel + Teams)"
-                                        : "Demande envoyée au support (courriel)", Toast.LENGTH_LONG).show();
-                                if (dialogue != null) dialogue.dismiss();
-                            });
+                            act.runOnUiThread(() -> afficherConfirmation(reference, teamsOk, envoyeLe));
                         }
                         @Override public void echec(String raison) {
                             Log.w(TAG, "Graph indisponible → repli courriel : " + raison);
@@ -340,6 +338,90 @@ final class SupportRequestDialog {
             if (m.isEmpty()) return "";
             try { return m.replace("{ID}", java.net.URLEncoder.encode(idSoti(), "UTF-8").replace("+", "%20")); }
             catch (Exception e) { return ""; }
+        }
+
+        // ---------------------------------------------------------------- confirmation + n° de ticket
+
+        TextView txtTicket;
+
+        void afficherConfirmation(final String reference, boolean teamsOk, final long envoyeLe) {
+            LinearLayout col = new LinearLayout(act);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setGravity(Gravity.CENTER_HORIZONTAL);
+            int p = (int) dp(20);
+            col.setPadding(p, (int) dp(16), p, (int) dp(16));
+
+            TextView coche = new TextView(act);
+            coche.setText("✓");
+            coche.setTextSize(56f);
+            coche.setGravity(Gravity.CENTER);
+            coche.setTextColor(Color.parseColor("#024B3C"));
+            col.addView(coche);
+
+            TextView titre = new TextView(act);
+            titre.setText("Demande envoyée");
+            titre.setTextSize(22f);
+            titre.setTypeface(null, android.graphics.Typeface.BOLD);
+            titre.setGravity(Gravity.CENTER);
+            titre.setTextColor(Color.parseColor("#111111"));
+            col.addView(titre);
+
+            TextView detail = new TextView(act);
+            detail.setText("Courriel envoyé à " + SimplifiedConfig.SUPPORT_EMAIL
+                    + (teamsOk ? "\nMessage publié dans Support Camion (Teams)" : ""));
+            detail.setTextSize(13f);
+            detail.setGravity(Gravity.CENTER);
+            detail.setTextColor(Color.parseColor("#3A3A3A"));
+            detail.setPadding(0, (int) dp(8), 0, (int) dp(16));
+            col.addView(detail);
+
+            TextView ref = new TextView(act);
+            ref.setText("Référence : " + reference);
+            ref.setTextSize(15f);
+            ref.setGravity(Gravity.CENTER);
+            ref.setTextColor(Color.parseColor("#111111"));
+            col.addView(ref);
+
+            txtTicket = new TextView(act);
+            txtTicket.setText("N° de ticket : en attente de la réponse du support…");
+            txtTicket.setTextSize(17f);
+            txtTicket.setTypeface(null, android.graphics.Typeface.BOLD);
+            txtTicket.setGravity(Gravity.CENTER);
+            txtTicket.setTextColor(Color.parseColor("#024B3C"));
+            txtTicket.setPadding(0, (int) dp(10), 0, 0);
+            col.addView(txtTicket);
+
+            sv.removeAllViews();
+            sv.addView(col);
+            try { dialogue.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).setText("Fermer"); }
+            catch (Exception ignored) {}
+
+            ui.postDelayed(() -> sonderTicket(reference, envoyeLe, 1), 5_000L);
+        }
+
+        void sonderTicket(final String reference, final long envoyeLe, final int essai) {
+            if (dialogue == null || !dialogue.isShowing()) return;   // fermé : on arrête
+            SupportGraphSender.chercherTicket(act, reference, envoyeLe, new SupportGraphSender.Ticket() {
+                @Override public void trouve(String numero) {
+                    act.runOnUiThread(() -> {
+                        if (txtTicket == null) return;
+                        txtTicket.setText(numero != null && !numero.isEmpty()
+                                ? "Ticket #" + numero.replaceFirst("^#", "")
+                                : "Réponse du support reçue (consultez votre courriel)");
+                    });
+                }
+                @Override public void aucun() {
+                    act.runOnUiThread(() -> {
+                        if (dialogue == null || !dialogue.isShowing() || txtTicket == null) return;
+                        if (essai < SimplifiedConfig.SUPPORT_TICKET_ESSAIS_MAX) {
+                            ui.postDelayed(() -> sonderTicket(reference, envoyeLe, essai + 1),
+                                    SimplifiedConfig.SUPPORT_TICKET_SONDE_MS);
+                        } else {
+                            txtTicket.setText("Le n° de ticket n’est pas encore arrivé : il vous sera envoyé par courriel.");
+                        }
+                    });
+                }
+            });
         }
 
         void reactiverBouton() {

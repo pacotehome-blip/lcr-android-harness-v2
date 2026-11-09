@@ -63,6 +63,11 @@ public class MsalTokenProvider {
         "https://graph.microsoft.com/ChatMessage.Send"
     };
 
+    /** Lecture de la boîte de réception (n° de ticket de la réponse automatique) — jeton demandé SÉPARÉMENT. */
+    public static final String[] GRAPH_SCOPES_LECTURE = new String[]{
+        "https://graph.microsoft.com/Mail.Read"
+    };
+
     private final Context appContext;
     private ISingleAccountPublicClientApplication msalApp;
 
@@ -130,7 +135,7 @@ public class MsalTokenProvider {
     }
 
     // ✅ Token Microsoft Graph, SILENCIEUX seulement (jamais d'écran de connexion).
-    public void acquireGraphTokenSilent(@NonNull TokenCallback callback) {
+    public void acquireGraphTokenSilent(@NonNull final String[] scopes, @NonNull TokenCallback callback) {
         if (msalApp == null) {
             callback.onError(new IllegalStateException("MSAL non initialisé"));
             return;
@@ -146,7 +151,7 @@ public class MsalTokenProvider {
                     AcquireTokenSilentParameters params = new AcquireTokenSilentParameters.Builder()
                         .forAccount(account)
                         .fromAuthority(account.getAuthority())
-                        .withScopes(Arrays.asList(GRAPH_SCOPES))
+                        .withScopes(Arrays.asList(scopes))
                         .withCallback(new SilentAuthenticationCallback() {
                             @Override public void onSuccess(IAuthenticationResult r) { callback.onSuccess(r.getAccessToken()); }
                             @Override public void onError(MsalException e) { callback.onError(e); }
