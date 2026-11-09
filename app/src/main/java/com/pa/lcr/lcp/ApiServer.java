@@ -581,6 +581,16 @@ public synchronized void start() throws Exception {
             return withAutoConnectRetry(null, this::pingLocal);
         }
 
+        // Verification de version d'un formulaire d'impression (service d'impression -> Filgo-Registre), 9 nov 2026.
+        if ("GET".equals(req.method) && "/v1/print/form-check".equals(req.path)) {
+            String code = req.query != null ? req.query.getOrDefault("code", "").trim() : "";
+            String version = req.query != null ? req.query.getOrDefault("version", "").trim() : "";
+            String status = com.pa.lcrdemo.dataverse.PrintFormCheck.verifier(appCtx, code, version);
+            JSONObject d = new JSONObject();
+            try { d.put("status", status); d.put("code", code); } catch (Exception ignored) {}
+            return ApiResult.ok("FORM-CHECK: " + status, d);
+        }
+
         // USB scan
         if ("GET".equals(req.method) && "/v1/usb/scan".equals(req.path)) {
             return withAutoConnectRetry(null, facade::api_scanUsb);

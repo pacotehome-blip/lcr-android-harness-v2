@@ -51,6 +51,10 @@ public class ImprimanteCiterneStore {
         public String serviceSync;
         public String serviceMsg;
         public long   serviceTsMs;
+        /** Ligne Dataverse (filgo_imprimanteid) ; vide = jamais envoyee a Dataverse. */
+        public String dataverseId;
+        /** versionnumber Dataverse de la derniere synchro ; VIDE = modifiee ici, a envoyer a Dataverse. */
+        public String dataverseVersion;
 
         static Row from(Cursor c) {
             Row r = new Row();
@@ -70,6 +74,8 @@ public class ImprimanteCiterneStore {
             r.serviceSync    = s(c, "service_sync");
             r.serviceMsg     = s(c, "service_msg");
             r.serviceTsMs    = c.getLong(c.getColumnIndexOrThrow("service_ts_ms"));
+            r.dataverseId      = s(c, "dataverse_id");
+            r.dataverseVersion = s(c, "dataverse_version");
             return r;
         }
         private static String s(Cursor c, String col) {
@@ -121,6 +127,7 @@ public class ImprimanteCiterneStore {
         cv.put("registre_guid", r.registreGuid);
         cv.put("service_sync", SYNC_PENDING);
         cv.putNull("service_msg");
+        cv.put("dataverse_version", ""); // modifiee ici : a (re)envoyer a Dataverse
         cv.put("ts_updated_ms", now);
         SQLiteDatabase db = helper.getWritableDatabase();
         // Imprimante du registre (HTTP) : une seule par citerne -- remplace l'ancienne, quelle que soit sa cible.
@@ -145,5 +152,68 @@ public class ImprimanteCiterneStore {
 
     public void delete(long id) {
         helper.getWritableDatabase().delete(TABLE, "id=?", new String[]{ String.valueOf(id) });
+    }
+
+    // ------------------------------------------------------------------ Dataverse (9 nov 2026)
+
+    /** Lignes modifiees ici (ou jamais envoyees) : a creer / mettre a jour dans filgo_imprimante. */
+    public List<Row> listToPushToDataverse() {
+        List<Row> out = new ArrayList<>();
+        SQLiteDatabase db = helper.getReadableDatabase();
+        try (Cursor c = db.query(TABLE, null, "dataverse_version IS NULL OR dataverse_version=''",
+                null, null, null, null, "truck_key ASC")) {
+            while (c.moveToNext()) out.add(Row.from(c));
+        }
+        return out;
+    }
+
+    /** Dataverse a confirme : la ligne n'est plus "a envoyer". Ne touche pas a service_sync. */
+    public void markDataverse(long id, String dataverseId, String versionnumber) {
+        ContentValues cv = new ContentValues();
+        cv.put("dataverse_id", dataverseId == null ? "" : dataverseId);
+        cv.put("dataverse_version", versionnumber == null || versionnumber.isEmpty() ? "0" : versionnumber);
+        helper.getWritableDatabase().update(TABLE, cv, "id=?", new String[]{ String.valueOf(id) });
+    }
+
+    /**
+     * Ligne lue dans Dataverse (Dataverse a raison). Une ligne locale encore "a envoyer" n'est JAMAIS ecrasee.
+     * @return true si la ligne a change (elle repasse alors en PENDING pour le service)
+     */
+    public boolean upsertFromDataverse(Row r, String dataverseId, String versionnumber) {
+        Row old = get(r.truckId, r.btMac);
+        if (old != null && (old.dataverseVersion == null || old.dataverseVersion.isEmpty())) return false;
+        if (old != null && versionnumber != null && versionnumber.equals(old.dataverseVersion)) return false;
+        long now = System.currentTimeMillis();
+        ContentValues cv = new ContentValues();
+        cv.put("truck_key",  keyOf(r.truckId));
+        cv.put("truck_id",   r.truckId.trim());
+        cv.put("format",     r.format);
+        cv.put("company",    r.company == null ? "" : r.company);
+        cv.put("driver_type", r.driverType);
+        cv.put("bt_mac",     macOf(r.btMac));
+        cv.put("printer_name", r.printerName);
+        cv.put("citerne_source", SRC_DATAVERSE);
+        cv.put("registre_serial", r.registreSerial);
+        cv.put("service_sync", SYNC_PENDING);
+        cv.putNull("service_msg");
+        cv.put("dataverse_id", dataverseId);
+        cv.put("dataverse_version", versionnumber == null || versionnumber.isEmpty() ? "0" : versionnumber);
+        cv.put("ts_updated_ms", now);
+        SQLiteDatabase db = helper.getWritableDatabase();
+        int n = db.update(TABLE, cv, "truck_key=? AND bt_mac=?", new String[]{ keyOf(r.truckId), macOf(r.btMac) });
+        if (n > 0) return true;
+        cv.put("ts_created_ms", now);
+        db.insert(TABLE, null, cv);
+        return true;
+    }
+
+    /** Lignes a envoyer au service (pas SENT). */
+    public List<Row> listToSendToService() {
+        List<Row> out = new ArrayList<>();
+        SQLiteDatabase db = helper.getReadableDatabase();
+        try (Cursor c = db.query(TABLE, null, "service_sync<>?", new String[]{ SYNC_SENT }, null, null, "truck_key ASC")) {
+            while (c.moveToNext()) out.add(Row.from(c));
+        }
+        return out;
     }
 }

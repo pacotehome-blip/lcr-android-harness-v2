@@ -6,6 +6,7 @@ import android.util.Log;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.BanniereImpressionStore;
 import com.pa.lcr.lcp.storage.FormulaireImpressionStore;
+import com.pa.lcr.lcp.storage.ImprimanteCiterneStore;
 import com.pa.lcrdemo.config.LcrConfig;
 import com.pa.lcrdemo.print.PrintServiceClient;
 
@@ -24,25 +25,21 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * Synchronisation des formulaires et bannieres d'impression : D'ABORD Dataverse -> tables locales de
- * Filgo-Registre (lcr_delivery.db), ENSUITE tables locales -> service d'impression (/print-form). 30 oct 2026.
+ * Synchronisation des tables d'impression (vraies tables Dataverse, 9 nov 2026) :
+ * D'ABORD Dataverse <-> tables locales de Filgo-Registre (lcr_delivery.db), ENSUITE tables locales -> service
+ * d'impression (/print-form, /truck-printer).
  *
- * Filgo-Registre est le seul lien entre Dataverse et le service d'impression : le service ne parle jamais a
- * Dataverse. Dataverse a toujours raison.
+ *   filgo_formulairepdf  Dataverse -> local -> service   (code, nom, format, version, manifest, pdfsha256, pdf)
+ *   filgo_documentheader Dataverse -> local              (en-tetes ; pas encore de route cote service)
+ *   filgo_imprimante     local <-> Dataverse, local -> service  (citerne + btmac + modele)
  *
- * Tolerance : si une table n'existe pas encore dans Dataverse (HTTP 404), elle est ignoree sans erreur et le
- * service continue d'imprimer avec ses formulaires embarques. Aucune ligne n'est retiree si la lecture de
- * Dataverse n'a pas reussi en entier.
+ * Filgo-Registre est le seul lien entre Dataverse et le service d'impression. Dataverse a raison, SAUF pour une
+ * imprimante saisie/modifiee ici qui n'est pas encore remontee : elle est d'abord envoyee a Dataverse, puis
+ * repoussee au service. Detection de changement : versionnumber systeme de Dataverse.
  *
- * Hypotheses sur les tables (a CONFIRMER a leur creation, voir IMPRESSION_DEEPLINK_ET_DATAVERSE.md 2.3 et 2.4) :
- *  - filgo_print_forms : cle filgo_print_formid ; colonnes filgo_code, filgo_name, filgo_format (choix dont le LIBELLE
- *    est GRAND, PETIT ou REGISTRE), filgo_version, filgo_manifest (texte JSON), filgo_pdf_sha256, colonne FICHIER
- *    filgo_pdf (telechargee par .../filgo_pdf/$value) ;
- *  - filgo_print_banners : cle filgo_print_bannerid ; colonnes filgo_code, filgo_name, filgo_address_line1,
- *    filgo_city, filgo_province, filgo_postalcode, filgo_phone, filgo_tollfreephone, filgo_tax_info,
- *    filgo_footer_text, filgo_company (choix), filgo_version, colonne IMAGE filgo_logo (.../filgo_logo/$value).
- * Si un nom de colonne differe, la lecture echoue avec le message de Dataverse dans le journal (aucun effet sur les
- * donnees locales).
+ * Les noms d'ensemble (partie de l'URL), la cle primaire et les valeurs des choix (filgo_model) sont LUS dans les
+ * metadonnees de Dataverse (voir meta()), jamais devines. Les noms de colonnes sont les noms logiques (minuscules).
+ * Table absente (HTTP 404) : ignoree sans erreur ; aucune ligne n'est retiree si la lecture n'a pas reussi en entier.
  */
 public final class PrintDataverseSync {
 
@@ -56,33 +53,126 @@ public final class PrintDataverseSync {
         TableAbsente(String m) { super(m); }
     }
 
+    // ------------------------------------------------------------------ metadonnees Dataverse
+
+    private static final class Meta {
+        String set = "";
+        String idAttr = "";
+        String nameAttr = "";
+    }
+    private static final java.util.Map<String, Meta> META = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Nom d'ensemble, cle primaire et colonne nom de la table (mis en cache). */
+    private static Meta meta(Context ctx, String token, String table) throws Exception {
+        Meta m = META.get(table);
+        if (m != null) return m;
+        String url = LcrConfig.getDataverseUrl(ctx) + "/api/data/v9.2/EntityDefinitions(LogicalName='" + table
+                + "')?$select=EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute";
+        JSONObject o = getJson(url, token, 15000, 30000);
+        m = new Meta();
+        m.set = o.optString("EntitySetName", "");
+        m.idAttr = o.optString("PrimaryIdAttribute", "");
+        m.nameAttr = o.optString("PrimaryNameAttribute", "");
+        if (m.set.isEmpty() || m.idAttr.isEmpty()) throw new TableAbsente("metadonnees incompletes pour " + table);
+        META.put(table, m);
+        return m;
+    }
+
+    private static final java.util.Map<String, java.util.Map<Integer, String>> OPTIONS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Valeurs -> libelles d'une colonne a choix. */
+    private static java.util.Map<Integer, String> options(Context ctx, String token, String table, String col) throws Exception {
+        String key = table + "." + col;
+        java.util.Map<Integer, String> m = OPTIONS.get(key);
+        if (m != null) return m;
+        String url = LcrConfig.getDataverseUrl(ctx) + "/api/data/v9.2/EntityDefinitions(LogicalName='" + table
+                + "')/Attributes(LogicalName='" + col + "')/Microsoft.Dynamics.CRM.PicklistAttributeMetadata"
+                + "?$select=LogicalName&$expand=OptionSet($select=Options)";
+        JSONObject o = getJson(url, token, 15000, 30000);
+        m = new java.util.LinkedHashMap<>();
+        JSONObject os = o.optJSONObject("OptionSet");
+        JSONArray arr = os == null ? null : os.optJSONArray("Options");
+        if (arr != null) for (int i = 0; i < arr.length(); i++) {
+            JSONObject op = arr.optJSONObject(i);
+            if (op == null) continue;
+            JSONObject lab = op.optJSONObject("Label");
+            JSONObject ul = lab == null ? null : lab.optJSONObject("UserLocalizedLabel");
+            m.put(op.optInt("Value"), ul == null ? "" : ul.optString("Label", ""));
+        }
+        OPTIONS.put(key, m);
+        return m;
+    }
+
+    /** Libelle du choix filgo_model (nom d'enum du pilote ou libelle du catalogue, sinon mots-cles) -> nom d'enum. */
+    static String driverDepuisLibelle(String label) {
+        if (label == null) return "";
+        String l = label.trim();
+        for (com.pa.lcrdemo.print.PrinterCatalog.Driver d : com.pa.lcrdemo.print.PrinterCatalog.DRIVERS) {
+            if (d.name.equalsIgnoreCase(l) || d.label.equalsIgnoreCase(l)) return d.name;
+        }
+        String u = l.toUpperCase(Locale.ROOT);
+        boolean reg = u.contains("REGISTRE") || u.contains("HTTP");
+        if (u.contains("PJ-862") || u.contains("PJ862")) return "BROTHER_PJ_862";
+        if (u.contains("4250")) return "BROTHER_RJ_4250WB";
+        if (u.contains("MF4") || u.contains("O'NEIL") || u.contains("ONEIL")) return "ONEIL_MF4TE_DPL";
+        if (u.contains("COGNITIVE")) return reg ? "REGISTRE_COGNITIVE_CPL" : "ZPL_COGNITIVE";
+        if (u.contains("TM-T88") || u.contains("EPSON")) return reg ? "ZPL_COGNITIVE_REGISTRE" : "EPSON_SDK";
+        return "";
+    }
+
+    /** GUID de citerne : minuscules, sans accolades ; "" si ce n'est pas un GUID. */
+    static String guid(String s) {
+        String g = s == null ? "" : s.trim().replace("{", "").replace("}", "").toLowerCase(Locale.ROOT);
+        return g.matches("[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}") ? g : "";
+    }
+
+    private static String versionNumber(JSONObject r) {
+        Object v = r.opt("versionnumber");
+        return v == null || v == JSONObject.NULL ? r.optString("modifiedon", "") : String.valueOf(v);
+    }
+
+    // ------------------------------------------------------------------ point d'entree
+
     /** Dataverse d'abord (si un jeton est fourni), puis le service. Ne leve jamais d'exception. */
     public static void syncAll(Context ctx, String accessToken) {
         if (accessToken != null && !accessToken.isEmpty()) {
+            try { lireEntetes(ctx, accessToken); }
+            catch (Exception e) { journal("en-tetes: lecture Dataverse ERR " + e.getMessage()); }
             try { lireFormulaires(ctx, accessToken); }
             catch (Exception e) { journal("formulaires: lecture Dataverse ERR " + e.getMessage()); }
-            try { lireBannieres(ctx, accessToken); }
-            catch (Exception e) { journal("bannieres: lecture Dataverse ERR " + e.getMessage()); }
+            // Imprimantes : ce qui a ete saisi ici monte d'abord a Dataverse, puis on lit Dataverse.
+            try { envoyerImprimantesADataverse(ctx, accessToken); }
+            catch (Exception e) { journal("imprimantes: envoi a Dataverse ERR " + e.getMessage()); }
+            try { lireImprimantes(ctx, accessToken); }
+            catch (Exception e) { journal("imprimantes: lecture Dataverse ERR " + e.getMessage()); }
         } else {
             journal("pas de jeton Dataverse : seule l'etape service est faite");
         }
         try { envoyerFormulairesAuService(ctx); }
         catch (Exception e) { journal("formulaires: envoi au service ERR " + e.getMessage()); }
+        try { envoyerImprimantesAuService(ctx); }
+        catch (Exception e) { journal("imprimantes: envoi au service ERR " + e.getMessage()); }
     }
 
-    // ------------------------------------------------------------------ Dataverse -> tables locales
+    // ------------------------------------------------------------------ Dataverse -> formulaires
+
+    private static final String FORM_SELECT = "filgo_code,filgo_nom,filgo_format,filgo_version,filgo_manifest,"
+            + "filgo_pdfsha256,modifiedon,statecode,versionnumber";
 
     private static void lireFormulaires(Context ctx, String token) throws Exception {
+        Meta m;
+        try { m = meta(ctx, token, LcrConfig.DV_PRINT_FORMS_TABLE); }
+        catch (TableAbsente e) {
+            journal("formulaires: table " + LcrConfig.DV_PRINT_FORMS_TABLE + " absente de Dataverse : ignoree");
+            return;
+        }
         String org = LcrConfig.getDataverseUrl(ctx);
-        String set = LcrConfig.DV_PRINT_FORMS_SET;
-        String url = org + "/api/data/v9.2/" + set
-                + "?$select=filgo_print_formid,filgo_code,filgo_name,filgo_format,filgo_version,filgo_manifest,"
-                + "filgo_pdf_sha256,modifiedon,statecode";
+        String url = org + "/api/data/v9.2/" + m.set + "?$select=" + m.idAttr + "," + FORM_SELECT;
         List<JSONObject> rows;
         try {
             rows = lireToutesLesLignes(url, token);
         } catch (TableAbsente e) {
-            journal("formulaires: table " + set + " absente de Dataverse : ignoree (le service garde ses formulaires embarques)");
+            journal("formulaires: table " + m.set + " absente de Dataverse : ignoree (le service garde ses formulaires embarques)");
             return;
         }
         FormulaireImpressionStore store = new FormulaireImpressionStore(ctx);
@@ -91,55 +181,10 @@ public final class PrintDataverseSync {
         for (JSONObject r : rows) {
             String code = FormulaireImpressionStore.keyOf(r.optString("filgo_code", ""));
             if (code.isEmpty()) { ignores++; continue; }
-            String format = libelle(r, "filgo_format").trim().toUpperCase(Locale.ROOT);
-            if (!format.equals("GRAND") && !format.equals("PETIT") && !format.equals("REGISTRE")) {
-                journal("formulaires: " + code + " ignore, format inconnu '" + format + "' (GRAND, PETIT ou REGISTRE)");
-                ignores++;
-                continue;
-            }
             codesDataverse.add(code);
-            FormulaireImpressionStore.Row n = new FormulaireImpressionStore.Row();
-            n.code = code;
-            n.name = r.optString("filgo_name", "");
-            n.format = format;
-            n.version = r.optString("filgo_version", "");
-            n.active = r.optInt("statecode", 0) == 0;
-            n.manifest = r.optString("filgo_manifest", "");
-            n.dataverseId = r.optString("filgo_print_formid", "");
-            n.dataverseModified = r.optString("modifiedon", "");
-            String shaAnnonce = r.optString("filgo_pdf_sha256", "").trim();
-
-            FormulaireImpressionStore.Row old = store.get(code);
-            boolean inchange = old != null && old.dataverseModified.equals(n.dataverseModified) && old.pdf != null;
-            if (n.active && !"REGISTRE".equals(format)) {
-                if (inchange) {
-                    n.pdf = old.pdf;
-                    n.pdfSha256 = old.pdfSha256;
-                } else {
-                    byte[] pdf = null;
-                    try {
-                        pdf = telecharger(org + "/api/data/v9.2/" + set + "(" + n.dataverseId + ")/filgo_pdf/$value", token);
-                    } catch (Exception e) {
-                        journal("formulaires: " + code + " ignore, telechargement du PDF impossible : " + e.getMessage());
-                        continue;
-                    }
-                    if (pdf == null || pdf.length == 0) {
-                        journal("formulaires: " + code + " ignore, PDF absent dans Dataverse");
-                        continue;
-                    }
-                    String sha = sha256(pdf);
-                    if (!shaAnnonce.isEmpty() && !shaAnnonce.equalsIgnoreCase(sha)) {
-                        journal("formulaires: " + code + " ignore, sha256 du PDF different de celui annonce par Dataverse");
-                        continue;
-                    }
-                    n.pdf = pdf;
-                    n.pdfSha256 = sha;
-                }
-            } else if (old != null) {
-                n.pdf = old.pdf; // inactif ou REGISTRE : rien a telecharger
-                n.pdfSha256 = old.pdfSha256;
-            }
-            if (store.upsertFromDataverse(n)) nouveaux++;
+            int res = traiterFormulaire(ctx, token, org, m, store, r);
+            if (res > 0) nouveaux++;
+            else if (res < 0) ignores++;
         }
         // Lignes locales que Dataverse n'a plus : retirees (et retirees du service), seulement parce que la lecture est complete.
         int retires = 0;
@@ -154,52 +199,139 @@ public final class PrintDataverseSync {
                 + retires + " retire(s), " + ignores + " ignore(s))");
     }
 
-    private static void lireBannieres(Context ctx, String token) throws Exception {
-        String org = LcrConfig.getDataverseUrl(ctx);
-        String set = LcrConfig.DV_PRINT_BANNERS_SET;
-        String url = org + "/api/data/v9.2/" + set
-                + "?$select=filgo_print_bannerid,filgo_code,filgo_name,filgo_address_line1,filgo_city,filgo_province,"
-                + "filgo_postalcode,filgo_phone,filgo_tollfreephone,filgo_tax_info,filgo_footer_text,filgo_company,"
-                + "filgo_version,modifiedon,statecode";
-        List<JSONObject> rows;
+    /** @return 1 = ligne nouvelle ou modifiee, 0 = inchangee, -1 = ignoree (erreur journalisee). */
+    private static int traiterFormulaire(Context ctx, String token, String org, Meta m,
+                                         FormulaireImpressionStore store, JSONObject r) throws Exception {
+        String code = FormulaireImpressionStore.keyOf(r.optString("filgo_code", ""));
+        String format = libelle(r, "filgo_format").trim().toUpperCase(Locale.ROOT);
+        if (!format.equals("GRAND") && !format.equals("PETIT") && !format.equals("REGISTRE")) {
+            journal("formulaires: " + code + " ignore, format inconnu '" + format + "' (GRAND, PETIT ou REGISTRE)");
+            return -1;
+        }
+        FormulaireImpressionStore.Row n = new FormulaireImpressionStore.Row();
+        n.code = code;
+        n.name = r.optString("filgo_nom", "");
+        n.format = format;
+        n.version = r.optString("filgo_version", "");
+        n.active = r.optInt("statecode", 0) == 0;
+        n.manifest = r.optString("filgo_manifest", "");
+        n.dataverseId = r.optString(m.idAttr, "");
+        n.dataverseModified = versionNumber(r);
+        String shaAnnonce = r.optString("filgo_pdfsha256", "").trim();
+
+        FormulaireImpressionStore.Row old = store.get(code);
+        boolean inchange = old != null && old.dataverseModified.equals(n.dataverseModified) && old.pdf != null;
+        if (n.active && !"REGISTRE".equals(format)) {
+            if (inchange) {
+                n.pdf = old.pdf;
+                n.pdfSha256 = old.pdfSha256;
+            } else {
+                byte[] pdf;
+                try {
+                    pdf = telecharger(org + "/api/data/v9.2/" + m.set + "(" + n.dataverseId + ")/filgo_pdf/$value", token);
+                } catch (Exception e) {
+                    journal("formulaires: " + code + " ignore, telechargement du PDF impossible : " + e.getMessage());
+                    return -1;
+                }
+                if (pdf == null || pdf.length == 0) {
+                    journal("formulaires: " + code + " ignore, PDF absent dans Dataverse");
+                    return -1;
+                }
+                String sha = sha256(pdf);
+                if (!shaAnnonce.isEmpty() && !shaAnnonce.equalsIgnoreCase(sha)) {
+                    journal("formulaires: " + code + " ignore, sha256 du PDF different de celui annonce par Dataverse");
+                    return -1;
+                }
+                n.pdf = pdf;
+                n.pdfSha256 = sha;
+            }
+        } else if (old != null) {
+            n.pdf = old.pdf; // inactif ou REGISTRE : rien a telecharger
+            n.pdfSha256 = old.pdfSha256;
+        }
+        return store.upsertFromDataverse(n) ? 1 : 0;
+    }
+
+    /**
+     * Verification d'UN formulaire (deeplink FieldService -> service d'impression -> route /v1/print/form-check).
+     * Lit la ligne dans Dataverse, met a jour la copie locale et pousse au service si Dataverse est plus recent.
+     * @return "A_JOUR", "MAJ_APPLIQUEE" ou "INDISPONIBLE" (jamais d'exception)
+     */
+    public static String verifierFormulaire(Context ctx, String token, String code, String versionService) {
         try {
-            rows = lireToutesLesLignes(url, token);
-        } catch (TableAbsente e) {
-            journal("bannieres: table " + set + " absente de Dataverse : ignoree");
+            Meta m = meta(ctx, token, LcrConfig.DV_PRINT_FORMS_TABLE);
+            String org = LcrConfig.getDataverseUrl(ctx);
+            String url = org + "/api/data/v9.2/" + m.set + "?$select=" + m.idAttr + "," + FORM_SELECT
+                    + "&$filter=" + java.net.URLEncoder.encode("filgo_code eq '" + code.replace("'", "''") + "'", "UTF-8")
+                    .replace("+", "%20") + "&$top=1";
+            JSONObject page = getJson(url, token, 2500, 4000);
+            JSONArray arr = page.optJSONArray("value");
+            if (arr == null || arr.length() == 0) return "A_JOUR"; // inconnu de Dataverse : le service garde son formulaire
+            JSONObject r = arr.getJSONObject(0);
+            FormulaireImpressionStore store = new FormulaireImpressionStore(ctx);
+            int res = traiterFormulaire(ctx, token, org, m, store, r);
+            if (res < 0) return "INDISPONIBLE";
+            FormulaireImpressionStore.Row local = store.get(code);
+            boolean serviceAJour = local != null && FormulaireImpressionStore.SYNC_SENT.equals(local.serviceSync)
+                    && local.version.equals(versionService == null ? "" : versionService.trim());
+            if (serviceAJour) return "A_JOUR";
+            String resume = envoyerFormulairesAuService(ctx);
+            journal("formulaire " + code + " verifie : " + resume);
+            local = store.get(code);
+            return local != null && FormulaireImpressionStore.SYNC_SENT.equals(local.serviceSync) ? "MAJ_APPLIQUEE" : "INDISPONIBLE";
+        } catch (Exception e) {
+            journal("verification du formulaire " + code + " impossible : " + e.getMessage());
+            return "INDISPONIBLE";
+        }
+    }
+
+    // ------------------------------------------------------------------ Dataverse -> en-tetes (filgo_documentheader)
+
+    private static void lireEntetes(Context ctx, String token) throws Exception {
+        Meta m;
+        try { m = meta(ctx, token, LcrConfig.DV_PRINT_HEADERS_TABLE); }
+        catch (TableAbsente e) {
+            journal("en-tetes: table " + LcrConfig.DV_PRINT_HEADERS_TABLE + " absente de Dataverse : ignoree");
             return;
         }
+        String org = LcrConfig.getDataverseUrl(ctx);
+        String url = org + "/api/data/v9.2/" + m.set + "?$select=" + m.idAttr
+                + ",filgo_key,filgo_companyname,filgo_address,filgo_city,filgo_stateprovince,filgo_postalcode,"
+                + "filgo_phone,filgo_tollfreenumber,filgo_revision,modifiedon,statecode,versionnumber";
+        List<JSONObject> rows;
+        try { rows = lireToutesLesLignes(url, token); }
+        catch (TableAbsente e) { journal("en-tetes: table " + m.set + " absente de Dataverse : ignoree"); return; }
         BanniereImpressionStore store = new BanniereImpressionStore(ctx);
         Set<String> codes = new HashSet<>();
         int nouvelles = 0;
         for (JSONObject r : rows) {
-            String code = BanniereImpressionStore.keyOf(r.optString("filgo_code", ""));
+            String code = BanniereImpressionStore.keyOf(r.optString("filgo_key", ""));
             if (code.isEmpty()) continue;
             codes.add(code);
             BanniereImpressionStore.Row n = new BanniereImpressionStore.Row();
             n.code = code;
-            n.name = r.optString("filgo_name", "");
-            n.addressLine1 = r.optString("filgo_address_line1", "");
+            n.name = r.optString("filgo_companyname", "");
+            n.addressLine1 = r.optString("filgo_address", "");
             n.city = r.optString("filgo_city", "");
-            n.province = r.optString("filgo_province", "");
+            n.province = r.optString("filgo_stateprovince", "");
             n.postalCode = r.optString("filgo_postalcode", "");
             n.phone = r.optString("filgo_phone", "");
-            n.tollFreePhone = r.optString("filgo_tollfreephone", "");
-            n.taxInfo = r.optString("filgo_tax_info", "");
-            n.footerText = r.optString("filgo_footer_text", "");
-            n.company = libelle(r, "filgo_company");
-            n.version = r.optString("filgo_version", "");
+            n.tollFreePhone = r.optString("filgo_tollfreenumber", "");
+            // TPS / TVQ / pied de page : pas dans Dataverse pour l'instant (decision 9 nov : ajoutes localement).
+            n.version = r.optString("filgo_revision", "");
             n.active = r.optInt("statecode", 0) == 0;
-            n.dataverseId = r.optString("filgo_print_bannerid", "");
-            n.dataverseModified = r.optString("modifiedon", "");
+            n.dataverseId = r.optString(m.idAttr, "");
+            n.dataverseModified = versionNumber(r);
             BanniereImpressionStore.Row old = store.get(code);
             boolean inchange = old != null && old.dataverseModified.equals(n.dataverseModified) && old.version.equals(n.version);
             if (inchange) continue;
+            if (old != null) { n.taxInfo = old.taxInfo; n.footerText = old.footerText; n.company = old.company; }
             if (n.active) {
                 try {
-                    byte[] logo = telecharger(org + "/api/data/v9.2/" + set + "(" + n.dataverseId + ")/filgo_logo/$value", token);
+                    byte[] logo = telecharger(org + "/api/data/v9.2/" + m.set + "(" + n.dataverseId + ")/filgo_logo/$value", token);
                     if (logo != null && logo.length > 0) { n.logo = logo; n.logoSha256 = sha256(logo); }
                 } catch (Exception e) {
-                    journal("bannieres: logo de " + code + " non lu : " + e.getMessage());
+                    journal("en-tetes: logo de " + code + " non lu : " + e.getMessage());
                     if (old != null) { n.logo = old.logo; n.logoSha256 = old.logoSha256; }
                 }
             }
@@ -209,7 +341,150 @@ public final class PrintDataverseSync {
         for (BanniereImpressionStore.Row l : store.listAll()) {
             if (!codes.contains(l.code)) { store.delete(l.code); retirees++; }
         }
-        journal("bannieres: Dataverse lu (" + rows.size() + " ligne(s), " + nouvelles + " nouvelle(s)/modifiee(s), " + retirees + " retiree(s))");
+        journal("en-tetes: Dataverse lu (" + rows.size() + " ligne(s), " + nouvelles + " nouvelle(s)/modifiee(s), " + retirees + " retiree(s))");
+    }
+
+    // ------------------------------------------------------------------ imprimantes : Dataverse <-> local
+
+    /** Dataverse -> local. Une ligne locale pas encore envoyee a Dataverse n'est jamais ecrasee. */
+    private static void lireImprimantes(Context ctx, String token) throws Exception {
+        Meta m;
+        try { m = meta(ctx, token, LcrConfig.DV_PRINT_PRINTERS_TABLE); }
+        catch (TableAbsente e) {
+            journal("imprimantes: table " + LcrConfig.DV_PRINT_PRINTERS_TABLE + " absente de Dataverse : ignoree");
+            return;
+        }
+        String url = LcrConfig.getDataverseUrl(ctx) + "/api/data/v9.2/" + m.set + "?$select=" + m.idAttr
+                + ",filgo_citerne_id,filgo_registre,filgo_model,filgo_btmac,filgo_version,statecode,versionnumber";
+        List<JSONObject> rows;
+        try { rows = lireToutesLesLignes(url, token); }
+        catch (TableAbsente e) { journal("imprimantes: table " + m.set + " absente de Dataverse : ignoree"); return; }
+        ImprimanteCiterneStore store = new ImprimanteCiterneStore(ctx);
+        int changees = 0, ignorees = 0;
+        for (JSONObject r : rows) {
+            if (r.optInt("statecode", 0) != 0) continue; // inactive : on ne la reprend pas
+            String citerne = guid(r.optString("filgo_citerne_id", ""));
+            if (citerne.isEmpty()) {
+                journal("imprimantes: ligne ignoree, citerne absente ou pas un GUID : '" + r.optString("filgo_citerne_id", "") + "'");
+                ignorees++;
+                continue;
+            }
+            String modele = libelle(r, "filgo_model");
+            String driver = driverDepuisLibelle(modele);
+            if (driver.isEmpty()) {
+                journal("imprimantes: " + citerne + " ignoree, modele inconnu '" + modele + "' (voir PrinterCatalog)");
+                ignorees++;
+                continue;
+            }
+            String mac = ImprimanteCiterneStore.macOf(r.optString("filgo_btmac", ""));
+            if (com.pa.lcrdemo.print.PrinterCatalog.isRegistre(driver)) mac = com.pa.lcrdemo.print.PrinterCatalog.REGISTRE_TARGET;
+            if (mac.isEmpty()) {
+                journal("imprimantes: " + citerne + " ignoree, btmac vide pour un pilote non registre");
+                ignorees++;
+                continue;
+            }
+            ImprimanteCiterneStore.Row n = new ImprimanteCiterneStore.Row();
+            n.truckId = citerne;
+            n.driverType = driver;
+            n.format = com.pa.lcrdemo.print.PrinterCatalog.formatFor(driver);
+            n.btMac = mac;
+            n.printerName = modele;
+            n.company = "";
+            n.registreSerial = r.optString("filgo_registre", "");
+            ImprimanteCiterneStore.Row old = store.get(citerne, mac);
+            if (old != null) n.company = old.company == null ? "" : old.company;
+            if (store.upsertFromDataverse(n, r.optString(m.idAttr, ""), versionNumber(r))) changees++;
+        }
+        journal("imprimantes: Dataverse lu (" + rows.size() + " ligne(s), " + changees + " nouvelle(s)/modifiee(s), " + ignorees + " ignoree(s))");
+    }
+
+    /** Local -> Dataverse : cree ou met a jour filgo_imprimante pour chaque ligne saisie / modifiee ici. */
+    private static void envoyerImprimantesADataverse(Context ctx, String token) throws Exception {
+        ImprimanteCiterneStore store = new ImprimanteCiterneStore(ctx);
+        List<ImprimanteCiterneStore.Row> aEnvoyer = store.listToPushToDataverse();
+        if (aEnvoyer.isEmpty()) return;
+        Meta m;
+        try { m = meta(ctx, token, LcrConfig.DV_PRINT_PRINTERS_TABLE); }
+        catch (TableAbsente e) {
+            journal("imprimantes: table " + LcrConfig.DV_PRINT_PRINTERS_TABLE + " absente de Dataverse : envoi reporte");
+            return;
+        }
+        java.util.Map<Integer, String> choix = options(ctx, token, LcrConfig.DV_PRINT_PRINTERS_TABLE, "filgo_model");
+        String org = LcrConfig.getDataverseUrl(ctx);
+        int ok = 0, err = 0;
+        for (ImprimanteCiterneStore.Row r : aEnvoyer) {
+            try {
+                Integer valeurModele = null;
+                for (java.util.Map.Entry<Integer, String> e : choix.entrySet()) {
+                    if (r.driverType.equals(driverDepuisLibelle(e.getValue()))) { valeurModele = e.getKey(); break; }
+                }
+                if (valeurModele == null) {
+                    journal("imprimantes: " + r.truckId + " non envoyee, aucun choix filgo_model ne correspond au pilote " + r.driverType);
+                    err++;
+                    continue;
+                }
+                String citerne = guid(r.truckId);
+                if (citerne.isEmpty()) {
+                    journal("imprimantes: " + r.truckId + " non envoyee a Dataverse, la citerne n'est pas un GUID");
+                    err++;
+                    continue;
+                }
+                String mac = ImprimanteCiterneStore.macOf(r.btMac);
+                JSONObject body = new JSONObject();
+                body.put("filgo_citerne_id", citerne);
+                body.put("filgo_registre", r.registreSerial == null ? "" : r.registreSerial);
+                body.put("filgo_btmac", mac);
+                body.put("filgo_model", valeurModele);
+                String nom = (r.printerName == null || r.printerName.isEmpty() ? r.driverType : r.printerName) + " - " + mac;
+                if (!m.nameAttr.isEmpty() && !body.has(m.nameAttr)) body.put(m.nameAttr, nom);
+
+                // Existe-t-elle deja (citerne + btmac) ?
+                String filtre = "filgo_citerne_id eq '" + citerne + "' and filgo_btmac eq '" + mac.replace("'", "''") + "'";
+                String urlFind = org + "/api/data/v9.2/" + m.set + "?$select=" + m.idAttr + ",filgo_version&$top=1&$filter="
+                        + java.net.URLEncoder.encode(filtre, "UTF-8").replace("+", "%20");
+                JSONArray ex = getJson(urlFind, token, 15000, 30000).optJSONArray("value");
+                JSONObject reponse;
+                if (ex != null && ex.length() > 0) {
+                    String id = ex.getJSONObject(0).optString(m.idAttr, "");
+                    reponse = ecrire("PATCH", org + "/api/data/v9.2/" + m.set + "(" + id + ")?$select=" + m.idAttr + ",versionnumber", body, token);
+                } else {
+                    body.put("filgo_version", "1");
+                    reponse = ecrire("POST", org + "/api/data/v9.2/" + m.set + "?$select=" + m.idAttr + ",versionnumber", body, token);
+                }
+                store.markDataverse(r.id, reponse.optString(m.idAttr, ""), versionNumber(reponse));
+                ok++;
+            } catch (Exception e) {
+                err++;
+                journal("imprimantes: envoi a Dataverse de " + r.truckId + " ERR " + e.getMessage());
+            }
+        }
+        journal("imprimantes: " + ok + " envoyee(s) a Dataverse" + (err > 0 ? ", " + err + " en erreur (la ligne reste a envoyer)" : ""));
+    }
+
+    // ------------------------------------------------------------------ tables locales -> service d'impression
+
+    /** Envoie au service les imprimantes pas encore SENT (POST /truck-printer). */
+    public static String envoyerImprimantesAuService(Context ctx) {
+        ImprimanteCiterneStore store = new ImprimanteCiterneStore(ctx);
+        List<ImprimanteCiterneStore.Row> aEnvoyer = store.listToSendToService();
+        if (aEnvoyer.isEmpty()) return "Aucune imprimante à envoyer au service.";
+        int ok = 0, err = 0;
+        String dernier = "";
+        for (ImprimanteCiterneStore.Row r : aEnvoyer) {
+            PrintServiceClient.Result res = PrintServiceClient.push(r, false);
+            if (res.ok) {
+                store.markService(r.id, ImprimanteCiterneStore.SYNC_SENT, null);
+                ok++;
+            } else {
+                store.markService(r.id, ImprimanteCiterneStore.SYNC_ERROR, res.message);
+                err++;
+                dernier = res.message;
+                if (res.message.contains("injoignable")) break;
+            }
+        }
+        String resume = ok + " imprimante(s) envoyée(s) au service" + (err > 0 ? ", " + err + " en erreur (" + dernier + ")" : "");
+        journal("imprimantes: " + resume);
+        return resume;
     }
 
     // ------------------------------------------------------------------ tables locales -> service d'impression
@@ -266,11 +541,45 @@ public final class PrintDataverseSync {
     }
 
     private static JSONObject getJson(String urlStr, String token) throws Exception {
+        return getJson(urlStr, token, 15000, 30000);
+    }
+
+    /** POST / PATCH JSON vers Dataverse ; retourne la ligne ecrite (Prefer: return=representation). */
+    private static JSONObject ecrire(String methode, String urlStr, JSONObject body, String token) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        try {
+            // PATCH n'est pas toujours accepte par HttpURLConnection : on passe par l'en-tete de surcharge.
+            conn.setRequestMethod("POST");
+            if ("PATCH".equals(methode)) conn.setRequestProperty("X-HTTP-Method-Override", "PATCH");
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(30000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Authorization", "Bearer " + token);
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            conn.setRequestProperty("OData-MaxVersion", "4.0");
+            conn.setRequestProperty("OData-Version", "4.0");
+            conn.setRequestProperty("Prefer", "return=representation");
+            byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
+            conn.setFixedLengthStreamingMode(payload.length);
+            try (java.io.OutputStream os = conn.getOutputStream()) { os.write(payload); }
+            int code = conn.getResponseCode();
+            if (code == 200 || code == 201) {
+                return new JSONObject(new String(lire(conn.getInputStream()), StandardCharsets.UTF_8));
+            }
+            if (code == 204) return new JSONObject();
+            throw new RuntimeException("HTTP " + code + ": " + corpsErreur(conn));
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private static JSONObject getJson(String urlStr, String token, int connMs, int readMs) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
         try {
             conn.setRequestMethod("GET");
-            conn.setConnectTimeout(15000);
-            conn.setReadTimeout(30000);
+            conn.setConnectTimeout(connMs);
+            conn.setReadTimeout(readMs);
             conn.setRequestProperty("Authorization", "Bearer " + token);
             conn.setRequestProperty("Accept", "application/json");
             conn.setRequestProperty("OData-MaxVersion", "4.0");

@@ -44,8 +44,12 @@ public class LcrConfig {
      * a la creation des tables : tant qu'une table n'existe pas (HTTP 404), la synchronisation l'ignore.
      * Colonnes lues : voir PrintDataverseSync.
      */
-    public static final String DV_PRINT_FORMS_SET   = "filgo_print_forms";
-    public static final String DV_PRINT_BANNERS_SET = "filgo_print_banners";
+    // 9 nov 2026 : noms LOGIQUES des vraies tables ; le jeu d'entites, la cle et les valeurs de choix sont
+    // decouverts dans Dataverse a l'execution (voir PrintDataverseSync.meta).
+    public static final String DV_PRINT_FORMS_TABLE    = "filgo_formulairepdf";
+    public static final String DV_PRINT_HEADERS_TABLE  = "filgo_documentheader";
+    public static final String DV_PRINT_PRINTERS_TABLE = "filgo_imprimante";
+    public static final String DV_PRINT_COMMANDS_TABLE = "filgo_commandesdimpression";
 
     public static String getDataverseUrl(Context ctx) {
         return get(ctx, "lcr_dataverse_url_" + env(ctx).toLowerCase(),
