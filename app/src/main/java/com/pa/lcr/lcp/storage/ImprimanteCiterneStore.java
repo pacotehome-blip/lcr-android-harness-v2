@@ -161,7 +161,7 @@ public class ImprimanteCiterneStore {
         List<Row> out = new ArrayList<>();
         SQLiteDatabase db = helper.getReadableDatabase();
         try (Cursor c = db.query(TABLE, null, "dataverse_version IS NULL OR dataverse_version=''",
-                null, null, null, null, "truck_key ASC")) {
+                null, null, null, "truck_key ASC")) {
             while (c.moveToNext()) out.add(Row.from(c));
         }
         return out;
