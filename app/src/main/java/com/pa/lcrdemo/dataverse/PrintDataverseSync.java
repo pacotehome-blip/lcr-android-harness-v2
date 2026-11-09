@@ -120,15 +120,62 @@ public final class PrintDataverseSync {
         return "";
     }
 
+    /** GUID de la citerne d'une imprimante locale : le truckId s'il en est un, sinon via le registre (citerne_guid). */
+    private static String guidCiternePour(Context ctx, ImprimanteCiterneStore.Row r) {
+        String g = guid(r.truckId);
+        if (!g.isEmpty()) return g;
+        try {
+            com.pa.lcr.lcp.storage.RegistreStore rs = new com.pa.lcr.lcp.storage.RegistreStore(ctx);
+            if (r.registreSerial != null && !r.registreSerial.trim().isEmpty()) {
+                com.pa.lcr.lcp.storage.RegistreStore.Row reg = rs.getBySerial(r.registreSerial.trim());
+                if (reg != null && !guid(reg.citerneGuid).isEmpty()) return guid(reg.citerneGuid);
+            }
+            for (com.pa.lcr.lcp.storage.RegistreStore.Row reg : rs.listAll()) {
+                if (reg.citerneNom != null && reg.citerneNom.trim().equalsIgnoreCase(r.truckId == null ? "" : r.truckId.trim())
+                        && !guid(reg.citerneGuid).isEmpty()) return guid(reg.citerneGuid);
+            }
+        } catch (Exception ignored) { }
+        return "";
+    }
+
+    /** Nom de citerne connu du registre pour ce GUID ; "" si inconnu. */
+    private static String nomPourGuid(Context ctx, String g) {
+        try {
+            for (com.pa.lcr.lcp.storage.RegistreStore.Row reg : new com.pa.lcr.lcp.storage.RegistreStore(ctx).listAll()) {
+                if (g.equals(guid(reg.citerneGuid)) && reg.citerneNom != null && !reg.citerneNom.trim().isEmpty()) {
+                    return reg.citerneNom.trim();
+                }
+            }
+        } catch (Exception ignored) { }
+        return "";
+    }
+
+    /** Identifiant local de la citerne pour une ligne Dataverse : le NOM connu du registre (comme aujourd'hui), sinon le GUID. */
+    private static String truckIdPourGuid(Context ctx, String guid) {
+        try {
+            for (com.pa.lcr.lcp.storage.RegistreStore.Row reg : new com.pa.lcr.lcp.storage.RegistreStore(ctx).listAll()) {
+                if (guid.equals(guid(reg.citerneGuid)) && reg.citerneNom != null && !reg.citerneNom.trim().isEmpty()) {
+                    return reg.citerneNom.trim();
+                }
+            }
+        } catch (Exception ignored) { }
+        return guid;
+    }
+
     /** GUID de citerne : minuscules, sans accolades ; "" si ce n'est pas un GUID. */
     static String guid(String s) {
         String g = s == null ? "" : s.trim().replace("{", "").replace("}", "").toLowerCase(Locale.ROOT);
         return g.matches("[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}") ? g : "";
     }
 
+    /** Valeur texte d'une colonne ; "" si absente OU null (optString renvoie "null" pour un null JSON). */
+    private static String str(JSONObject r, String k) {
+        return r == null || r.isNull(k) ? "" : r.optString(k, "");
+    }
+
     private static String versionNumber(JSONObject r) {
         Object v = r.opt("versionnumber");
-        return v == null || v == JSONObject.NULL ? r.optString("modifiedon", "") : String.valueOf(v);
+        return v == null || v == JSONObject.NULL ? str(r, "modifiedon") : String.valueOf(v);
     }
 
     // ------------------------------------------------------------------ point d'entree
@@ -179,7 +226,7 @@ public final class PrintDataverseSync {
         Set<String> codesDataverse = new HashSet<>();
         int nouveaux = 0, ignores = 0;
         for (JSONObject r : rows) {
-            String code = FormulaireImpressionStore.keyOf(r.optString("filgo_code", ""));
+            String code = FormulaireImpressionStore.keyOf(str(r, "filgo_code"));
             if (code.isEmpty()) { ignores++; continue; }
             codesDataverse.add(code);
             int res = traiterFormulaire(ctx, token, org, m, store, r);
@@ -202,7 +249,7 @@ public final class PrintDataverseSync {
     /** @return 1 = ligne nouvelle ou modifiee, 0 = inchangee, -1 = ignoree (erreur journalisee). */
     private static int traiterFormulaire(Context ctx, String token, String org, Meta m,
                                          FormulaireImpressionStore store, JSONObject r) throws Exception {
-        String code = FormulaireImpressionStore.keyOf(r.optString("filgo_code", ""));
+        String code = FormulaireImpressionStore.keyOf(str(r, "filgo_code"));
         String format = libelle(r, "filgo_format").trim().toUpperCase(Locale.ROOT);
         if (!format.equals("GRAND") && !format.equals("PETIT") && !format.equals("REGISTRE")) {
             journal("formulaires: " + code + " ignore, format inconnu '" + format + "' (GRAND, PETIT ou REGISTRE)");
@@ -210,14 +257,14 @@ public final class PrintDataverseSync {
         }
         FormulaireImpressionStore.Row n = new FormulaireImpressionStore.Row();
         n.code = code;
-        n.name = r.optString("filgo_nom", "");
+        n.name = str(r, "filgo_nom");
         n.format = format;
-        n.version = r.optString("filgo_version", "");
+        n.version = str(r, "filgo_version");
         n.active = r.optInt("statecode", 0) == 0;
-        n.manifest = r.optString("filgo_manifest", "");
-        n.dataverseId = r.optString(m.idAttr, "");
+        n.manifest = str(r, "filgo_manifest");
+        n.dataverseId = str(r, m.idAttr);
         n.dataverseModified = versionNumber(r);
-        String shaAnnonce = r.optString("filgo_pdfsha256", "").trim();
+        String shaAnnonce = str(r, "filgo_pdfsha256").trim();
 
         FormulaireImpressionStore.Row old = store.get(code);
         boolean inchange = old != null && old.dataverseModified.equals(n.dataverseModified) && old.pdf != null;
@@ -305,22 +352,22 @@ public final class PrintDataverseSync {
         Set<String> codes = new HashSet<>();
         int nouvelles = 0;
         for (JSONObject r : rows) {
-            String code = BanniereImpressionStore.keyOf(r.optString("filgo_key", ""));
+            String code = BanniereImpressionStore.keyOf(str(r, "filgo_key"));
             if (code.isEmpty()) continue;
             codes.add(code);
             BanniereImpressionStore.Row n = new BanniereImpressionStore.Row();
             n.code = code;
-            n.name = r.optString("filgo_companyname", "");
-            n.addressLine1 = r.optString("filgo_address", "");
-            n.city = r.optString("filgo_city", "");
-            n.province = r.optString("filgo_stateprovince", "");
-            n.postalCode = r.optString("filgo_postalcode", "");
-            n.phone = r.optString("filgo_phone", "");
-            n.tollFreePhone = r.optString("filgo_tollfreenumber", "");
+            n.name = str(r, "filgo_companyname");
+            n.addressLine1 = str(r, "filgo_address");
+            n.city = str(r, "filgo_city");
+            n.province = str(r, "filgo_stateprovince");
+            n.postalCode = str(r, "filgo_postalcode");
+            n.phone = str(r, "filgo_phone");
+            n.tollFreePhone = str(r, "filgo_tollfreenumber");
             // TPS / TVQ / pied de page : pas dans Dataverse pour l'instant (decision 9 nov : ajoutes localement).
-            n.version = r.optString("filgo_revision", "");
+            n.version = str(r, "filgo_revision");
             n.active = r.optInt("statecode", 0) == 0;
-            n.dataverseId = r.optString(m.idAttr, "");
+            n.dataverseId = str(r, m.idAttr);
             n.dataverseModified = versionNumber(r);
             BanniereImpressionStore.Row old = store.get(code);
             boolean inchange = old != null && old.dataverseModified.equals(n.dataverseModified) && old.version.equals(n.version);
@@ -355,6 +402,7 @@ public final class PrintDataverseSync {
             return;
         }
         String url = LcrConfig.getDataverseUrl(ctx) + "/api/data/v9.2/" + m.set + "?$select=" + m.idAttr
+                + (m.nameAttr.isEmpty() ? "" : "," + m.nameAttr)
                 + ",filgo_citerne_id,filgo_registre,filgo_model,filgo_btmac,filgo_version,statecode,versionnumber";
         List<JSONObject> rows;
         try { rows = lireToutesLesLignes(url, token); }
@@ -363,9 +411,9 @@ public final class PrintDataverseSync {
         int changees = 0, ignorees = 0;
         for (JSONObject r : rows) {
             if (r.optInt("statecode", 0) != 0) continue; // inactive : on ne la reprend pas
-            String citerne = guid(r.optString("filgo_citerne_id", ""));
+            String citerne = guid(str(r, "filgo_citerne_id"));
             if (citerne.isEmpty()) {
-                journal("imprimantes: ligne ignoree, citerne absente ou pas un GUID : '" + r.optString("filgo_citerne_id", "") + "'");
+                journal("imprimantes: ligne ignoree, citerne absente ou pas un GUID : '" + str(r, "filgo_citerne_id") + "'");
                 ignorees++;
                 continue;
             }
@@ -376,7 +424,7 @@ public final class PrintDataverseSync {
                 ignorees++;
                 continue;
             }
-            String mac = ImprimanteCiterneStore.macOf(r.optString("filgo_btmac", ""));
+            String mac = ImprimanteCiterneStore.macOf(str(r, "filgo_btmac"));
             if (com.pa.lcrdemo.print.PrinterCatalog.isRegistre(driver)) mac = com.pa.lcrdemo.print.PrinterCatalog.REGISTRE_TARGET;
             if (mac.isEmpty()) {
                 journal("imprimantes: " + citerne + " ignoree, btmac vide pour un pilote non registre");
@@ -384,16 +432,19 @@ public final class PrintDataverseSync {
                 continue;
             }
             ImprimanteCiterneStore.Row n = new ImprimanteCiterneStore.Row();
-            n.truckId = citerne;
+            // Cle locale (= celle du service et du deeplink) : le NOM de la citerne, lisible. Colonne nom principale
+            // de la ligne ; a defaut le nom connu du registre ; a defaut le GUID.
+            String nomCiterne = m.nameAttr.isEmpty() ? "" : str(r, m.nameAttr).trim();
+            n.truckId = !nomCiterne.isEmpty() ? nomCiterne : truckIdPourGuid(ctx, citerne);
             n.driverType = driver;
             n.format = com.pa.lcrdemo.print.PrinterCatalog.formatFor(driver);
             n.btMac = mac;
             n.printerName = modele;
             n.company = "";
-            n.registreSerial = r.optString("filgo_registre", "");
-            ImprimanteCiterneStore.Row old = store.get(citerne, mac);
+            n.registreSerial = str(r, "filgo_registre");
+            ImprimanteCiterneStore.Row old = store.get(n.truckId, mac);
             if (old != null) n.company = old.company == null ? "" : old.company;
-            if (store.upsertFromDataverse(n, r.optString(m.idAttr, ""), versionNumber(r))) changees++;
+            if (store.upsertFromDataverse(n, str(r, m.idAttr), versionNumber(r))) changees++;
         }
         journal("imprimantes: Dataverse lu (" + rows.size() + " ligne(s), " + changees + " nouvelle(s)/modifiee(s), " + ignorees + " ignoree(s))");
     }
@@ -423,9 +474,9 @@ public final class PrintDataverseSync {
                     err++;
                     continue;
                 }
-                String citerne = guid(r.truckId);
+                String citerne = guidCiternePour(ctx, r);
                 if (citerne.isEmpty()) {
-                    journal("imprimantes: " + r.truckId + " non envoyee a Dataverse, la citerne n'est pas un GUID");
+                    journal("imprimantes: " + r.truckId + " non envoyee a Dataverse, GUID de la citerne introuvable (registre " + r.registreSerial + ")");
                     err++;
                     continue;
                 }
@@ -435,8 +486,12 @@ public final class PrintDataverseSync {
                 body.put("filgo_registre", r.registreSerial == null ? "" : r.registreSerial);
                 body.put("filgo_btmac", mac);
                 body.put("filgo_model", valeurModele);
-                String nom = (r.printerName == null || r.printerName.isEmpty() ? r.driverType : r.printerName) + " - " + mac;
-                if (!m.nameAttr.isEmpty() && !body.has(m.nameAttr)) body.put(m.nameAttr, nom);
+                // Colonne nom principale = nom de la citerne (lisible pour qui ajoute / verifie l'imprimante).
+                // Si le truckId local est lui-meme un GUID, on garde le nom connu du registre.
+                String nomCiterne = r.truckId == null ? "" : r.truckId.trim();
+                if (!guid(nomCiterne).isEmpty()) nomCiterne = nomPourGuid(ctx, citerne);
+                if (nomCiterne.isEmpty()) nomCiterne = citerne;
+                if (!m.nameAttr.isEmpty() && !body.has(m.nameAttr)) body.put(m.nameAttr, nomCiterne);
 
                 // Existe-t-elle deja (citerne + btmac) ?
                 String filtre = "filgo_citerne_id eq '" + citerne + "' and filgo_btmac eq '" + mac.replace("'", "''") + "'";
@@ -518,8 +573,8 @@ public final class PrintDataverseSync {
     // ------------------------------------------------------------------ utilitaires HTTP
 
     private static String libelle(JSONObject r, String col) {
-        String f = r.optString(col + "@" + ANNOT, "");
-        return f.isEmpty() ? r.optString(col, "") : f;
+        String f = str(r, col + "@" + ANNOT);
+        return f.isEmpty() ? str(r, col) : f;
     }
 
     /** Lit toutes les pages (@odata.nextLink). 404 : TableAbsente ; autre echec : exception (rien n'est retire). */
