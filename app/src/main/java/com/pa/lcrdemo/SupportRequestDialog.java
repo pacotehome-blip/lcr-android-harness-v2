@@ -279,6 +279,10 @@ final class SupportRequestDialog {
                     final StringBuilder corps = new StringBuilder(contexte);
                     if (!commentaire.isEmpty()) corps.append("\n\nCommentaire :\n").append(commentaire);
                     if (avecAudio) corps.append("\n\n(Message vocal joint)");
+                    corps.append("\n\nPrise en main à distance (SOTI MobiControl) — ID de la tablette : ")
+                         .append(idSoti());
+                    if (!SimplifiedConfig.SOTI_CONSOLE_URL.isEmpty())
+                        corps.append("\nConsole : ").append(SimplifiedConfig.SOTI_CONSOLE_URL);
                     final String sujet = "Support Filgo-Registre — " + SimplifiedUiState.nomTablette(act)
                             + " — WO " + (wo.isEmpty() ? "—" : wo)
                             + " — #" + serie + " Node " + node;
@@ -322,6 +326,13 @@ final class SupportRequestDialog {
                     });
                 }
             }, "support-prepare").start();
+        }
+
+        /** La tablette porte le même identifiant que son profil SOTI : c'est le nom d'appareil Android. */
+        String idSoti() {
+            String nom = null;
+            try { nom = android.provider.Settings.Global.getString(act.getContentResolver(), "device_name"); } catch (Throwable ignored) {}
+            return (nom != null && !nom.trim().isEmpty()) ? nom.trim() : SimplifiedUiState.nomTablette(act);
         }
 
         void reactiverBouton() {
