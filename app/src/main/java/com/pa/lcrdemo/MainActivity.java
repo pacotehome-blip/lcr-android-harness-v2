@@ -1880,6 +1880,37 @@ private void setupTabsTop() {
             logPanel.setVisibility(simple ? View.GONE : (cbShowLog != null && cbShowLog.isChecked() ? View.VISIBLE : View.GONE));
         }
         if (simple) showPage(0);
+        masquerBarresSysteme(simple);
+    }
+
+    /**
+     * Mode plein écran (9 nov 2026, demande Paul — « couvrir tout l'écran ») : en mode simplifié chauffeur, la barre
+     * d'état et la barre / le dock de navigation Android sont masqués ; un glissement depuis le bord les fait
+     * réapparaître un instant. Le mode Admin les remet. Aucune autre logique de l'app n'est touchée.
+     */
+    private void masquerBarresSysteme(boolean masquer) {
+        try {
+            android.view.Window w = getWindow();
+            androidx.core.view.WindowInsetsControllerCompat c =
+                    androidx.core.view.WindowCompat.getInsetsController(w, w.getDecorView());
+            if (c == null) return;
+            if (masquer) {
+                c.setSystemBarsBehavior(
+                        androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                c.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars());
+            } else {
+                c.show(androidx.core.view.WindowInsetsCompat.Type.systemBars());
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("MainActivity", "masquerBarresSysteme ERR: " + t.getMessage());
+        }
+    }
+
+    /** Après une boîte de dialogue, un retour d'application ou une barre apparue un instant : on remasque. */
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && Boolean.TRUE.equals(modeSimplifieApplique)) masquerBarresSysteme(true);
     }
 
     public void showPage(int index) {
