@@ -47,6 +47,8 @@ import java.util.function.Consumer;
  * en fichier .txt. Le chauffeur peut ajouter un commentaire texte ET/OU un message vocal (.m4a,
  * 60 s max). Envoi : Outlook, Teams (partage Android vers l'application, sinon sélecteur système)
  * ou appel au support (si SimplifiedConfig.SUPPORT_PHONE est renseigné).
+ * ✅ 9 nov 2026 : un seul bouton « Envoyer au support » — courriel à support.ti@filgo.ca (crée le ticket)
+ * + message Teams, envoyés en silence par Microsoft Graph ; repli : courriel pré-rempli.
  *
  * Rien n'est envoyé sans que le chauffeur appuie sur un bouton d'envoi ; rien n'est stocké
  * ailleurs que dans le cache de l'app (sous-dossier support/, purgé après 1 jour).
@@ -73,8 +75,10 @@ final class SupportRequestDialog {
         long debutEnregistrement = 0L;
         boolean enregistre = false;     // un fichier audio valide existe
         MaterialButton btnRec;
+        MaterialButton btnEnvoyer;
         TextView txtTimer;
         EditText edtComment;
+        androidx.appcompat.app.AlertDialog dialogue;
 
         final Runnable tickTimer = new Runnable() {
             @Override public void run() {
@@ -152,45 +156,25 @@ final class SupportRequestDialog {
             col.addView(edtComment, new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-            col.addView(etiquette("ENVOYER PAR"));
-            LinearLayout canaux = new LinearLayout(act);
-            canaux.setOrientation(LinearLayout.HORIZONTAL);
-            canaux.addView(boutonCanal("Outlook", v -> envoyer(SimplifiedConfig.OUTLOOK_PACKAGE)), paramsCanal(false));
-            canaux.addView(boutonCanal("Teams", v -> envoyer(SimplifiedConfig.TEAMS_PACKAGE)), paramsCanal(true));
-            if (!SimplifiedConfig.SUPPORT_PHONE.isEmpty()) {
-                canaux.addView(boutonCanal("Appeler", v -> appeler()), paramsCanal(true));
-            }
-            col.addView(canaux);
-
-            // Lien SOTI MobiControl (ouvre l'agent de gestion de la tablette)
-            LinearLayout rangeeSoti = new LinearLayout(act);
-            rangeeSoti.setOrientation(LinearLayout.HORIZONTAL);
-            rangeeSoti.addView(boutonCanal("Ouvrir SOTI MobiControl", v -> ouvrirSoti()), paramsCanal(false));
-            col.addView(rangeeSoti);
+            btnEnvoyer = new MaterialButton(act);
+            btnEnvoyer.setText("Envoyer au support");
+            btnEnvoyer.setAllCaps(false);
+            btnEnvoyer.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.parseColor("#024B3C")));
+            btnEnvoyer.setOnClickListener(v -> envoyer());
+            LinearLayout.LayoutParams lpEnv = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, (int) dp(56));
+            lpEnv.topMargin = (int) dp(18);
+            col.addView(btnEnvoyer, lpEnv);
 
             ScrollView sv = new ScrollView(act);
             sv.addView(col);
 
-            new MaterialAlertDialogBuilder(act)
+            dialogue = new MaterialAlertDialogBuilder(act)
                     .setTitle("Demander du support")
                     .setView(sv)
                     .setNegativeButton("Annuler", null)
                     .setOnDismissListener(d -> arreterEnregistrement(false))
                     .show();
-        }
-
-        MaterialButton boutonCanal(String texte, View.OnClickListener l) {
-            MaterialButton b = new MaterialButton(act, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
-            b.setText(texte);
-            b.setAllCaps(false);
-            b.setOnClickListener(l);
-            return b;
-        }
-
-        LinearLayout.LayoutParams paramsCanal(boolean marge) {
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, (int) dp(52), 1f);
-            if (marge) lp.setMarginStart((int) dp(8));
-            return lp;
         }
 
         // ---------------------------------------------------------------- audio
@@ -271,8 +255,10 @@ final class SupportRequestDialog {
 
         // ---------------------------------------------------------------- envoi
 
-        void envoyer(final String paquet) {
+        void envoyer() {
             if (recorder != null) arreterEnregistrement(true);
+            btnEnvoyer.setEnabled(false);
+            btnEnvoyer.setText("Envoi en cours…");
             final String commentaire = edtComment.getText() != null ? edtComment.getText().toString().trim() : "";
             final boolean avecAudio = enregistre && fichierAudio != null && fichierAudio.exists();
             // Le journal peut être gros : écrit hors du fil UI.
@@ -288,10 +274,7 @@ final class SupportRequestDialog {
                         w.write("\n===== Journal (" + SimplifiedConfig.SUPPORT_JOURNAL_MINUTES + " dernières minutes) =====\n");
                         w.write(construireJournal());
                     }
-                    final ArrayList<Uri> uris = new ArrayList<>();
-                    String auth = act.getPackageName() + ".fileprovider";
-                    uris.add(FileProvider.getUriForFile(act, auth, journal));
-                    if (avecAudio) uris.add(FileProvider.getUriForFile(act, auth, fichierAudio));
+                    final File audio = avecAudio ? fichierAudio : null;
 
                     final StringBuilder corps = new StringBuilder(contexte);
                     if (!commentaire.isEmpty()) corps.append("\n\nCommentaire :\n").append(commentaire);
@@ -300,58 +283,70 @@ final class SupportRequestDialog {
                             + " — WO " + (wo.isEmpty() ? "—" : wo)
                             + " — #" + serie + " Node " + node;
 
-                    act.runOnUiThread(() -> lancerPartage(paquet, sujet, corps.toString(), uris));
+                    // 1) Envoi silencieux par Microsoft Graph (courriel + Teams)
+                    SupportGraphSender.envoyer(act, sujet, corps.toString(), journal, audio,
+                            new SupportGraphSender.Resultat() {
+                        @Override public void courrielEnvoye(boolean teamsOk) {
+                            act.runOnUiThread(() -> {
+                                Toast.makeText(act, teamsOk
+                                        ? "Demande envoyée au support (courriel + Teams)"
+                                        : "Demande envoyée au support (courriel)", Toast.LENGTH_LONG).show();
+                                if (dialogue != null) dialogue.dismiss();
+                            });
+                        }
+                        @Override public void echec(String raison) {
+                            Log.w(TAG, "Graph indisponible → repli courriel : " + raison);
+                            // 2) Repli : courriel pré-rempli, le chauffeur appuie sur Envoyer
+                            try {
+                                final ArrayList<Uri> uris = new ArrayList<>();
+                                String auth = act.getPackageName() + ".fileprovider";
+                                uris.add(FileProvider.getUriForFile(act, auth, journal));
+                                if (audio != null) uris.add(FileProvider.getUriForFile(act, auth, audio));
+                                act.runOnUiThread(() -> {
+                                    lancerCourriel(sujet, corps.toString(), uris);
+                                    reactiverBouton();
+                                });
+                            } catch (Exception e) {
+                                act.runOnUiThread(() -> {
+                                    Toast.makeText(act, "Impossible d’envoyer la demande de support", Toast.LENGTH_LONG).show();
+                                    reactiverBouton();
+                                });
+                            }
+                        }
+                    });
                 } catch (Exception e) {
                     Log.w(TAG, "envoyer ERR: " + e.getMessage());
-                    act.runOnUiThread(() -> Toast.makeText(act,
-                            "Impossible de préparer la demande de support", Toast.LENGTH_LONG).show());
+                    act.runOnUiThread(() -> {
+                        Toast.makeText(act, "Impossible de préparer la demande de support", Toast.LENGTH_LONG).show();
+                        reactiverBouton();
+                    });
                 }
             }, "support-prepare").start();
         }
 
-        void lancerPartage(String paquet, String sujet, String corps, ArrayList<Uri> uris) {
+        void reactiverBouton() {
+            btnEnvoyer.setEnabled(true);
+            btnEnvoyer.setText("Envoyer au support");
+        }
+
+        void lancerCourriel(String sujet, String corps, ArrayList<Uri> uris) {
             Intent i = new Intent(Intent.ACTION_SEND_MULTIPLE);
             i.setType("*/*");
             i.putExtra(Intent.EXTRA_SUBJECT, sujet);
             i.putExtra(Intent.EXTRA_TEXT, corps);
             i.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
-            if (!SimplifiedConfig.SUPPORT_EMAIL.isEmpty()) {
-                i.putExtra(Intent.EXTRA_EMAIL, new String[]{SimplifiedConfig.SUPPORT_EMAIL});
-            }
+            i.putExtra(Intent.EXTRA_EMAIL, new String[]{SimplifiedConfig.SUPPORT_EMAIL});
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             try {
                 Intent direct = new Intent(i);
-                direct.setPackage(paquet);
+                direct.setPackage(SimplifiedConfig.OUTLOOK_PACKAGE);
                 act.startActivity(direct);
             } catch (ActivityNotFoundException e) {
-                // Application absente : sélecteur système (le chauffeur choisit)
                 try {
                     act.startActivity(Intent.createChooser(i, "Envoyer la demande de support"));
                 } catch (Exception e2) {
                     Toast.makeText(act, "Aucune application disponible pour l’envoi", Toast.LENGTH_LONG).show();
                 }
-            }
-        }
-
-        void ouvrirSoti() {
-            try {
-                Intent i = act.getPackageManager().getLaunchIntentForPackage(SimplifiedConfig.SOTI_PACKAGE);
-                if (i != null) { act.startActivity(i); return; }
-                if (!SimplifiedConfig.SOTI_URL.isEmpty()) {
-                    act.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(SimplifiedConfig.SOTI_URL)));
-                    return;
-                }
-                Toast.makeText(act, "SOTI MobiControl n’est pas installé sur cette tablette", Toast.LENGTH_LONG).show();
-            } catch (Exception e) {
-                Toast.makeText(act, "Impossible d’ouvrir SOTI MobiControl", Toast.LENGTH_SHORT).show();
-            }
-        }
-
-        void appeler() {
-            try {
-                act.startActivity(new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + SimplifiedConfig.SUPPORT_PHONE)));
-            } catch (Exception e) {
-                Toast.makeText(act, "Impossible d’ouvrir le téléphone", Toast.LENGTH_SHORT).show();
             }
         }
 

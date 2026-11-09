@@ -22,7 +22,13 @@ final class SimplifiedConfig {
     static final String DEEPLINK_PARAM_PRODUIT_DESC = "produitdesc";
 
     /** Courriel du support (pré-adressé). Vide = aucun destinataire pré-rempli. À renseigner. */
-    static final String SUPPORT_EMAIL = "";
+    static final String SUPPORT_EMAIL = "support.ti@filgo.ca";
+
+    /** Conversation Teams « Support Camion » (id du fil, tiré du lien de la réunion). Vide = pas de message Teams. */
+    static final String SUPPORT_TEAMS_CHAT_ID = "19:meeting_MDk0NTc0YzAtODA4YS00N2FjLWFmMmYtYjQzYjRiMmUzOWZl@thread.v2";
+
+    /** Taille max des pièces jointes du courriel Graph (octets, avant base64). Au-delà : le journal est tronqué. */
+    static final int SUPPORT_MAX_PJ_OCTETS = 2_500_000;
 
     /** Téléphone du support (bouton « Appeler le support »). Vide = bouton masqué. À renseigner. */
     static final String SUPPORT_PHONE = "";

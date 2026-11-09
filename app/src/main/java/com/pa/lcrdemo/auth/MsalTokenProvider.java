@@ -56,6 +56,13 @@ public class MsalTokenProvider {
         "https://dev-filgo-sonic.crm3.dynamics.com/.default"
     };
 
+    // ✅ Scopes Microsoft Graph (demande de support : courriel + message Teams). Délégués, silencieux
+    // seulement : si le consentement n'est pas accordé dans Entra, l'appelant utilise son repli.
+    public static final String[] GRAPH_SCOPES = new String[]{
+        "https://graph.microsoft.com/Mail.Send",
+        "https://graph.microsoft.com/ChatMessage.Send"
+    };
+
     private final Context appContext;
     private ISingleAccountPublicClientApplication msalApp;
 
@@ -118,6 +125,37 @@ public class MsalTokenProvider {
                 public void onError(MsalException e) {
                     callback.onError(e);
                 }
+            }
+        );
+    }
+
+    // ✅ Token Microsoft Graph, SILENCIEUX seulement (jamais d'écran de connexion).
+    public void acquireGraphTokenSilent(@NonNull TokenCallback callback) {
+        if (msalApp == null) {
+            callback.onError(new IllegalStateException("MSAL non initialisé"));
+            return;
+        }
+        msalApp.getCurrentAccountAsync(
+            new ISingleAccountPublicClientApplication.CurrentAccountCallback() {
+                @Override
+                public void onAccountLoaded(IAccount account) {
+                    if (account == null) {
+                        callback.onError(new RuntimeException("Aucun compte connecté"));
+                        return;
+                    }
+                    AcquireTokenSilentParameters params = new AcquireTokenSilentParameters.Builder()
+                        .forAccount(account)
+                        .fromAuthority(account.getAuthority())
+                        .withScopes(Arrays.asList(GRAPH_SCOPES))
+                        .withCallback(new SilentAuthenticationCallback() {
+                            @Override public void onSuccess(IAuthenticationResult r) { callback.onSuccess(r.getAccessToken()); }
+                            @Override public void onError(MsalException e) { callback.onError(e); }
+                        })
+                        .build();
+                    msalApp.acquireTokenSilentAsync(params);
+                }
+                @Override public void onAccountChanged(IAccount prior, IAccount current) {}
+                @Override public void onError(MsalException e) { callback.onError(e); }
             }
         );
     }
