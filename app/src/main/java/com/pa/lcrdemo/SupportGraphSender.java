@@ -43,7 +43,7 @@ final class SupportGraphSender {
 
     private SupportGraphSender() {}
 
-    static void envoyer(Activity act, String sujet, String corps, File journal, File audio, Resultat cb) {
+    static void envoyer(Activity act, String sujet, String corps, String lienSoti, File journal, File audio, Resultat cb) {
         final MsalTokenProvider msal = new MsalTokenProvider(act);
         try {
             MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
@@ -56,7 +56,7 @@ final class SupportGraphSender {
                 msal.acquireGraphTokenSilent(new MsalTokenProvider.TokenCallback() {
                     @Override public void onSuccess(String token) {
                         MsalTokenProvider.MSAL_SERIAL_LOCK.release();
-                        poster(token, sujet, corps, journal, audio, cb);
+                        poster(token, sujet, corps, lienSoti, journal, audio, cb);
                     }
                     @Override public void onError(Exception e) {
                         MsalTokenProvider.MSAL_SERIAL_LOCK.release();
@@ -71,7 +71,7 @@ final class SupportGraphSender {
         });
     }
 
-    private static void poster(final String token, final String sujet, final String corps,
+    private static void poster(final String token, final String sujet, final String corps, final String lienSoti,
                                final File journal, final File audio, final Resultat cb) {
         // Les appels réseau ne doivent pas se faire sur le thread du callback MSAL.
         new Thread(() -> {
@@ -85,7 +85,7 @@ final class SupportGraphSender {
             boolean teamsOk = false;
             if (!SimplifiedConfig.SUPPORT_TEAMS_CHAT_ID.isEmpty()) {
                 try {
-                    String err = envoyerTeams(token, sujet, corps);
+                    String err = envoyerTeams(token, sujet, corps, lienSoti);
                     teamsOk = err == null;
                     if (err != null) Log.w(TAG, "Teams : " + err);
                 } catch (Exception e) {
@@ -150,9 +150,11 @@ final class SupportGraphSender {
 
     // ------------------------------------------------------------------ Teams
 
-    private static String envoyerTeams(String token, String sujet, String corps) throws Exception {
+    private static String envoyerTeams(String token, String sujet, String corps, String lienSoti) throws Exception {
         String html = "<b>" + echapper(sujet) + "</b><br>"
                 + echapper(corps).replace("\n", "<br>")
+                + (lienSoti.isEmpty() ? "" : "<br><a href=\"" + echapper(lienSoti).replace("\"", "%22")
+                        + "\">Ouvrir la tablette dans SOTI MobiControl</a>")
                 + "<br><i>Courriel détaillé (journal, message vocal) envoyé à "
                 + echapper(SimplifiedConfig.SUPPORT_EMAIL) + "</i>";
         JSONObject req = new JSONObject();

@@ -281,14 +281,14 @@ final class SupportRequestDialog {
                     if (avecAudio) corps.append("\n\n(Message vocal joint)");
                     corps.append("\n\nPrise en main à distance (SOTI MobiControl) — ID de la tablette : ")
                          .append(idSoti());
-                    if (!SimplifiedConfig.SOTI_CONSOLE_URL.isEmpty())
-                        corps.append("\nConsole : ").append(SimplifiedConfig.SOTI_CONSOLE_URL);
+                    final String lienSoti = lienSoti();
+                    if (!lienSoti.isEmpty()) corps.append("\nLien SOTI : ").append(lienSoti);
                     final String sujet = "Support Filgo-Registre — " + SimplifiedUiState.nomTablette(act)
                             + " — WO " + (wo.isEmpty() ? "—" : wo)
                             + " — #" + serie + " Node " + node;
 
                     // 1) Envoi silencieux par Microsoft Graph (courriel + Teams)
-                    SupportGraphSender.envoyer(act, sujet, corps.toString(), journal, audio,
+                    SupportGraphSender.envoyer(act, sujet, corps.toString(), lienSoti, journal, audio,
                             new SupportGraphSender.Resultat() {
                         @Override public void courrielEnvoye(boolean teamsOk) {
                             act.runOnUiThread(() -> {
@@ -333,6 +333,13 @@ final class SupportRequestDialog {
             String nom = null;
             try { nom = android.provider.Settings.Global.getString(act.getContentResolver(), "device_name"); } catch (Throwable ignored) {}
             return (nom != null && !nom.trim().isEmpty()) ? nom.trim() : SimplifiedUiState.nomTablette(act);
+        }
+
+        String lienSoti() {
+            String m = SimplifiedConfig.SOTI_LIEN_MODELE;
+            if (m.isEmpty()) return "";
+            try { return m.replace("{ID}", java.net.URLEncoder.encode(idSoti(), "UTF-8").replace("+", "%20")); }
+            catch (Exception e) { return ""; }
         }
 
         void reactiverBouton() {
