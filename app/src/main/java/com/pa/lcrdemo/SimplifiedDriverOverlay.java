@@ -87,9 +87,9 @@ final class SimplifiedDriverOverlay {
     private MaterialCardView sBanner;
     private ProgressBar sProgConn;
     private MaterialButton sBtnTerminer, sBtnAnnuler, sBtnLancer, sBtnRetour, sBtnAdmin;
-    private View sBtnSupport;   // bouton « Support » (trombone) — gardé
+    private View sBtnSupport;   // ancien bouton « Support » (trombone) : CACHÉ, la flamme le remplace (9 nov 2026)
     private FlammeView sMascotte; // mini mascotte à côté : verte, orange seulement en cas d'ERREUR
-    private MaterialButton sBtnQuitter;
+    private View sBtnQuitter;   // rond avec le symbole power simplifié
     private boolean erreurActive = false;
 
     private Etat dernierEtat = null;
@@ -219,27 +219,28 @@ final class SimplifiedDriverOverlay {
         sMascotte.setMini(true);
         sMascotte.setErreur(erreurActive);
         sMascotte.setInquiet(erreurActive);
-        sMascotte.setContentDescription("Assistant Filgo");
+        sMascotte.setContentDescription("Support Filgo");
         if (sBtnSupport != null && sBtnSupport.getParent() instanceof android.view.ViewGroup) {
             android.view.ViewGroup parent = (android.view.ViewGroup) sBtnSupport.getParent();
             LinearLayout.LayoutParams lpm = new LinearLayout.LayoutParams((int) (48 * dpi), (int) (48 * dpi));
             lpm.setMargins(0, 0, (int) (6 * dpi), 0);
             parent.addView(sMascotte, parent.indexOfChild(sBtnSupport), lpm);
+            // La flamme REMPLACE le bouton Support (trombone) : on le cache, la flamme ouvre la demande de support.
+            sBtnSupport.setVisibility(View.GONE);
         }
         // Bouton Quitter (la barre du haut avec Quit est cachée en mode simplifié), après Admin
         if (sBtnAdmin != null && sBtnAdmin.getParent() instanceof android.view.ViewGroup) {
             android.view.ViewGroup parent = (android.view.ViewGroup) sBtnAdmin.getParent();
-            sBtnQuitter = new MaterialButton(ctx, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
-            sBtnQuitter.setText("Quitter");
-            sBtnQuitter.setAllCaps(false);
-            sBtnQuitter.setTextColor(Color.WHITE);
-            sBtnQuitter.setTextSize(13f);
-            sBtnQuitter.setInsetTop(0);
-            sBtnQuitter.setInsetBottom(0);
-            sBtnQuitter.setMinWidth(0);
-            sBtnQuitter.setStrokeColor(ColorStateList.valueOf(Color.parseColor("#80FFFFFF")));
-            LinearLayout.LayoutParams lpq = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, (int) (44 * dpi));
+            View q = new View(ctx);
+            android.graphics.drawable.ShapeDrawable masque = new android.graphics.drawable.ShapeDrawable(
+                    new android.graphics.drawable.shapes.OvalShape());
+            q.setBackground(new android.graphics.drawable.RippleDrawable(
+                    ColorStateList.valueOf(Color.parseColor("#33FFFFFF")), new PowerIconDrawable(dpi), masque));
+            q.setClickable(true);
+            q.setFocusable(true);
+            q.setContentDescription("Quitter");
+            sBtnQuitter = q;
+            LinearLayout.LayoutParams lpq = new LinearLayout.LayoutParams((int) (44 * dpi), (int) (44 * dpi));
             lpq.setMargins((int) (8 * dpi), 0, 0, 0);
             parent.addView(sBtnQuitter, parent.indexOfChild(sBtnAdmin) + 1, lpq);
         }
@@ -250,7 +251,7 @@ final class SimplifiedDriverOverlay {
         sBtnLancer.setOnClickListener(v -> cliquer(btnRetourWO));
         sBtnRetour.setOnClickListener(v -> cliquer(btnRetourWO));
         sPanelWo.setOnClickListener(v -> cliquer(panelWoCumul));
-        sBtnSupport.setOnClickListener(v -> { rebondTrombone(); ouvrirSupport(); });
+        if (sBtnSupport != null) sBtnSupport.setOnClickListener(v -> { rebondTrombone(); ouvrirSupport(); });
         sMascotte.setOnClickListener(v -> clicMascotte());
         if (sBtnQuitter != null) sBtnQuitter.setOnClickListener(v -> {
             android.app.Activity act = host.getActivity();
@@ -422,6 +423,7 @@ final class SimplifiedDriverOverlay {
             afficherBulle();
             montrerCarte(true);
         } else if (cleAlerte.isEmpty()) {
+            rebondTrombone();
             ouvrirSupport();
         }
     }
@@ -718,8 +720,8 @@ final class SimplifiedDriverOverlay {
     }
 
     private void rebondTrombone() {
-        if (sBtnSupport == null || !ValueAnimator.areAnimatorsEnabled()) return;
-        ObjectAnimator a = ObjectAnimator.ofPropertyValuesHolder(sBtnSupport,
+        if (sMascotte == null || !ValueAnimator.areAnimatorsEnabled()) return;
+        ObjectAnimator a = ObjectAnimator.ofPropertyValuesHolder(sMascotte,
                 PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.25f, 1f),
                 PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.25f, 1f));
         a.setDuration(250);
@@ -1207,5 +1209,33 @@ final class SimplifiedDriverOverlay {
         if (wo != null && !wo.trim().isEmpty()) return wo.trim();
         Matcher m = Pattern.compile("WO:\\s*([^|\\s]+)").matcher(txt(txtDeliveryUid));
         return m.find() ? m.group(1) : "";
+    }
+
+    /** Symbole power simplifié : cercle, arc ouvert en haut et barre verticale du haut jusqu'au centre. */
+    private static final class PowerIconDrawable extends android.graphics.drawable.Drawable {
+        private final android.graphics.Paint p = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final float dp;
+        PowerIconDrawable(float density) {
+            dp = density;
+            p.setStyle(android.graphics.Paint.Style.STROKE);
+            p.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+        }
+        @Override public void draw(android.graphics.Canvas c) {
+            android.graphics.Rect b = getBounds();
+            float cx = b.exactCenterX(), cy = b.exactCenterY();
+            float r = Math.min(b.width(), b.height()) / 2f - 1.5f * dp;
+            p.setColor(Color.parseColor("#80FFFFFF"));
+            p.setStrokeWidth(1.5f * dp);
+            c.drawCircle(cx, cy, r, p);
+            float g = r * 0.46f;
+            p.setColor(Color.WHITE);
+            p.setStrokeWidth(2.4f * dp);
+            // arc ouvert en haut : angles Android (sens horaire depuis 3 h), l'ouverture est centrée sur 270°
+            c.drawArc(new android.graphics.RectF(cx - g, cy - g, cx + g, cy + g), 305f, 290f, false, p);
+            c.drawLine(cx, cy - g * 1.18f, cx, cy, p);
+        }
+        @Override public void setAlpha(int a) { p.setAlpha(a); }
+        @Override public void setColorFilter(android.graphics.ColorFilter f) { p.setColorFilter(f); }
+        @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
     }
 }
