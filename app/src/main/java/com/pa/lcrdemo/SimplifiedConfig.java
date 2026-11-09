@@ -27,6 +27,13 @@ final class SimplifiedConfig {
     /** Conversation Teams « Support Camion » (id du fil, tiré du lien de la réunion). Vide = pas de message Teams. */
     static final String SUPPORT_TEAMS_CHAT_ID = "19:meeting_MDk0NTc0YzAtODA4YS00N2FjLWFmMmYtYjQzYjRiMmUzOWZl@thread.v2";
 
+    /** Modèle du lien SOTI MobiControl vers la tablette, joint au courriel et au message Teams « Support Camion ».
+     *  {ID} est remplacé par l'ID de la tablette (= nom d'appareil = nom du profil SOTI). Vide = pas de lien, ID seulement.
+     *  À renseigner : copier l'adresse d'une tablette ouverte dans la console SOTI et remplacer son ID par {ID}. */
+    static final String SOTI_LIEN_MODELE =
+            "https://a0026528.mobicontrol.cloud/MobiControl/WebConsole/home/dashboard/devices"
+            + "?search=Text%20AlmostEqual%20%22{ID}%22&subGroups=false&count=250";
+
     /** Taille max des pièces jointes du courriel Graph (octets, avant base64). Au-delà : le journal est tronqué. */
     static final int SUPPORT_MAX_PJ_OCTETS = 2_500_000;
 
