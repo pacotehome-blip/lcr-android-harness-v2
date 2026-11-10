@@ -110,8 +110,30 @@ final class SimplifiedDriverOverlay {
         return new SimplifiedDriverOverlay(host, wrapper, original);
     }
 
+    private static volatile java.lang.ref.WeakReference<SimplifiedDriverOverlay> courant = null;
+
+    /**
+     * Appelé par RegisterConnectionHelper quand le diagnostic de reconnexion échoue. En mode simplifié, l'écran
+     * « Registre non joignable » n'a plus à rester ouvert : la flamme cogne (tic tic) et la carte donne la consigne
+     * N1 ou « Ouvrir un ticket », le dernier résultat du diagnostic étant joint à la demande de support.
+     * @return true si l'alerte de la flamme a pris le relais (l'appelant n'affiche alors pas son écran).
+     */
+    static boolean signalerEchecDiagnostic(String resume) {
+        SimplifiedDriverOverlay o = courant != null ? courant.get() : null;
+        if (o == null || adminUnlocked || o.bulle == null || o.dernEtat == null) return false;
+        o.diagEchecTexte = resume == null ? "" : resume;
+        // On veut que le chauffeur voie l'alerte : plus de silence demandé, diagnostic relancé avec le journal à jour.
+        o.snoozeCle = ""; o.snoozeJusquaMs = 0L; o.oublieErreur = false;
+        o.triageCle = null; o.triageAction = null; o.triageNiveau = null; o.triageDiag = null;
+        o.gererAssistant(o.dernCoupe, o.dernEchec, o.dernEtat);
+        return !o.cleAlerte.isEmpty() && o.bulleVisible;
+    }
+
+    private volatile String diagEchecTexte = "";
+
     private SimplifiedDriverOverlay(RegisterTabFragment host, FrameLayout wrapper, View original) {
         this.host = host;
+        courant = new java.lang.ref.WeakReference<>(this);
         this.original = original;
         Context ctx = wrapper.getContext();
 
@@ -303,6 +325,8 @@ final class SimplifiedDriverOverlay {
     private boolean carteVisible = false;
     private boolean oublieErreur = false;      // « Oublie-moi » : silence total jusqu'à la PROCHAINE erreur
 
+    private MaterialButton btnContacter;
+
     private void construireBulle(Context ctx, FrameLayout wrapper) {
         final float dp = ctx.getResources().getDisplayMetrics().density;
         // « bulle » = la mascotte seule (sans boîte) ; la carte du message vient en dessous, plus tard
@@ -373,6 +397,7 @@ final class SimplifiedDriverOverlay {
             cacherBulle();
         });
         MaterialButton contacter = new MaterialButton(ctx);
+        btnContacter = contacter;
         contacter.setText("Contacter le support");
         contacter.setAllCaps(false);
         contacter.setTextColor(Color.WHITE);
@@ -463,8 +488,12 @@ final class SimplifiedDriverOverlay {
         bCarte.animate().alpha(1f).translationY(0f).setDuration(280).start();
     }
 
+    private boolean dernCoupe = false, dernEchec = false;
+    private Etat dernEtat = null;
+
     private void gererAssistant(boolean coupe, boolean echecDeepLink, Etat etat) {
         if (bulle == null) return;
+        dernCoupe = coupe; dernEchec = echecDeepLink; dernEtat = etat;
         boolean enLivraison = etat == Etat.DEBIT || etat == Etat.CONFIRM
                 || etat == Etat.PAUSE || etat == Etat.ENDING;
         // ERREUR = communication perdue ou registre introuvable ; AVERTISSEMENT = impression (mascotte reste verte)
@@ -474,7 +503,7 @@ final class SimplifiedDriverOverlay {
         if (sMascotte != null) { sMascotte.setErreur(erreur); sMascotte.setInquiet(erreur); }
         if (cle.isEmpty()) {          // tout va bien : on range et on remet à zéro
             cacherBulle();
-            cleAlerte = ""; snoozeCle = ""; alerteContexte = ""; dernierSonMs = 0L;
+            cleAlerte = ""; snoozeCle = ""; alerteContexte = ""; dernierSonMs = 0L; diagEchecTexte = "";
             oublieErreur = false;             // l'erreur est terminée : la prochaine sera annoncée normalement
             return;
         }
@@ -490,13 +519,13 @@ final class SimplifiedDriverOverlay {
         if ("COMM".equals(cle)) {
             lancerTriage(cle);
             titre = "Communication perdue avec le registre";
-            String a = cle.equals(triageCle) ? triageAction : null;
-            action = (a != null && !a.trim().isEmpty()) ? a.trim()
-                    : "Touchez Reconnecter. Si le problème continue, vérifiez le câble ou le Bluetooth du registre, puis contactez le support.";
+            action = actionCommunication(cle);
         } else if ("DEEPLINK".equals(cle)) {
             titre = "Registre introuvable";
-            action = "Le registre n’a pas répondu après plusieurs essais. Touchez Reconnecter, ou branchez le câble USB-C / "
-                    + "activez le Bluetooth du registre. Sinon, contactez le support.";
+            lancerTriage(cle);
+            action = cle.equals(triageCle) ? actionCommunication(cle)
+                    : "Le registre n’a pas répondu après plusieurs essais. Touchez Reconnecter, ou branchez le câble USB-C / "
+                      + "activez le Bluetooth du registre. Sinon, contactez le support.";
         } else {
             titre = "Impression indisponible";
             action = "Le service d’impression ne répond pas. Touchez Démarrer l’impression, ou redémarrez la tablette.";
@@ -506,9 +535,17 @@ final class SimplifiedDriverOverlay {
         if (niv != null && !niv.isEmpty()) ctxA.append(" [").append(niv).append(']');
         String diag = cle.equals(triageCle) ? triageDiag : null;
         if (diag != null && !diag.trim().isEmpty()) ctxA.append(" | Diagnostic : ").append(diag.trim());
+        String dj = diagEchecTexte == null ? "" : diagEchecTexte.trim().replace("\r", "").replaceAll("\\s*\n+\\s*", " · ");
+        if (!dj.isEmpty() && !"PRINT".equals(cle)) {
+            ctxA.append(" | Dernier diagnostic de reconnexion : ").append(dj.length() > 700 ? dj.substring(0, 700) : dj);
+        }
         alerteContexte = ctxA.toString();
         bTitre.setText(titre);
         bAction.setText(action);
+        if (btnContacter != null) {
+            boolean ticket = ("COMM".equals(cle) || "DEEPLINK".equals(cle)) && cle.equals(triageCle) && !diagnosticN1(cle);
+            btnContacter.setText(ticket ? "Ouvrir un ticket" : "Contacter le support");
+        }
         if (btnReconnecter != null) btnReconnecter.setVisibility(erreur ? View.VISIBLE : View.GONE);
         if (btnPrint != null) btnPrint.setVisibility("PRINT".equals(cle) ? View.VISIBLE : View.GONE);
         bFlamme.setVisibility(erreur ? View.VISIBLE : View.GONE);
@@ -612,6 +649,27 @@ final class SimplifiedDriverOverlay {
     }
 
     /** Triage de l'onglet Support (lecture seule du journal) — une fois par épisode d'alerte, en arrière-plan. */
+    /** Niveau de support du diagnostic : N1 = le chauffeur peut agir ; N2 et plus (ou inconnu) = ouvrir un ticket. */
+    private boolean diagnosticN1(String cle) {
+        return cle.equals(triageCle) && triageNiveau != null && "N1".equalsIgnoreCase(triageNiveau.trim());
+    }
+
+    private String actionCommunication(String cle) {
+        if (!cle.equals(triageCle)) {
+            return "Diagnostic en cours… Touchez Reconnecter. Si le problème continue, contactez le support.";
+        }
+        String a = triageAction == null ? "" : triageAction.trim();
+        if (diagnosticN1(cle)) {
+            return "Niveau 1 — faites ceci : "
+                    + (a.isEmpty() ? "touchez Reconnecter, puis vérifiez le câble ou le Bluetooth du registre." : a);
+        }
+        String niv = triageNiveau == null ? "" : triageNiveau.trim();
+        boolean niveauConnu = !niv.isEmpty() && !"N/A".equalsIgnoreCase(niv);
+        return "Ce problème dépasse le niveau 1" + (niveauConnu ? " (" + niv + ")" : "")
+                + ". Ouvrez un ticket : touchez « Ouvrir un ticket »."
+                + (a.isEmpty() ? "" : "\nPiste : " + a);
+    }
+
     private void lancerTriage(final String cle) {
         if (triageEnCours || cle.equals(triageCle)) return;
         triageEnCours = true;
@@ -636,6 +694,16 @@ final class SimplifiedDriverOverlay {
             triageAction = action; triageNiveau = niveau; triageDiag = diag;
             triageCle = cle;
             triageEnCours = false;
+            // Le diagnostic est terminé et l'erreur est toujours là : on met la carte à jour (consigne N1 ou ticket)
+            // et la flamme cogne une fois de plus (tic tic) pour attirer l'attention.
+            ui.post(() -> {
+                if (!cle.equals(cleAlerte) || dernEtat == null) return;
+                gererAssistant(dernCoupe, dernEchec, dernEtat);
+                if (bulleVisible && bFlamme != null) {
+                    dernierSonMs = android.os.SystemClock.elapsedRealtime();
+                    cognerEcran(false);
+                }
+            });
         }, "simplifie-triage").start();
     }
 

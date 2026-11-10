@@ -1001,6 +1001,9 @@ public class RegisterConnectionHelper {
                   .append(" Étape ").append(i+1).append("/4 — ").append(etapes[i]).append("\n");
             }
             sb.append("\n⛔ ").append(erreur);
+            // ✅ 10 nov 2026 (demande Paul) — l'écran n'affiche plus WO / Ticket / Node / Serial ni « Contactez le
+            // support » : tout s'arrête à la dernière consigne. Le courriel et le support gardent le résumé complet.
+            final String resumeAffiche = sb.toString();
             if (woNum == null || woNum.isEmpty()) {
                 sb.append("\n\nℹ️ Aucun bon de travail actif\nLivraison manuelle — aucun WO associé");
             } else {
@@ -1020,9 +1023,20 @@ public class RegisterConnectionHelper {
                 try { com.pa.lcr.lcp.log.LogBus.api(node, "[DIAGNOSTIC] écran d'échec non affiché — registre déjà connecté"); } catch (Exception ignored) {}
                 return;
             }
+            // ✅ AJOUTÉ (10 nov 2026, demande Paul) — mode simplifié : l'écran d'échec ne reste plus ouvert. La flamme
+            // cogne (tic tic) et sa carte donne la consigne N1 ou « Ouvrir un ticket » ; le dernier résultat du
+            // diagnostic est joint à la demande de support. Mode Admin : l'écran d'échec habituel.
+            try {
+                if (SimplifiedDriverOverlay.signalerEchecDiagnostic(resumeComplet)) {
+                    try { com.pa.lcr.lcp.log.LogBus.api(node, "[DIAGNOSTIC] écran d'échec remplacé par l'alerte de la flamme (support)"); } catch (Exception ignored) {}
+                    return;
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "alerte flamme non posée (écran d'échec habituel): " + e.getMessage());
+            }
             final android.app.AlertDialog.Builder dlgEchecB = new android.app.AlertDialog.Builder(activity)
                 .setTitle("⛔ Registre non joignable  ✕")
-                .setMessage(resumeComplet)
+                .setMessage(resumeAffiche)
                 .setCancelable(true)
                 .setPositiveButton("🔄 Réessayer", (d, w) -> {
                     d.dismiss();
