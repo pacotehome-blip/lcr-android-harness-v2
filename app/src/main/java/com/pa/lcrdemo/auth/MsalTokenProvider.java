@@ -60,7 +60,10 @@ public class MsalTokenProvider {
     // seulement : si le consentement n'est pas accordé dans Entra, l'appelant utilise son repli.
     public static final String[] GRAPH_SCOPES = new String[]{
         "https://graph.microsoft.com/Mail.Send",
-        "https://graph.microsoft.com/ChatMessage.Send"
+        "https://graph.microsoft.com/ChatMessage.Send",
+        // ✅ 10 nov 2026 (demande Paul) — nom + courriel du chauffeur connecté (GET /me) ajoutés au message de support.
+        // User.Read est déjà accordé dans Entra (délégué).
+        "https://graph.microsoft.com/User.Read"
     };
 
     /** Dépôt du journal et du message vocal dans OneDrive pour les joindre au message Teams — jeton demandé SÉPARÉMENT. */

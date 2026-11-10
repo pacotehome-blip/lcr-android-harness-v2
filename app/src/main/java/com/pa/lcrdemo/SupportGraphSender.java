@@ -200,12 +200,34 @@ public final class SupportGraphSender {
         }
     }
 
+    /** « Prénom Nom (courriel) » du compte connecté (GET /me), ou null si illisible. */
+    private static String lireDemandeur(String token) {
+        try {
+            String rep = get(token, "https://graph.microsoft.com/v1.0/me?$select=displayName,mail,userPrincipalName");
+            if (rep == null) return null;
+            JSONObject o = new JSONObject(rep);
+            String nom = o.optString("displayName", "").trim();
+            String mail = o.optString("mail", "").trim();
+            if (mail.isEmpty() || "null".equals(mail)) mail = o.optString("userPrincipalName", "").trim();
+            if (nom.isEmpty() && mail.isEmpty()) return null;
+            if (mail.isEmpty()) return nom;
+            return nom.isEmpty() ? mail : nom + " (" + mail + ")";
+        } catch (Exception e) {
+            Log.w(TAG, "GET /me ERR : " + e.getMessage());
+            return null;
+        }
+    }
+
     private static void poster(final android.content.Context ctx, final String token, final String sujet, final String corps, final String lienSoti,
                                final File journal, final File audio, final java.util.List<File> medias, final Resultat cb) {
         // Les appels réseau ne doivent pas se faire sur le thread du callback MSAL.
         new Thread(() -> {
+            // ✅ 10 nov 2026 (demande Paul — « chaque chauffeur a son courriel ») : nom + courriel du compte connecté,
+            // en tête du message (courriel, Teams). Échec de lecture = on envoie sans, jamais bloquant.
+            final String demandeur = lireDemandeur(token);
+            final String corpsFinal = (demandeur == null) ? corps : "Demandeur : " + demandeur + "\n" + corps;
             try {
-                String err = envoyerCourriel(token, sujet, corps, journal, audio, medias);
+                String err = envoyerCourriel(token, sujet, corpsFinal, journal, audio, medias);
                 if (err != null) { cb.echec("sendMail : " + err); return; }
             } catch (Exception e) {
                 cb.echec("sendMail : " + e.getMessage());
@@ -214,7 +236,7 @@ public final class SupportGraphSender {
             boolean teamsOk = false;
             if (!SimplifiedConfig.SUPPORT_TEAMS_CHAT_ID.isEmpty()) {
                 try {
-                    String err = envoyerTeams(ctx, token, sujet, corps, lienSoti, journal, audio, medias);
+                    String err = envoyerTeams(ctx, token, sujet, corpsFinal, lienSoti, journal, audio, medias);
                     teamsOk = err == null;
                     if (err != null) Log.w(TAG, "Teams : " + err);
                 } catch (Exception e) {
