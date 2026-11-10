@@ -63,6 +63,11 @@ public class MsalTokenProvider {
         "https://graph.microsoft.com/ChatMessage.Send"
     };
 
+    /** Dépôt du journal et du message vocal dans OneDrive pour les joindre au message Teams — jeton demandé SÉPARÉMENT. */
+    public static final String[] GRAPH_SCOPES_FICHIERS = new String[]{
+        "https://graph.microsoft.com/Files.ReadWrite"
+    };
+
     /** Lecture de la boîte de réception (n° de ticket de la réponse automatique) — jeton demandé SÉPARÉMENT. */
     public static final String[] GRAPH_SCOPES_LECTURE = new String[]{
         "https://graph.microsoft.com/Mail.Read"

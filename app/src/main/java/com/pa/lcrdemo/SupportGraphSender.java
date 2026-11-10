@@ -43,7 +43,7 @@ final class SupportGraphSender {
 
     private SupportGraphSender() {}
 
-    private interface Jeton { void ok(String t); void ko(String raison); }
+    interface Jeton { void ok(String t); void ko(String raison); }
 
     /** Instance MSAL conservée (une seule, évite de multiplier les instances qui se disputent le cache). */
     private static volatile MsalTokenProvider prov;
@@ -81,10 +81,43 @@ final class SupportGraphSender {
         });
     }
 
+    /** Jeton Dataverse SILENCIEUX (même instance MSAL, même verrou que les jetons Graph). */
+    static void jetonDataverse(android.content.Context ctx, final Jeton j) {
+        try {
+            MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
+        } catch (InterruptedException e) {
+            j.ko("interrompu");
+            return;
+        }
+        final MsalTokenProvider p = prov;
+        if (p != null) { jetonDvAvec(p, j); return; }
+        final MsalTokenProvider neuf = new MsalTokenProvider(ctx.getApplicationContext());
+        neuf.init(new MsalTokenProvider.InitCallback() {
+            @Override public void onReady() { prov = neuf; jetonDvAvec(neuf, j); }
+            @Override public void onError(Exception e) {
+                MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                j.ko("MSAL : " + e.getMessage());
+            }
+        });
+    }
+
+    private static void jetonDvAvec(MsalTokenProvider p, final Jeton j) {
+        p.acquireTokenSilentFromWorker(new MsalTokenProvider.TokenCallback() {
+            @Override public void onSuccess(String token) {
+                MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                j.ok(token);
+            }
+            @Override public void onError(Exception e) {
+                MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                j.ko("jeton Dataverse : " + e.getMessage());
+            }
+        });
+    }
+
     static void envoyer(android.content.Context act, final String sujet, final String corps, final String lienSoti,
-                        final File journal, final File audio, final Resultat cb) {
+                        final File journal, final File audio, final java.util.List<File> medias, final Resultat cb) {
         jeton(act, MsalTokenProvider.GRAPH_SCOPES, new Jeton() {
-            @Override public void ok(String token) { poster(token, sujet, corps, lienSoti, journal, audio, cb); }
+            @Override public void ok(String token) { poster(act, token, sujet, corps, lienSoti, journal, audio, medias, cb); }
             @Override public void ko(String raison) { cb.echec(raison); }
         });
     }
@@ -122,7 +155,7 @@ final class SupportGraphSender {
         java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.ROOT);
         iso.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
         String filtre = "receivedDateTime ge " + iso.format(new java.util.Date(depuisMs - 60_000L));
-        String url = GRAPH + "/me/mailFolders/inbox/messages?$select=subject,bodyPreview,receivedDateTime"
+        String url = GRAPH + "/me/mailFolders/inbox/messages?$select=subject,body,receivedDateTime"
                 + "&$orderby=" + URLEncoder.encode("receivedDateTime desc", "UTF-8")
                 + "&$top=50&$filter=" + URLEncoder.encode(filtre, "UTF-8");
         String rep = get(token, url);
@@ -133,7 +166,8 @@ final class SupportGraphSender {
         for (com.pa.lcr.lcp.storage.DemandeSupportStore.Row d : attente) {
             for (int i = 0; i < vals.length(); i++) {
                 JSONObject m = vals.getJSONObject(i);
-                String texte = m.optString("subject", "") + "\n" + m.optString("bodyPreview", "");
+                JSONObject corpsMsg = m.optJSONObject("body");
+                String texte = m.optString("subject", "") + "\n" + (corpsMsg != null ? corpsMsg.optString("content", "") : "");
                 if (!texte.contains(d.reference)) continue;
                 java.util.regex.Matcher mt = motif.matcher(texte.replace(d.reference, ""));
                 String numero = null;
@@ -152,6 +186,7 @@ final class SupportGraphSender {
             c.setConnectTimeout(10_000);
             c.setReadTimeout(20_000);
             c.setRequestProperty("Authorization", "Bearer " + token);
+            c.setRequestProperty("Prefer", "outlook.body-content-type=\"text\"");   // corps COMPLET en texte (bodyPreview est tronqué)
             int code = c.getResponseCode();
             if (code < 200 || code >= 300) { Log.w(TAG, "GET HTTP " + code); return null; }
             ByteArrayOutputStream bo = new ByteArrayOutputStream();
@@ -165,12 +200,12 @@ final class SupportGraphSender {
         }
     }
 
-    private static void poster(final String token, final String sujet, final String corps, final String lienSoti,
-                               final File journal, final File audio, final Resultat cb) {
+    private static void poster(final android.content.Context ctx, final String token, final String sujet, final String corps, final String lienSoti,
+                               final File journal, final File audio, final java.util.List<File> medias, final Resultat cb) {
         // Les appels réseau ne doivent pas se faire sur le thread du callback MSAL.
         new Thread(() -> {
             try {
-                String err = envoyerCourriel(token, sujet, corps, journal, audio);
+                String err = envoyerCourriel(token, sujet, corps, journal, audio, medias);
                 if (err != null) { cb.echec("sendMail : " + err); return; }
             } catch (Exception e) {
                 cb.echec("sendMail : " + e.getMessage());
@@ -179,7 +214,7 @@ final class SupportGraphSender {
             boolean teamsOk = false;
             if (!SimplifiedConfig.SUPPORT_TEAMS_CHAT_ID.isEmpty()) {
                 try {
-                    String err = envoyerTeams(token, sujet, corps, lienSoti);
+                    String err = envoyerTeams(ctx, token, sujet, corps, lienSoti, journal, audio);
                     teamsOk = err == null;
                     if (err != null) Log.w(TAG, "Teams : " + err);
                 } catch (Exception e) {
@@ -193,15 +228,29 @@ final class SupportGraphSender {
     // ------------------------------------------------------------------ courriel
 
     private static String envoyerCourriel(String token, String sujet, String corps,
-                                          File journal, File audio) throws Exception {
+                                          File journal, File audio, java.util.List<File> medias) throws Exception {
         JSONArray pj = new JSONArray();
         int budget = SimplifiedConfig.SUPPORT_MAX_PJ_OCTETS;
-        if (audio != null && audio.exists() && audio.length() <= budget) {
-            pj.put(pieceJointe(audio.getName(), "audio/mp4", lire(audio, budget)));
-            budget -= (int) audio.length();
+        int nonJoints = 0;
+        // Priorité : photos/vidéo, puis message vocal, puis journal (tronqué au besoin).
+        if (medias != null) {
+            for (File f : medias) {
+                if (f == null || !f.exists()) continue;
+                if (f.length() > budget) { nonJoints++; continue; }
+                String type = f.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".mp4") ? "video/mp4" : "image/jpeg";
+                pj.put(pieceJointe(f.getName(), type, lire(f, budget)));
+                budget -= (int) f.length();
+            }
+        }
+        if (audio != null && audio.exists()) {
+            if (audio.length() <= budget) {
+                pj.put(pieceJointe(audio.getName(), "audio/mp4", lire(audio, budget)));
+                budget -= (int) audio.length();
+            } else nonJoints++;
         }
         boolean tronque = journal.length() > budget;
         pj.put(pieceJointe(journal.getName(), "text/plain", lire(journal, Math.max(budget, 10_000))));
+        if (nonJoints > 0) corps = corps + "\n\n(" + nonJoints + " pièce(s) jointe(s) non envoyée(s) : trop volumineuse(s))";
 
         JSONObject body = new JSONObject();
         body.put("contentType", "Text");
@@ -244,17 +293,116 @@ final class SupportGraphSender {
 
     // ------------------------------------------------------------------ Teams
 
-    private static String envoyerTeams(String token, String sujet, String corps, String lienSoti) throws Exception {
+    /**
+     * Message dans la conversation Teams. Le journal et le message vocal y sont joints comme fichiers :
+     * déposés dans OneDrive (dossier « Microsoft Teams Chat Files ») puis référencés dans le message.
+     * Si le jeton OneDrive (Files.ReadWrite) ou un dépôt échoue, le message part quand même, sans ces fichiers.
+     */
+    private static String envoyerTeams(android.content.Context ctx, String token, String sujet, String corps,
+                                       String lienSoti, File journal, File audio) throws Exception {
+        JSONArray attaches = new JSONArray();
+        StringBuilder balises = new StringBuilder();
+        String fichiersJetons = jetonFichiers(ctx);
+        if (fichiersJetons != null) {
+            for (File f : new File[]{audio, journal}) {
+                if (f == null || !f.exists()) continue;
+                try {
+                    JSONObject a = deposerOneDrive(fichiersJetons, f);
+                    if (a == null) continue;
+                    attaches.put(a);
+                    balises.append("<attachment id=\"").append(a.getString("id")).append("\"></attachment>");
+                } catch (Exception e) {
+                    Log.w(TAG, "dépôt OneDrive de " + f.getName() + " ERR : " + e.getMessage());
+                }
+            }
+        }
         String html = "<b>" + echapper(sujet) + "</b><br>"
                 + echapper(corps).replace("\n", "<br>")
                 + (lienSoti.isEmpty() ? "" : "<br><a href=\"" + echapper(lienSoti).replace("\"", "%22")
                         + "\">Ouvrir la tablette dans SOTI MobiControl</a>")
-                + "<br><i>Courriel détaillé (journal, message vocal) envoyé à "
-                + echapper(SimplifiedConfig.SUPPORT_EMAIL) + "</i>";
+                + (attaches.length() > 0 ? "<br>" + balises
+                        : "<br><i>Journal et message vocal : voir le courriel envoyé à "
+                          + echapper(SimplifiedConfig.SUPPORT_EMAIL) + "</i>");
         JSONObject req = new JSONObject();
         req.put("body", new JSONObject().put("contentType", "html").put("content", html));
+        if (attaches.length() > 0) req.put("attachments", attaches);
         String url = GRAPH + "/chats/" + URLEncoder.encode(SimplifiedConfig.SUPPORT_TEAMS_CHAT_ID, "UTF-8") + "/messages";
         return post(token, url, req);
+    }
+
+    /** Jeton Graph « fichiers » (Files.ReadWrite), SILENCIEUX ; null s'il n'est pas disponible (consentement absent…). */
+    private static String jetonFichiers(android.content.Context ctx) {
+        final String[] rep = new String[1];
+        final java.util.concurrent.CountDownLatch fin = new java.util.concurrent.CountDownLatch(1);
+        jeton(ctx, MsalTokenProvider.GRAPH_SCOPES_FICHIERS, new Jeton() {
+            @Override public void ok(String t) { rep[0] = t; fin.countDown(); }
+            @Override public void ko(String raison) { Log.w(TAG, "OneDrive indisponible : " + raison); fin.countDown(); }
+        });
+        try { fin.await(30, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+        return rep[0];
+    }
+
+    /**
+     * Dépose le fichier dans OneDrive (dossier des fichiers de clavardage Teams), crée un lien de lecture
+     * pour l'organisation, et retourne la pièce jointe Teams {id, contentType=reference, contentUrl, name}.
+     * Dépôt simple : 4 Mo au plus (sinon null).
+     */
+    private static JSONObject deposerOneDrive(String token, File f) throws Exception {
+        if (f.length() > 4_000_000L) { Log.w(TAG, f.getName() + " trop gros pour Teams"); return null; }
+        byte[] data = lire(f, 4_000_000);
+        String type = f.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".m4a") ? "audio/mp4" : "text/plain";
+        String chemin = "Microsoft%20Teams%20Chat%20Files/" + URLEncoder.encode(f.getName(), "UTF-8").replace("+", "%20");
+        String[] up = requete("PUT", token, GRAPH + "/me/drive/root:/" + chemin
+                + ":/content?@microsoft.graph.conflictBehavior=rename", data, type);
+        if (!up[0].startsWith("2")) throw new RuntimeException("dépôt HTTP " + up[0] + " " + up[1]);
+        JSONObject item = new JSONObject(up[1]);
+        String idItem = item.getString("id");
+        String nom = item.optString("name", f.getName());
+        String webUrl = item.optString("webUrl", "");
+
+        JSONObject lien = new JSONObject().put("type", "view").put("scope", "organization");
+        String[] cl = requete("POST", token, GRAPH + "/me/drive/items/" + idItem + "/createLink",
+                lien.toString().getBytes(StandardCharsets.UTF_8), "application/json");
+        if (cl[0].startsWith("2")) {
+            JSONObject l = new JSONObject(cl[1]).optJSONObject("link");
+            if (l != null && !l.optString("webUrl", "").isEmpty()) webUrl = l.getString("webUrl");
+        } else {
+            Log.w(TAG, "createLink HTTP " + cl[0] + " " + cl[1]);
+        }
+        if (webUrl.isEmpty()) return null;
+
+        // L'id de la pièce jointe Teams est le GUID de l'eTag : "{GUID},n"
+        String etag = item.optString("eTag", "");
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\{([0-9A-Fa-f-]{36})\\}").matcher(etag);
+        String guid = m.find() ? m.group(1) : java.util.UUID.randomUUID().toString();
+        return new JSONObject().put("id", guid).put("contentType", "reference")
+                .put("contentUrl", webUrl).put("name", nom);
+    }
+
+    /** @return {code HTTP, corps} (corps limité à 4000 caractères). */
+    private static String[] requete(String methode, String token, String url, byte[] data, String contentType) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        try {
+            c.setRequestMethod(methode);
+            c.setConnectTimeout(10_000);
+            c.setReadTimeout(60_000);
+            c.setDoOutput(true);
+            c.setRequestProperty("Authorization", "Bearer " + token);
+            c.setRequestProperty("Content-Type", contentType);
+            c.setFixedLengthStreamingMode(data.length);
+            try (OutputStream os = c.getOutputStream()) { os.write(data); }
+            int code = c.getResponseCode();
+            InputStream is = code >= 400 ? c.getErrorStream() : c.getInputStream();
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            if (is != null) {
+                byte[] buf = new byte[8192]; int n;
+                while ((n = is.read(buf)) > 0 && bo.size() < 200_000) bo.write(buf, 0, n);
+            }
+            String corps = bo.toString("UTF-8");
+            return new String[]{String.valueOf(code), code >= 400 && corps.length() > 400 ? corps.substring(0, 400) : corps};
+        } finally {
+            c.disconnect();
+        }
     }
 
     private static String echapper(String s) {
