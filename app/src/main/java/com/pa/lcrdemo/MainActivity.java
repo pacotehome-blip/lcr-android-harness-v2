@@ -7694,21 +7694,34 @@ private boolean ensureBtConnectPermission() {
         return trouves;
     }
 
-    /** Lignes de résultat pour les registres 2, 3… trouvés par le balayage complet (le premier est déjà décrit). */
+    /**
+     * Détail COMPLET des registres 2, 3… trouvés par le balayage des 250 nodes — même contenu que le premier :
+     * fiche locale (RegistreStore, d'où part la synchro Dataverse), firmware, infos supplémentaires et, pour la
+     * validation manuelle, scan des 16 produits (register_products).
+     */
     private String lignesAutresNodes(com.pa.lcr.lcp.transport.TransportIo io, String candidatKey,
-                                     java.util.List<NodeTrouve> tous) {
+                                     java.util.List<NodeTrouve> tous, String baudTxt, boolean avecProduits) {
         if (tous == null || tous.size() < 2) return "";
-        StringBuilder sb = new StringBuilder("\n⚠ " + tous.size() + " registres sur ce transport :");
+        StringBuilder sb = new StringBuilder("\n\n⚠ " + tous.size() + " registres sur ce transport");
         for (int i = 1; i < tous.size(); i++) {
             NodeTrouve t = tous.get(i);
+            sb.append("\n\n── Registre ").append(i + 1).append(" — node ").append(t.node).append(" ──");
             try {
+                long t1 = System.currentTimeMillis();
                 com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, t.node, 255, true);
                 String fw = null;
                 try { fw = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
-                int prn = tmp.opGetPrinterType();
+                final int prn = tmp.opGetPrinterType();
                 enregistrerRegistreDepuisValidation(candidatKey, t.node, t.serial, fw, prn);
-            } catch (Exception ignored) {}
-            sb.append("\n  ✅ node ").append(t.node).append(" — #série=").append(t.serial);
+                String produits = avecProduits ? scannerProduitsPourValidation(tmp, t.node, t.serial) : "";
+                sb.append("\n✅ Présent — #série=").append(t.serial)
+                  .append(" (").append(System.currentTimeMillis() - t1).append("ms)")
+                  .append(infosSupplementaires(tmp, t.node, baudTxt, prn))
+                  .append(produits);
+            } catch (Exception e) {
+                sb.append("\n⚠ #série=").append(t.serial).append(" — détail incomplet : ")
+                  .append(e.getClass().getSimpleName()).append(": ").append(e.getMessage());
+            }
         }
         return sb.toString();
     }
@@ -7757,7 +7770,7 @@ private boolean ensureBtConnectPermission() {
                         java.util.List<String> lignesBaud = detecterBaudDetaille(usbPort, trouve.node);
                         detailBauds = "\n  Débits testés :\n" + String.join("\n", lignesBaud);
                     }
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "19200 (confirmé — port app)", prn_fwUsb) + ligneProduits + detailBauds + lignesAutresNodes(io, "USB", tousUsb);
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "19200 (confirmé — port app)", prn_fwUsb) + ligneProduits + detailBauds + lignesAutresNodes(io, "USB", tousUsb, "19200 (confirmé — port app)", avecProduits);
                 }
                 // ✅ AJOUTÉ (20 août 2026, demande Paul — "ajouter dans la
                 // validation la détection du baud rate") — au lieu de
@@ -7848,7 +7861,7 @@ private boolean ensureBtConnectPermission() {
                     final int prn_fwBt = tmp.opGetPrinterType();
                     enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwBt, prn_fwBt);
                     String ligneProduitsBt = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)", prn_fwBt) + ligneProduitsBt + lignesAutresNodes(tmpIo, candidatKey, tousBt);
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)", prn_fwBt) + ligneProduitsBt + lignesAutresNodes(tmpIo, candidatKey, tousBt, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)", avecProduits);
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — débit du pont BT à vérifier séparément (voir guide)";
             } catch (Exception e) {
@@ -7878,7 +7891,7 @@ private boolean ensureBtConnectPermission() {
                     final int prn_fwTcp = tmp.opGetPrinterType();
                     enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwTcp, prn_fwTcp);
                     String ligneProduitsTcp = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)", prn_fwTcp) + ligneProduitsTcp + lignesAutresNodes(tmpIo, candidatKey, tousTcp);
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)", prn_fwTcp) + ligneProduitsTcp + lignesAutresNodes(tmpIo, candidatKey, tousTcp, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)", avecProduits);
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — mauvais débit probable";
             } catch (Exception e) {
