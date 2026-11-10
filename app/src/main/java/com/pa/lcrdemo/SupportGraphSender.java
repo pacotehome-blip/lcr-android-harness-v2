@@ -214,7 +214,7 @@ public final class SupportGraphSender {
             boolean teamsOk = false;
             if (!SimplifiedConfig.SUPPORT_TEAMS_CHAT_ID.isEmpty()) {
                 try {
-                    String err = envoyerTeams(ctx, token, sujet, corps, lienSoti, journal, audio);
+                    String err = envoyerTeams(ctx, token, sujet, corps, lienSoti, journal, audio, medias);
                     teamsOk = err == null;
                     if (err != null) Log.w(TAG, "Teams : " + err);
                 } catch (Exception e) {
@@ -299,12 +299,16 @@ public final class SupportGraphSender {
      * Si le jeton OneDrive (Files.ReadWrite) ou un dépôt échoue, le message part quand même, sans ces fichiers.
      */
     private static String envoyerTeams(android.content.Context ctx, String token, String sujet, String corps,
-                                       String lienSoti, File journal, File audio) throws Exception {
+                                       String lienSoti, File journal, File audio, java.util.List<File> medias) throws Exception {
         JSONArray attaches = new JSONArray();
         StringBuilder balises = new StringBuilder();
         String fichiersJetons = jetonFichiers(ctx);
         if (fichiersJetons != null) {
-            for (File f : new File[]{audio, journal}) {
+            java.util.List<File> aDeposer = new java.util.ArrayList<>();
+            if (medias != null) aDeposer.addAll(medias);   // photos ou vidéo
+            aDeposer.add(audio);
+            aDeposer.add(journal);
+            for (File f : aDeposer) {
                 if (f == null || !f.exists()) continue;
                 try {
                     JSONObject a = deposerOneDrive(fichiersJetons, f);
@@ -317,17 +321,33 @@ public final class SupportGraphSender {
             }
         }
         String html = "<b>" + echapper(sujet) + "</b><br>"
-                + echapper(corps).replace("\n", "<br>")
+                + echapper(corpsPourTeams(corps)).replace("\n", "<br>")
                 + (lienSoti.isEmpty() ? "" : "<br><a href=\"" + echapper(lienSoti).replace("\"", "%22")
                         + "\">Ouvrir la tablette dans SOTI MobiControl</a>")
                 + (attaches.length() > 0 ? "<br>" + balises
-                        : "<br><i>Journal et message vocal : voir le courriel envoyé à "
+                        : "<br><i>Journal, message vocal, photos : voir le courriel envoyé à "
                           + echapper(SimplifiedConfig.SUPPORT_EMAIL) + "</i>");
         JSONObject req = new JSONObject();
         req.put("body", new JSONObject().put("contentType", "html").put("content", html));
         if (attaches.length() > 0) req.put("attachments", attaches);
         String url = GRAPH + "/chats/" + URLEncoder.encode(SimplifiedConfig.SUPPORT_TEAMS_CHAT_ID, "UTF-8") + "/messages";
         return post(token, url, req);
+    }
+
+    /**
+     * Texte du message Teams : on retire les lignes qui ne conviennent pas à Teams — les mentions « (… joint(e)(s)) »
+     * (les vrais fichiers y sont joints, ou sinon la ligne de renvoi au courriel le dit) et « Lien SOTI : <adresse> »
+     * (le lien cliquable « Ouvrir la tablette dans SOTI MobiControl » le remplace).
+     */
+    private static String corpsPourTeams(String corps) {
+        StringBuilder sb = new StringBuilder();
+        for (String l : corps.split("\n", -1)) {
+            String t = l.trim();
+            if (t.startsWith("Lien SOTI :")) continue;
+            if (t.startsWith("(") && t.endsWith(")") && t.contains("joint")) continue;
+            sb.append(l).append('\n');
+        }
+        return sb.toString().replaceAll("\n{3,}", "\n\n").trim();
     }
 
     /** Jeton Graph « fichiers » (Files.ReadWrite), SILENCIEUX ; null s'il n'est pas disponible (consentement absent…). */
@@ -350,7 +370,9 @@ public final class SupportGraphSender {
     private static JSONObject deposerOneDrive(String token, File f) throws Exception {
         if (f.length() > 4_000_000L) { Log.w(TAG, f.getName() + " trop gros pour Teams"); return null; }
         byte[] data = lire(f, 4_000_000);
-        String type = f.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".m4a") ? "audio/mp4" : "text/plain";
+        String n = f.getName().toLowerCase(java.util.Locale.ROOT);
+        String type = n.endsWith(".m4a") ? "audio/mp4" : n.endsWith(".mp4") ? "video/mp4"
+                : n.endsWith(".jpg") || n.endsWith(".jpeg") ? "image/jpeg" : "text/plain";
         String chemin = "Microsoft%20Teams%20Chat%20Files/" + URLEncoder.encode(f.getName(), "UTF-8").replace("+", "%20");
         String[] up = requete("PUT", token, GRAPH + "/me/drive/root:/" + chemin
                 + ":/content?@microsoft.graph.conflictBehavior=rename", data, type);
