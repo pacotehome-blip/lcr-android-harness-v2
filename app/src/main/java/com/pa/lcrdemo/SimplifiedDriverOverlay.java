@@ -437,9 +437,19 @@ final class SimplifiedDriverOverlay {
             afficherBulle();
             montrerCarte(true);
         } else if (cleAlerte.isEmpty()) {
-            rebondTrombone();
-            ouvrirSupport();
+            saluerPuisSupport();
         }
+    }
+
+    private boolean salutEnCours = false;
+
+    /** La flamme dit « hey, je suis là, youhoo ! » (sauts, bras qui font signe), puis la demande de support s'ouvre. */
+    private void saluerPuisSupport() {
+        if (sMascotte == null || !ValueAnimator.areAnimatorsEnabled()) { ouvrirSupport(); return; }
+        if (salutEnCours) return;
+        salutEnCours = true;
+        sMascotte.bonjour();
+        ui.postDelayed(() -> { salutEnCours = false; ouvrirSupport(); }, FlammeView.DUREE_BONJOUR_MS - 200L);
     }
 
     private void montrerCarte(boolean voir) {

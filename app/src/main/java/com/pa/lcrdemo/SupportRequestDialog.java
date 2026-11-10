@@ -7,7 +7,12 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.media.MediaRecorder;
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
 import android.net.Uri;
+import android.provider.MediaStore;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
@@ -20,6 +25,9 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.ComponentActivity;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 
@@ -27,6 +35,7 @@ import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.pa.lcr.lcp.log.LogBus;
 import com.pa.lcr.lcp.storage.DemandeSupportStore;
+import com.pa.lcr.lcp.storage.LcrDeliveryStatusDb;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -65,6 +74,18 @@ final class SupportRequestDialog {
         new Session(act, contexte, serie, node, wo, demandeMicro).ouvrir();
     }
 
+    /** Enregistrement vidéo limité en durée, en poids et en qualité (le courriel accepte ~2,5 Mo en tout). */
+    private static final class VideoLimite extends ActivityResultContracts.CaptureVideo {
+        @Override public Intent createIntent(Context c, Uri sortie) {
+            Intent i = super.createIntent(c, sortie);
+            i.putExtra(MediaStore.EXTRA_DURATION_LIMIT, SimplifiedConfig.SUPPORT_VIDEO_MAX_SECONDS);
+            i.putExtra(MediaStore.EXTRA_SIZE_LIMIT, (long) SimplifiedConfig.SUPPORT_VIDEO_MAX_OCTETS);
+            i.putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 0);
+            i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            return i;
+        }
+    }
+
     private static final class Session {
         final Activity act;
         final String contexte, serie, node, wo;
@@ -75,6 +96,39 @@ final class SupportRequestDialog {
         File fichierAudio = null;
         long debutEnregistrement = 0L;
         boolean enregistre = false;     // un fichier audio valide existe
+        /** Ligne du contexte qui commence par {@code prefixe} (sans le préfixe), sinon vide. */
+        String ligne(String prefixe) {
+            for (String l : contexte.split("\n")) if (l.startsWith(prefixe)) return l.substring(prefixe.length()).trim();
+            return "";
+        }
+
+        /** Bloc bien visible en haut : l'erreur en cours, sinon l'état actuel de la tâche du registre. */
+        void ajouterSituation(LinearLayout col) {
+            String alerte = ligne("Alerte :");
+            String etat = ligne("État :");
+            String live = ligne("Live :");
+            String lieu = wo.isEmpty() ? "" : "WO " + wo;
+            TextView t = new TextView(act);
+            boolean erreur = !alerte.isEmpty();
+            StringBuilder sb = new StringBuilder();
+            if (erreur) {
+                sb.append("⚠ Erreur en cours\n").append(alerte);
+            } else {
+                sb.append("État actuel : ").append(etat.isEmpty() ? "—" : etat);
+                if (!live.isEmpty()) sb.append("\n").append(live);
+            }
+            if (!lieu.isEmpty()) sb.append("\n").append(lieu);
+            t.setText(sb.toString());
+            t.setTextSize(14f);
+            t.setTextColor(Color.parseColor(erreur ? "#B3261E" : "#024B3C"));
+            t.setBackgroundColor(Color.parseColor(erreur ? "#FDECEA" : "#E6F2EE"));
+            t.setPadding((int) dp(12), (int) dp(10), (int) dp(12), (int) dp(10));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = (int) dp(4);
+            col.addView(t, lp);
+        }
+
         /** Demandes déjà envoyées (n° de ticket ou « en attente »). Ouvrir l'écran = réponses vues → flamme normale. */
         void ajouterDemandesRecentes(LinearLayout col) {
             try {
@@ -101,6 +155,15 @@ final class SupportRequestDialog {
         }
 
         MaterialButton btnRec;
+        // ---- pièces jointes : 3 photos au plus OU une vidéo
+        final ArrayList<File> photos = new ArrayList<>();
+        File video = null;
+        File mediaEnCours = null;
+        TextView txtMedias;
+        MaterialButton btnPhoto, btnVideo, btnRetirerMedias;
+        ActivityResultLauncher<Uri> lanceurPhoto, lanceurVideo;
+        String livraison = "";
+        LcrDeliveryStatusDb.DeliveryRow rowLiv = null;
         MaterialButton btnEnvoyer;
         TextView txtTimer;
         EditText edtComment;
@@ -145,11 +208,13 @@ final class SupportRequestDialog {
             int p = (int) dp(20);
             col.setPadding(p, (int) dp(4), p, (int) dp(8));
 
+            livraison = lireLivraison();
+            ajouterSituation(col);
             ajouterDemandesRecentes(col);
 
             col.addView(etiquette("JOINT AUTOMATIQUEMENT"));
             TextView ctx = new TextView(act);
-            ctx.setText(contexte + "\nJournal des " + SimplifiedConfig.SUPPORT_JOURNAL_MINUTES + " dernières minutes");
+            ctx.setText(contexte + livraison + "\nJournal des " + SimplifiedConfig.SUPPORT_JOURNAL_MINUTES + " dernières minutes");
             ctx.setTextSize(13f);
             ctx.setTextColor(Color.parseColor("#111111"));
             col.addView(ctx);
@@ -185,6 +250,40 @@ final class SupportRequestDialog {
             col.addView(edtComment, new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
+            col.addView(etiquette("PHOTOS (" + SimplifiedConfig.SUPPORT_PHOTOS_MAX + " MAX) OU UNE VIDÉO (FACULTATIF)"));
+            LinearLayout rangeeMedias = new LinearLayout(act);
+            rangeeMedias.setOrientation(LinearLayout.HORIZONTAL);
+            btnPhoto = new MaterialButton(act, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
+            btnPhoto.setText("Photo");
+            btnPhoto.setAllCaps(false);
+            btnPhoto.setOnClickListener(v -> prendrePhoto());
+            rangeeMedias.addView(btnPhoto, new LinearLayout.LayoutParams(0, (int) dp(52), 1f));
+            btnVideo = new MaterialButton(act, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
+            btnVideo.setText("Vidéo");
+            btnVideo.setAllCaps(false);
+            btnVideo.setOnClickListener(v -> filmer());
+            LinearLayout.LayoutParams lpV = new LinearLayout.LayoutParams(0, (int) dp(52), 1f);
+            lpV.setMarginStart((int) dp(8));
+            rangeeMedias.addView(btnVideo, lpV);
+            col.addView(rangeeMedias);
+            txtMedias = new TextView(act);
+            txtMedias.setTextSize(13f);
+            txtMedias.setTextColor(Color.parseColor("#3A3A3A"));
+            txtMedias.setPadding(0, (int) dp(6), 0, 0);
+            col.addView(txtMedias);
+            btnRetirerMedias = new MaterialButton(act, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
+            btnRetirerMedias.setText("Retirer les pièces jointes");
+            btnRetirerMedias.setAllCaps(false);
+            btnRetirerMedias.setOnClickListener(v -> retirerMedias());
+            col.addView(btnRetirerMedias);
+            if (act instanceof ComponentActivity) {
+                androidx.activity.result.ActivityResultRegistry reg = ((ComponentActivity) act).getActivityResultRegistry();
+                String cle = "support_" + System.nanoTime();
+                lanceurPhoto = reg.register(cle + "_p", new ActivityResultContracts.TakePicture(), ok -> surPhoto(ok));
+                lanceurVideo = reg.register(cle + "_v", new VideoLimite(), ok -> surVideo(ok));
+            }
+            majMedias();
+
             btnEnvoyer = new MaterialButton(act);
             btnEnvoyer.setText("Envoyer au support");
             btnEnvoyer.setAllCaps(false);
@@ -202,9 +301,142 @@ final class SupportRequestDialog {
                     .setTitle("Demander du support")
                     .setView(sv)
                     .setNegativeButton("Annuler", null)
-                    .setOnDismissListener(d -> { arreterEnregistrement(false); if (ecouteurTicket != null) SupportSuivi.retirer(ecouteurTicket); })
+                    .setOnDismissListener(d -> { arreterEnregistrement(false); if (ecouteurTicket != null) SupportSuivi.retirer(ecouteurTicket);
+                        try { if (lanceurPhoto != null) lanceurPhoto.unregister(); if (lanceurVideo != null) lanceurVideo.unregister(); } catch (Exception ignored) {} })
                     .show();
         }
+
+        // ---------------------------------------------------------------- photos / vidéo
+
+        void prendrePhoto() {
+            if (lanceurPhoto == null || video != null || photos.size() >= SimplifiedConfig.SUPPORT_PHOTOS_MAX) return;
+            try {
+                mediaEnCours = new File(dossierSupport(), "photo_" + nettoyer(serie) + "_" + System.currentTimeMillis() + ".jpg");
+                lanceurPhoto.launch(FileProvider.getUriForFile(act, act.getPackageName() + ".fileprovider", mediaEnCours));
+            } catch (Exception e) {
+                Log.w(TAG, "photo ERR: " + e.getMessage());
+                Toast.makeText(act, "Impossible d’ouvrir l’appareil photo", Toast.LENGTH_SHORT).show();
+            }
+        }
+
+        void filmer() {
+            if (lanceurVideo == null || video != null || !photos.isEmpty()) return;
+            try {
+                mediaEnCours = new File(dossierSupport(), "video_" + nettoyer(serie) + "_" + System.currentTimeMillis() + ".mp4");
+                lanceurVideo.launch(FileProvider.getUriForFile(act, act.getPackageName() + ".fileprovider", mediaEnCours));
+            } catch (Exception e) {
+                Log.w(TAG, "vidéo ERR: " + e.getMessage());
+                Toast.makeText(act, "Impossible d’ouvrir la caméra", Toast.LENGTH_SHORT).show();
+            }
+        }
+
+        void surPhoto(Boolean ok) {
+            final File f = mediaEnCours;
+            mediaEnCours = null;
+            if (f == null) return;
+            if (ok == null || !ok || !f.exists() || f.length() == 0) { f.delete(); return; }
+            new Thread(() -> {
+                try {
+                    reduirePhoto(f);
+                    act.runOnUiThread(() -> { photos.add(f); majMedias(); });
+                } catch (Exception e) {
+                    Log.w(TAG, "réduction photo ERR: " + e.getMessage());
+                    act.runOnUiThread(() -> Toast.makeText(act, "Photo illisible", Toast.LENGTH_SHORT).show());
+                }
+            }, "support-photo").start();
+        }
+
+        void surVideo(Boolean ok) {
+            final File f = mediaEnCours;
+            mediaEnCours = null;
+            if (f == null) return;
+            if (ok == null || !ok || !f.exists() || f.length() == 0) { f.delete(); return; }
+            if (f.length() > SimplifiedConfig.SUPPORT_VIDEO_MAX_OCTETS) {
+                f.delete();
+                Toast.makeText(act, "Vidéo trop lourde : refaites-la plus courte (" + SimplifiedConfig.SUPPORT_VIDEO_MAX_SECONDS + " s)", Toast.LENGTH_LONG).show();
+                return;
+            }
+            video = f;
+            majMedias();
+        }
+
+        void retirerMedias() {
+            for (File f : photos) f.delete();
+            photos.clear();
+            if (video != null) { video.delete(); video = null; }
+            majMedias();
+        }
+
+        void majMedias() {
+            boolean aucun = photos.isEmpty() && video == null;
+            txtMedias.setText(video != null ? "1 vidéo jointe"
+                    : photos.isEmpty() ? "Aucune pièce jointe"
+                    : photos.size() + " photo(s) jointe(s) sur " + SimplifiedConfig.SUPPORT_PHOTOS_MAX);
+            btnPhoto.setEnabled(video == null && photos.size() < SimplifiedConfig.SUPPORT_PHOTOS_MAX);
+            btnVideo.setEnabled(video == null && photos.isEmpty());
+            btnRetirerMedias.setVisibility(aucun ? View.GONE : View.VISIBLE);
+        }
+
+        /** Réduit la photo (plus grand côté SUPPORT_PHOTO_PX, JPEG 70) et applique la rotation EXIF. */
+        void reduirePhoto(File f) throws Exception {
+            int deg = 0;
+            try {
+                int o = new android.media.ExifInterface(f.getPath()).getAttributeInt(
+                        android.media.ExifInterface.TAG_ORIENTATION, android.media.ExifInterface.ORIENTATION_NORMAL);
+                deg = o == android.media.ExifInterface.ORIENTATION_ROTATE_90 ? 90
+                    : o == android.media.ExifInterface.ORIENTATION_ROTATE_180 ? 180
+                    : o == android.media.ExifInterface.ORIENTATION_ROTATE_270 ? 270 : 0;
+            } catch (Exception ignored) {}
+            BitmapFactory.Options opt = new BitmapFactory.Options();
+            opt.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(f.getPath(), opt);
+            int max = SimplifiedConfig.SUPPORT_PHOTO_PX, ech = 1;
+            while (Math.max(opt.outWidth, opt.outHeight) / ech > max * 2) ech *= 2;
+            opt.inJustDecodeBounds = false;
+            opt.inSampleSize = ech;
+            Bitmap b = BitmapFactory.decodeFile(f.getPath(), opt);
+            if (b == null) throw new IllegalStateException("décodage impossible");
+            float k = Math.min(1f, max / (float) Math.max(b.getWidth(), b.getHeight()));
+            Matrix m = new Matrix();
+            m.postRotate(deg);
+            m.postScale(k, k);
+            Bitmap r = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
+            try (FileOutputStream os = new FileOutputStream(f)) {
+                r.compress(Bitmap.CompressFormat.JPEG, 70, os);
+            }
+            if (r != b) r.recycle();
+            b.recycle();
+        }
+
+        // ---------------------------------------------------------------- lien avec la livraison
+
+        /** Tournée, stop, chauffeur… de la livraison en cours (ligne la plus récente du WO), sinon vide. */
+        String lireLivraison() {
+            try {
+                if (wo == null || wo.isEmpty()) return "";
+                LcrDeliveryStatusDb db = new LcrDeliveryStatusDb(act);
+                LcrDeliveryStatusDb.DeliveryRow best = null;
+                for (LcrDeliveryStatusDb.DeliveryRow r : db.getAllForWo(wo)) {
+                    if (best == null || r.tsUpdatedMs > best.tsUpdatedMs) best = r;
+                }
+                if (best == null) return "";
+                rowLiv = best;
+                StringBuilder sb = new StringBuilder();
+                if (!vide(best.tourneeId)) sb.append("\nTournée : ").append(best.tourneeId);
+                sb.append("\nStop : séquence ").append(best.stopSequence);
+                if (!vide(best.stopType)) sb.append(" (").append(best.stopType).append(')');
+                if (!vide(best.stopid)) sb.append("\nStop (id) : ").append(best.stopid);
+                if (!vide(best.livreurId)) sb.append("\nChauffeur : ").append(best.livreurId);
+                if (!vide(best.camionId)) sb.append("\nCamion : ").append(best.camionId);
+                if (!vide(best.client)) sb.append("\nClient : ").append(best.client);
+                return sb.toString();
+            } catch (Throwable t) {
+                Log.w(TAG, "livraison ERR: " + t.getMessage());
+                return "";
+            }
+        }
+
+        boolean vide(String s) { return s == null || s.trim().isEmpty(); }
 
         // ---------------------------------------------------------------- audio
 
@@ -290,6 +522,9 @@ final class SupportRequestDialog {
             btnEnvoyer.setText("Envoi en cours…");
             final String commentaire = edtComment.getText() != null ? edtComment.getText().toString().trim() : "";
             final boolean avecAudio = enregistre && fichierAudio != null && fichierAudio.exists();
+            final ArrayList<File> medias = new ArrayList<>(photos);
+            if (video != null) medias.add(video);
+            final String contexteTotal = contexte + livraison;
             // Le journal peut être gros : écrit hors du fil UI.
             new Thread(() -> {
                 try {
@@ -298,16 +533,18 @@ final class SupportRequestDialog {
                     File journal = new File(dir, "journal_" + nettoyer(serie) + "_" + ts + ".txt");
                     try (Writer w = new OutputStreamWriter(new FileOutputStream(journal), StandardCharsets.UTF_8)) {
                         w.write("Demande de support — Filgo-Registre\n");
-                        w.write(contexte + "\n");
+                        w.write(contexteTotal + "\n");
                         if (!commentaire.isEmpty()) w.write("\nCommentaire du chauffeur :\n" + commentaire + "\n");
                         w.write("\n===== Journal (" + SimplifiedConfig.SUPPORT_JOURNAL_MINUTES + " dernières minutes) =====\n");
                         w.write(construireJournal());
                     }
                     final File audio = avecAudio ? fichierAudio : null;
 
-                    final StringBuilder corps = new StringBuilder(contexte);
+                    final StringBuilder corps = new StringBuilder(contexteTotal);
                     if (!commentaire.isEmpty()) corps.append("\n\nCommentaire :\n").append(commentaire);
                     if (avecAudio) corps.append("\n\n(Message vocal joint)");
+                    if (video != null) corps.append("\n\n(Vidéo jointe)");
+                    else if (!photos.isEmpty()) corps.append("\n\n(").append(photos.size()).append(" photo(s) jointe(s))");
                     corps.append("\n\nPrise en main à distance (SOTI MobiControl) — ID de la tablette : ")
                          .append(idSoti());
                     final String lienSoti = lienSoti();
@@ -318,30 +555,48 @@ final class SupportRequestDialog {
                             + " — WO " + (wo.isEmpty() ? "—" : wo)
                             + " — #" + serie + " Node " + node;
 
+                    // Ligne locale (envoyée ensuite à Dataverse) : tout ce qu'on sait de la demande.
+                    final DemandeSupportStore.Row base = new DemandeSupportStore.Row();
+                    base.reference = reference; base.sujet = sujet; base.contexte = contexteTotal;
+                    base.commentaire = commentaire; base.avecAudio = avecAudio; base.envoyeLe = envoyeLe;
+                    base.nbPhotos = photos.size(); base.avecVideo = video != null;
+                    base.tablette = idSoti(); base.lienSoti = lienSoti;
+                    base.woNum = wo; base.serie = serie;
+                    try { base.node = Integer.parseInt(node.trim()); } catch (Exception ignored) {}
+                    base.etatRegistre = ligne("État :"); base.erreur = ligne("Alerte :");
+                    if (rowLiv != null) {
+                        base.tourneeId = rowLiv.tourneeId; base.stopSequence = rowLiv.stopSequence;
+                        base.stopType = rowLiv.stopType; base.stopId = rowLiv.stopid;
+                        base.chauffeur = rowLiv.livreurId; base.client = rowLiv.client;
+                        base.citerneNom = rowLiv.camionId;
+                    }
+                    try {
+                        com.pa.lcr.lcp.storage.RegistreStore.Row reg = new com.pa.lcr.lcp.storage.RegistreStore(act).getBySerial(serie);
+                        if (reg != null) {
+                            if (reg.citerneGuid != null) base.citerneId = reg.citerneGuid;
+                            if (reg.citerneNom != null && !reg.citerneNom.trim().isEmpty()) base.citerneNom = reg.citerneNom;
+                        }
+                    } catch (Exception ignored) {}
+
                     // 1) Envoi silencieux par Microsoft Graph (courriel + Teams)
-                    SupportGraphSender.envoyer(act, sujet, corps.toString(), lienSoti, journal, audio,
+                    SupportGraphSender.envoyer(act, sujet, corps.toString(), lienSoti, journal, audio, medias,
                             new SupportGraphSender.Resultat() {
                         @Override public void courrielEnvoye(boolean teamsOk) {
-                            try {
-                                DemandeSupportStore.Row d = new DemandeSupportStore.Row();
-                                d.reference = reference; d.sujet = sujet; d.contexte = contexte;
-                                d.commentaire = commentaire; d.avecAudio = avecAudio; d.teamsOk = teamsOk;
-                                d.envoyeLe = envoyeLe;
-                                new DemandeSupportStore(act).enregistrer(d);
-                                SupportSuivi.demarrer(act);
-                            } catch (Exception e) {
-                                Log.w(TAG, "enregistrement BD ERR: " + e.getMessage());
-                            }
+                            base.teamsOk = teamsOk; base.canal = "GRAPH";
+                            enregistrerDemande(base);
                             act.runOnUiThread(() -> afficherConfirmation(reference, teamsOk));
                         }
                         @Override public void echec(String raison) {
                             Log.w(TAG, "Graph indisponible → repli courriel : " + raison);
+                            base.teamsOk = false; base.canal = "OUTLOOK";
+                            enregistrerDemande(base);   // la demande est gardée même si elle part par Outlook
                             // 2) Repli : courriel pré-rempli, le chauffeur appuie sur Envoyer
                             try {
                                 final ArrayList<Uri> uris = new ArrayList<>();
                                 String auth = act.getPackageName() + ".fileprovider";
                                 uris.add(FileProvider.getUriForFile(act, auth, journal));
                                 if (audio != null) uris.add(FileProvider.getUriForFile(act, auth, audio));
+                                for (File mf : medias) if (mf.exists()) uris.add(FileProvider.getUriForFile(act, auth, mf));
                                 act.runOnUiThread(() -> {
                                     lancerCourriel(sujet, corps.toString(), uris);
                                     reactiverBouton();
@@ -454,6 +709,17 @@ final class SupportRequestDialog {
                     if (st.aReponseNonVue()) { st.marquerToutVu(); SupportSuivi.avertir(); }
                 }
                 return;
+            }
+        }
+
+        /** Enregistre la demande en base locale, lance le suivi de la réponse et l'envoi à Dataverse. */
+        void enregistrerDemande(DemandeSupportStore.Row d) {
+            try {
+                new DemandeSupportStore(act).enregistrer(d);
+                SupportSuivi.demarrer(act);
+                com.pa.lcrdemo.dataverse.SupportDataverseSync.pousser(act, true);
+            } catch (Exception e) {
+                Log.w(TAG, "enregistrement BD ERR: " + e.getMessage());
             }
         }
 

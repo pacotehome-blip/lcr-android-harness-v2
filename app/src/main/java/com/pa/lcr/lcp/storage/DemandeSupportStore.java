@@ -29,8 +29,11 @@ public class DemandeSupportStore {
     public static final class Row {
         public long id;
         public String reference, sujet, contexte, commentaire, statut, ticket;
-        public boolean avecAudio, teamsOk, vu;
+        public boolean avecAudio, teamsOk, vu, avecVideo, envoyeDv, majDv;
         public long envoyeLe, reponduLe;
+        public String tourneeId, stopType, stopId, chauffeur, client, citerneId, citerneNom, woNum, serie,
+                etatRegistre, erreur, tablette, lienSoti, canal, dvId;
+        public int stopSequence, node, nbPhotos;
 
         static Row from(Cursor c) {
             Row r = new Row();
@@ -46,6 +49,27 @@ public class DemandeSupportStore {
             r.ticket = c.getString(c.getColumnIndexOrThrow("ticket"));
             r.reponduLe = c.getLong(c.getColumnIndexOrThrow("repondu_le"));
             r.vu = c.getInt(c.getColumnIndexOrThrow("vu")) != 0;
+            r.tourneeId = c.getString(c.getColumnIndexOrThrow("tournee_id"));
+            r.stopSequence = c.getInt(c.getColumnIndexOrThrow("stop_sequence"));
+            r.stopType = c.getString(c.getColumnIndexOrThrow("stop_type"));
+            r.stopId = c.getString(c.getColumnIndexOrThrow("stop_id"));
+            r.chauffeur = c.getString(c.getColumnIndexOrThrow("chauffeur"));
+            r.client = c.getString(c.getColumnIndexOrThrow("client"));
+            r.citerneId = c.getString(c.getColumnIndexOrThrow("citerne_id"));
+            r.citerneNom = c.getString(c.getColumnIndexOrThrow("citerne_nom"));
+            r.woNum = c.getString(c.getColumnIndexOrThrow("wo_num"));
+            r.serie = c.getString(c.getColumnIndexOrThrow("serie"));
+            r.node = c.getInt(c.getColumnIndexOrThrow("node"));
+            r.etatRegistre = c.getString(c.getColumnIndexOrThrow("etat_registre"));
+            r.erreur = c.getString(c.getColumnIndexOrThrow("erreur"));
+            r.tablette = c.getString(c.getColumnIndexOrThrow("tablette"));
+            r.lienSoti = c.getString(c.getColumnIndexOrThrow("lien_soti"));
+            r.nbPhotos = c.getInt(c.getColumnIndexOrThrow("nb_photos"));
+            r.avecVideo = c.getInt(c.getColumnIndexOrThrow("avec_video")) != 0;
+            r.canal = c.getString(c.getColumnIndexOrThrow("canal"));
+            r.envoyeDv = c.getInt(c.getColumnIndexOrThrow("envoye_dv")) != 0;
+            r.majDv = c.getInt(c.getColumnIndexOrThrow("maj_dv")) != 0;
+            r.dvId = c.getString(c.getColumnIndexOrThrow("dv_id"));
             return r;
         }
     }
@@ -62,6 +86,26 @@ public class DemandeSupportStore {
         v.put("envoye_le", r.envoyeLe);
         v.put("statut", ENVOYEE);
         v.put("vu", 0);
+        v.put("tournee_id", r.tourneeId);
+        v.put("stop_sequence", r.stopSequence);
+        v.put("stop_type", r.stopType);
+        v.put("stop_id", r.stopId);
+        v.put("chauffeur", r.chauffeur);
+        v.put("client", r.client);
+        v.put("citerne_id", r.citerneId);
+        v.put("citerne_nom", r.citerneNom);
+        v.put("wo_num", r.woNum);
+        v.put("serie", r.serie);
+        v.put("node", r.node);
+        v.put("etat_registre", r.etatRegistre);
+        v.put("erreur", r.erreur);
+        v.put("tablette", r.tablette);
+        v.put("lien_soti", r.lienSoti);
+        v.put("nb_photos", r.nbPhotos);
+        v.put("avec_video", r.avecVideo ? 1 : 0);
+        v.put("canal", r.canal);
+        v.put("envoye_dv", 0);
+        v.put("maj_dv", 1);
         db.insertWithOnConflict(TABLE, null, v, SQLiteDatabase.CONFLICT_IGNORE);
     }
 
@@ -91,6 +135,20 @@ public class DemandeSupportStore {
         v.put("ticket", ticket);
         v.put("repondu_le", System.currentTimeMillis());
         v.put("vu", 0);
+        v.put("maj_dv", 1);       // à renvoyer à Dataverse (ticket + statut Répondue)
+        helper.getWritableDatabase().update(TABLE, v, "reference=?", new String[]{reference});
+    }
+
+    /** Demandes à envoyer (jamais envoyées) ou à mettre à jour dans Dataverse. */
+    public List<Row> aPousserDataverse() {
+        return lister("envoye_dv=0 OR maj_dv=1", null, "envoye_le ASC", 50);
+    }
+
+    public void marquerPoussee(String reference, String dvId) {
+        ContentValues v = new ContentValues();
+        v.put("envoye_dv", 1);
+        v.put("maj_dv", 0);
+        v.put("dv_id", dvId);
         helper.getWritableDatabase().update(TABLE, v, "reference=?", new String[]{reference});
     }
 

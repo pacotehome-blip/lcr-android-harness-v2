@@ -35,11 +35,19 @@ final class SimplifiedConfig {
             + "?search=Text%20AlmostEqual%20%22{ID}%22&subGroups=false&count=250";
 
     /**
-     * Extraction du n° de ticket dans la réponse automatique du support (objet + début du corps).
-     * Le 1er groupe capturé est le n°. PROVISOIRE : à ajuster avec un vrai exemple de réponse.
+     * Extraction du n° de ticket dans la réponse automatique d'Octopus (le 1er groupe capturé est le n°).
+     * Texte réel : « Votre numéro de référence est le 216892. »
      */
     static final String SUPPORT_TICKET_REGEX =
-            "(?i)(?:ticket|billet|incident|case|INC|REQ|TKT)\\s*(?:n[°o]\\s*)?[#:\\-]?\\s*([A-Z]*-?\\d{4,10})";
+            "(?i)num[ée]ro\\s+de\\s+r[ée]f[ée]rence\\s+(?:est\\s+)?(?:le\\s+)?[#:]?\\s*([A-Z]*-?\\d{4,10})";
+
+    /** Pièces jointes de la demande de support : 3 photos au plus OU une vidéo (jamais les deux). */
+    static final int SUPPORT_PHOTOS_MAX = 3;
+    /** Photos réduites avant l'envoi : plus grand côté en pixels (JPEG qualité 70). */
+    static final int SUPPORT_PHOTO_PX = 1280;
+    /** Vidéo : durée max (s) et poids max (octets) — le courriel Graph accepte ~2,5 Mo en tout. */
+    static final int SUPPORT_VIDEO_MAX_SECONDS = 15;
+    static final int SUPPORT_VIDEO_MAX_OCTETS = 1_600_000;
 
     /** Intervalle entre deux vérifications de la réponse du support. */
     static final long SUPPORT_TICKET_SONDE_MS = 15_000L;

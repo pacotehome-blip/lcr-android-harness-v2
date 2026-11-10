@@ -49,13 +49,13 @@ public final class PrintDataverseSync {
     private PrintDataverseSync() {}
 
     /** Lecture inachevee ou impossible : rien ne doit etre retire. */
-    private static final class TableAbsente extends Exception {
+    static final class TableAbsente extends Exception {
         TableAbsente(String m) { super(m); }
     }
 
     // ------------------------------------------------------------------ metadonnees Dataverse
 
-    private static final class Meta {
+    static final class Meta {
         String set = "";
         String idAttr = "";
         String nameAttr = "";
@@ -63,7 +63,7 @@ public final class PrintDataverseSync {
     private static final java.util.Map<String, Meta> META = new java.util.concurrent.ConcurrentHashMap<>();
 
     /** Nom d'ensemble, cle primaire et colonne nom de la table (mis en cache). */
-    private static Meta meta(Context ctx, String token, String table) throws Exception {
+    static Meta meta(Context ctx, String token, String table) throws Exception {
         Meta m = META.get(table);
         if (m != null) return m;
         String url = LcrConfig.getDataverseUrl(ctx) + "/api/data/v9.2/EntityDefinitions(LogicalName='" + table
@@ -81,7 +81,7 @@ public final class PrintDataverseSync {
     private static final java.util.Map<String, java.util.Map<Integer, String>> OPTIONS = new java.util.concurrent.ConcurrentHashMap<>();
 
     /** Valeurs -> libelles d'une colonne a choix. */
-    private static java.util.Map<Integer, String> options(Context ctx, String token, String table, String col) throws Exception {
+    static java.util.Map<Integer, String> options(Context ctx, String token, String table, String col) throws Exception {
         String key = table + "." + col;
         java.util.Map<Integer, String> m = OPTIONS.get(key);
         if (m != null) return m;
@@ -169,7 +169,7 @@ public final class PrintDataverseSync {
     }
 
     /** Valeur texte d'une colonne ; "" si absente OU null (optString renvoie "null" pour un null JSON). */
-    private static String str(JSONObject r, String k) {
+    static String str(JSONObject r, String k) {
         return r == null || r.isNull(k) ? "" : r.optString(k, "");
     }
 
@@ -595,12 +595,12 @@ public final class PrintDataverseSync {
         return out;
     }
 
-    private static JSONObject getJson(String urlStr, String token) throws Exception {
+    static JSONObject getJson(String urlStr, String token) throws Exception {
         return getJson(urlStr, token, 15000, 30000);
     }
 
     /** POST / PATCH JSON vers Dataverse ; retourne la ligne ecrite (Prefer: return=representation). */
-    private static JSONObject ecrire(String methode, String urlStr, JSONObject body, String token) throws Exception {
+    static JSONObject ecrire(String methode, String urlStr, JSONObject body, String token) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
         try {
             // PATCH n'est pas toujours accepte par HttpURLConnection : on passe par l'en-tete de surcharge.

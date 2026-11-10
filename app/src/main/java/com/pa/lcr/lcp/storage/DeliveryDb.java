@@ -52,7 +52,7 @@ public class DeliveryDb extends SQLiteOpenHelper {
     //      Dataverse (formulaire_impression avec le PDF en BLOB, banniere_impression avec le logo en BLOB). Dans cette
     //      BD pour etre dans l'export / la sauvegarde de lcr_delivery.db. Les formulaires sont envoyes au service
     //      d'impression (/print-form) ; les bannieres seulement gardees pour plus tard.
-    public static final int DB_VERSION = 33;
+    public static final int DB_VERSION = 34;
 
     private static final String TAG = "DeliveryDb";
 
@@ -307,6 +307,30 @@ public class DeliveryDb extends SQLiteOpenHelper {
         if (oldVersion < 33) {
             createDemandeSupportTable(db);
         }
+        // v34 (10 nov 2026, demande Paul) — demande_support : champs de la livraison en colonnes + suivi de l'envoi à Dataverse.
+        if (oldVersion < 34) {
+            addColumnIfMissing(db, "demande_support", "tournee_id",    "TEXT");
+            addColumnIfMissing(db, "demande_support", "stop_sequence", "INTEGER");
+            addColumnIfMissing(db, "demande_support", "stop_type",     "TEXT");
+            addColumnIfMissing(db, "demande_support", "stop_id",       "TEXT");
+            addColumnIfMissing(db, "demande_support", "chauffeur",     "TEXT");
+            addColumnIfMissing(db, "demande_support", "client",        "TEXT");
+            addColumnIfMissing(db, "demande_support", "citerne_id",    "TEXT");
+            addColumnIfMissing(db, "demande_support", "citerne_nom",   "TEXT");
+            addColumnIfMissing(db, "demande_support", "wo_num",        "TEXT");
+            addColumnIfMissing(db, "demande_support", "serie",         "TEXT");
+            addColumnIfMissing(db, "demande_support", "node",          "INTEGER");
+            addColumnIfMissing(db, "demande_support", "etat_registre", "TEXT");
+            addColumnIfMissing(db, "demande_support", "erreur",        "TEXT");
+            addColumnIfMissing(db, "demande_support", "tablette",      "TEXT");
+            addColumnIfMissing(db, "demande_support", "lien_soti",     "TEXT");
+            addColumnIfMissing(db, "demande_support", "nb_photos",     "INTEGER NOT NULL DEFAULT 0");
+            addColumnIfMissing(db, "demande_support", "avec_video",    "INTEGER NOT NULL DEFAULT 0");
+            addColumnIfMissing(db, "demande_support", "canal",         "TEXT");
+            addColumnIfMissing(db, "demande_support", "envoye_dv",     "INTEGER NOT NULL DEFAULT 0");
+            addColumnIfMissing(db, "demande_support", "maj_dv",        "INTEGER NOT NULL DEFAULT 0");
+            addColumnIfMissing(db, "demande_support", "dv_id",         "TEXT");
+        }
     }
 
     // Demandes de support envoyées depuis l'écran simplifié. statut : ENVOYEE (en attente de la réponse du
@@ -326,7 +350,28 @@ public class DeliveryDb extends SQLiteOpenHelper {
             "statut       TEXT    NOT NULL DEFAULT 'ENVOYEE'," +
             "ticket       TEXT," +
             "repondu_le   INTEGER," +
-            "vu           INTEGER NOT NULL DEFAULT 0)");
+            "vu           INTEGER NOT NULL DEFAULT 0," +
+            "tournee_id   TEXT," +
+            "stop_sequence INTEGER," +
+            "stop_type    TEXT," +
+            "stop_id      TEXT," +
+            "chauffeur    TEXT," +
+            "client       TEXT," +
+            "citerne_id   TEXT," +
+            "citerne_nom  TEXT," +
+            "wo_num       TEXT," +
+            "serie        TEXT," +
+            "node         INTEGER," +
+            "etat_registre TEXT," +
+            "erreur       TEXT," +
+            "tablette     TEXT," +
+            "lien_soti    TEXT," +
+            "nb_photos    INTEGER NOT NULL DEFAULT 0," +
+            "avec_video   INTEGER NOT NULL DEFAULT 0," +
+            "canal        TEXT," +                              // GRAPH (silencieux) | OUTLOOK (repli)
+            "envoye_dv    INTEGER NOT NULL DEFAULT 0," +       // 1 = la ligne existe dans Dataverse
+            "maj_dv       INTEGER NOT NULL DEFAULT 0," +       // 1 = modifiée ici depuis le dernier envoi à Dataverse
+            "dv_id        TEXT)");
     }
 
     // =========================================================

@@ -60,7 +60,11 @@ final class SupportSuivi {
                 fin(app, false);
                 return;
             }
-            if (attente.isEmpty()) { fin(app, false); return; }   // rien à surveiller : la boucle s'arrête
+            // Les demandes pas encore envoyées à Dataverse (ou à mettre à jour) sont réessayées par cette boucle.
+            boolean dvEnAttente;
+            try { dvEnAttente = !store.aPousserDataverse().isEmpty(); } catch (Exception e) { dvEnAttente = false; }
+            if (dvEnAttente) com.pa.lcrdemo.dataverse.SupportDataverseSync.pousser(app, false);
+            if (attente.isEmpty()) { fin(app, dvEnAttente); return; }   // plus rien à surveiller : la boucle s'arrête
 
             // On interroge la boîte de réception depuis la plus ancienne demande en attente.
             final long depuis = attente.get(0).envoyeLe;
@@ -70,6 +74,7 @@ final class SupportSuivi {
                         store.marquerRepondue(reference, numero == null ? "" : numero);
                         Log.i(TAG, "réponse du support pour " + reference + " : " + numero);
                         avertir();
+                        com.pa.lcrdemo.dataverse.SupportDataverseSync.pousser(app, true);   // ticket + statut Répondue
                     } catch (Exception e) {
                         Log.w(TAG, "marquerRepondue ERR: " + e.getMessage());
                     }

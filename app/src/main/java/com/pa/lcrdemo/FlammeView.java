@@ -38,6 +38,8 @@ final class FlammeView extends View {
     private ValueAnimator respiration;
     private ValueAnimator salut;
     private ValueAnimator animCogne;
+    private ValueAnimator animBonjour;
+    private float bonjourT = -1f;          // -1 = pas de salut ; 0..1 = « hey, je suis là, youhoo ! » en cours
     private float cogneT = -1f;             // -1 = pas de coup ; 0..1 = la flamme cogne dans la vitre (700 ms, coups à 250 et 450 ms)
     private float proche = 0f;             // 0..1 : le bras s'étire vers la vitre (la main grossit en s'approchant)
     private float pulse = 0f;               // 0..1 : force du coup en cours
@@ -84,6 +86,23 @@ final class FlammeView extends View {
         else { pExt.setColor(Color.parseColor("#1E9E6A")); pInt.setColor(Color.parseColor("#9BE3BC")); }
         invalidate();
     }
+
+    /** « Hey, je suis là, youhoo ! » : deux petits sauts, balancement, les deux bras qui font signe et la bouche ouverte. */
+    void bonjour() {
+        if (!ValueAnimator.areAnimatorsEnabled()) return;
+        if (animBonjour != null) animBonjour.cancel();
+        animBonjour = ValueAnimator.ofFloat(0f, 1f);
+        animBonjour.setDuration(DUREE_BONJOUR_MS);
+        animBonjour.setInterpolator(new android.view.animation.LinearInterpolator());
+        animBonjour.addUpdateListener(a -> { bonjourT = (float) a.getAnimatedValue(); invalidate(); });
+        animBonjour.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(android.animation.Animator animation) { bonjourT = -1f; invalidate(); }
+            @Override public void onAnimationCancel(android.animation.Animator animation) { bonjourT = -1f; }
+        });
+        animBonjour.start();
+    }
+
+    static final long DUREE_BONJOUR_MS = 1300L;
 
     /** Version icône (bouton de support) : la flamme remplit la vue, sans bras ni jambes. */
     void setMini(boolean v) { mini = v; invalidate(); }
@@ -224,9 +243,22 @@ final class FlammeView extends View {
         }
         if (alpha > 0f && echelle > 0f) {
             c.save();
-            c.scale(echelle, echelle, cx, base);
+            float ech2 = 1f, saut = 0f, penche = 0f, agite = 0f;
+            if (bonjourT >= 0f && explosion < 0f) {
+                float t = bonjourT;
+                saut = (float) Math.abs(Math.sin(t * Math.PI * 2.0));                  // deux sauts
+                penche = (float) Math.sin(t * Math.PI * 6.0) * 7f * (1f - t);          // se balance de plus en plus doucement
+                agite = (float) Math.sin(t * Math.PI * 10.0);                          // bras qui font signe, en alternance
+                if (mini) ech2 = 0.74f;                                                // laisse de la place aux bras dans l'icône
+            }
+            c.scale(echelle * ech2, echelle * ech2, cx, base);
+            if (bonjourT >= 0f && explosion < 0f) {
+                c.translate(0f, -saut * H * 0.16f);
+                c.rotate(penche, cx, base);
+            }
             if (inquiet && explosion < 0f && salut != null) c.translate(0f, -Math.abs(vague - 0.5f) * 2f * H * 0.05f);   // petit saut
             if (!mini) dessinerMembres(c, cx, base, W, H, alpha);
+            else if (bonjourT >= 0f && explosion < 0f) dessinerBrasBonjour(c, cx, base, W, H, alpha, agite);
             pExt.setAlpha((int) (255 * alpha));
             tracerFlamme(chemin, cx, base, W, H);
             c.drawPath(chemin, pExt);
@@ -317,6 +349,26 @@ final class FlammeView extends View {
         }
     }
 
+    /** Icône : les deux bras levés qui font signe (« youhoo ! »). */
+    private void dessinerBrasBonjour(Canvas c, float cx, float base, float W, float H, float alpha, float agite) {
+        pMembre.setAlpha((int) (255 * alpha));
+        pMain.setAlpha((int) (255 * alpha));
+        pMembre.setStrokeWidth(Math.max(3f, W * 0.075f));
+        float rm = W * 0.075f;
+        for (int cote = -1; cote <= 1; cote += 2) {
+            float ex = cx + cote * W * 0.46f;
+            float ey = base - H * 0.30f;
+            float sw = agite * cote;                                 // -1..1, un bras à l'opposé de l'autre
+            float mx = cx + cote * (W * 0.80f + W * 0.10f * sw);
+            float my = base - H * (0.80f - 0.10f * sw);
+            Path bras = new Path();
+            bras.moveTo(ex, ey);
+            bras.quadTo(ex + cote * W * 0.30f, (ey + my) / 2f + H * 0.06f, mx, my);
+            c.drawPath(bras, pMembre);
+            dessinerMain(c, mx, my, (float) Math.atan2(my - ey, mx - ex), rm * 1.35f);
+        }
+    }
+
     /** Main : paume ronde + quatre doigts en éventail, dans le prolongement du bras. */
     private void dessinerMain(Canvas c, float x, float y, float angle, float r) {
         pMain.setStyle(Paint.Style.FILL);
@@ -357,6 +409,9 @@ final class FlammeView extends View {
             // Bouche : petit arc vers le bas (moue), pas de bouche grande ouverte
             rect.set(cx - W * 0.10f, ey + r * 1.9f, cx + W * 0.10f, ey + r * 2.9f);
             c.drawArc(rect, 200f, 140f, false, pTrait);
+        } else if (bonjourT >= 0f) {                              // « youhoo ! » : grande bouche ouverte
+            rect.set(cx - W * 0.13f, ey + r * 0.9f, cx + W * 0.13f, ey + r * 2.9f);
+            c.drawOval(rect, pPupille);
         } else {                                                 // sourire
             rect.set(cx - W * 0.16f, ey + r * 0.9f, cx + W * 0.16f, ey + r * 2.6f);
             c.drawArc(rect, 20f, 140f, false, pTrait);
