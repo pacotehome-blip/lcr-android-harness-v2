@@ -31,7 +31,7 @@ import java.nio.charset.StandardCharsets;
  * (consentement Entra manquant, hors-ligne…), {@link Resultat#echec} est appelé et l'appelant utilise son repli.
  * Un échec Teams seul n'annule pas le succès du courriel.
  */
-final class SupportGraphSender {
+public final class SupportGraphSender {
 
     private static final String TAG = "SupportGraph";
     private static final String GRAPH = "https://graph.microsoft.com/v1.0";
@@ -43,7 +43,7 @@ final class SupportGraphSender {
 
     private SupportGraphSender() {}
 
-    interface Jeton { void ok(String t); void ko(String raison); }
+    public interface Jeton { void ok(String t); void ko(String raison); }
 
     /** Instance MSAL conservée (une seule, évite de multiplier les instances qui se disputent le cache). */
     private static volatile MsalTokenProvider prov;
@@ -82,7 +82,7 @@ final class SupportGraphSender {
     }
 
     /** Jeton Dataverse SILENCIEUX (même instance MSAL, même verrou que les jetons Graph). */
-    static void jetonDataverse(android.content.Context ctx, final Jeton j) {
+    public static void jetonDataverse(android.content.Context ctx, final Jeton j) {
         try {
             MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
         } catch (InterruptedException e) {
