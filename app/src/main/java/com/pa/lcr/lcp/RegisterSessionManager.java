@@ -528,6 +528,38 @@ public final class RegisterSessionManager {
         try { s.dc.shutdown(false); } catch (Exception ignored) {}
     }
 
+    /**
+     * ✅ AJOUTÉ (10 nov 2026, demande Paul — « une imprimante pour deux registres ») — node d'un registre à utiliser
+     * pour imprimer quand l'appelant (service d'impression) n'en donne aucun. Une imprimante partagée reçoit le
+     * texte de n'importe quel registre : on prend une session vivante qui n'est PAS en livraison, de préférence
+     * celle dont le #série correspond à serialAttendu, sinon le registre ACTIF (onglet affiché), sinon le premier libre. Retourne null si aucune session vivante.
+     */
+    public synchronized Integer nodePourImpression(String serialAttendu, int nodeActif) {
+        String voulu = serialAttendu == null ? "" : serialAttendu.trim();
+        Integer premier = null;
+        Integer actif = null;
+        for (Map.Entry<String, NodeSession> e : sessions.entrySet()) {
+            String k = e.getKey();
+            NodeSession ns = e.getValue();
+            if (k == null || ns == null || ns.dc == null) continue;
+            try {
+                if (ns.dc.isStopped()) continue;
+                DeliveryState st = ns.dc.getState();
+                if (st == DeliveryState.PRESTART || st == DeliveryState.STARTING
+                        || st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED
+                        || st == DeliveryState.ENDING) continue;
+                int i = k.lastIndexOf(':');
+                if (i < 0) continue;
+                int node = Integer.parseInt(k.substring(i + 1));
+                if (node < 1 || node > 249) continue; // 250 = adresse par défaut, jamais un vrai registre ici
+                if (!voulu.isEmpty() && ns.serialId != null && voulu.equalsIgnoreCase(ns.serialId.trim())) return node;
+                if (node == nodeActif) actif = node;
+                if (premier == null) premier = node;
+            } catch (Exception ignored) {}
+        }
+        return actif != null ? actif : premier;
+    }
+
     public synchronized DeliveryController getController(String transportKey, int nodeDec) {
         NodeSession s = sessions.get(key(transportKey, nodeDec));
         return (s != null) ? s.dc : null;

@@ -1149,7 +1149,23 @@ public synchronized void start() throws Exception {
         // [bt_mac], [expected_serial_id], [delay_ms], lines[] (chaines).
         if ("POST".equals(req.method) && "/v1/print/text".equals(req.path)) {
             JSONObject body = safeBody(req.jsonBody());
-            Integer node = parseNodeDec(body);
+            Integer nodeDemande = parseNodeDec(body);
+            // ✅ AJOUTÉ (10 nov 2026, demande Paul — « une imprimante pour deux registres ») — preuve api_trace :
+            // /v1/print/text arrive SANS lcrnode, donc node 250 par défaut (aucun registre), puis NO_CONTROLLER après
+            // ~4,3 s alors que les registres 2 et 3 sont connectés. L'imprimante est partagée : sans node, on prend
+            // un registre vivant et libre (celui du #série attendu en priorité).
+            Integer nodeChoisi = nodeDemande;
+            if (nodeChoisi == null) {
+                try {
+                    nodeChoisi = com.pa.lcr.lcp.RegisterSessionManager.get(appCtx)
+                            .nodePourImpression(body.optString("expected_serial_id", ""), com.pa.lcrdemo.MainActivity.nodeActif());
+                    if (nodeChoisi != null) {
+                        try { com.pa.lcr.lcp.log.LogBus.api(nodeChoisi, "[PRINT-TEXT] aucun lcrnode reçu — registre actif/vivant node="
+                                + nodeChoisi + " utilisé (imprimante partagée)"); } catch (Exception ignored) {}
+                    }
+                } catch (Exception ignored) {}
+            }
+            final Integer node = nodeChoisi;
             Integer from = parseFromDec(body);
             JSONArray arr = body.optJSONArray("lines");
             final java.util.List<String> lines = new java.util.ArrayList<>();

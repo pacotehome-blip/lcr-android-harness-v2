@@ -481,6 +481,9 @@ public class MainActivity extends AppCompatActivity {
     private String visibleRegFragmentTag = null; // fragment visible dans registerContainer
 
     private int currentRegNode = -1; // node actif (fallback pour logs API)
+    /** ✅ 10 nov 2026 — copie statique du node actif (onglet affiché), lue par l'API HTTP d'impression (/v1/print/text). */
+    private static volatile int sNodeActif = -1;
+    public static int nodeActif() { return sNodeActif; }
 
     // ===== LOG GLOBAL (MAIN) =====
     private CheckBox cbShowLog;
@@ -4070,6 +4073,7 @@ private void setupTabsTop() {
 
         currentTabKey = tabKey;
         currentRegNode = spec.node;
+        sNodeActif = spec.node;
 
         if (txtActiveNode != null) {
             txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
@@ -4246,6 +4250,7 @@ private void setupTabsTop() {
         if (tabKey.equals(currentTabKey)) {
             currentTabKey = null;
             currentRegNode = -1;
+            sNodeActif = -1;
             try {
                 if (tabRegisters != null && tabRegisters.getTabCount() > 0) {
                     TabLayout.Tab t0 = tabRegisters.getTabAt(0);
