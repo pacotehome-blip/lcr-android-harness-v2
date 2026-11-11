@@ -118,9 +118,31 @@ final class SimplifiedDriverOverlay {
      * N1 ou « Ouvrir un ticket », le dernier résultat du diagnostic étant joint à la demande de support.
      * @return true si l'alerte de la flamme a pris le relais (l'appelant n'affiche alors pas son écran).
      */
-    static boolean signalerEchecDiagnostic(String resume) {
+    static boolean signalerEchecDiagnostic(String resume) { return signalerEchecDiagnostic(resume, ""); }
+
+    // ✅ FIX (11 nov 2026, demande Paul — « à l'arrivée dans Filgo-Registre, s'il voit le BT mais pas le registre, il doit
+    // ouvrir l'écran support avec la flamme et le toc-toc, avec le dernier message de Filgo-Registre ») — avant, si la
+    // surcouche n'était pas encore prête (Activity recréée, onglet pas encore reconstruit), l'alerte était PERDUE et le
+    // chauffeur voyait l'ancien écran d'échec ou rien. Maintenant l'alerte est mise en attente (5 min) et jouée dès que
+    // la surcouche est prête. La carte affiche la CAUSE trouvée par le diagnostic (pas de BT, registre muet, mauvais registre).
+    private static volatile String pendingResume = null;
+    private static volatile String pendingCause = "";
+    private static volatile long pendingMs = 0L;
+    private volatile String causeDiag = "";
+    private volatile boolean echecForce = false;   // alerte demandée par le diagnostic, tenue jusqu'au retour du registre
+
+    static boolean signalerEchecDiagnostic(String resume, String cause) {
         SimplifiedDriverOverlay o = courant != null ? courant.get() : null;
-        if (o == null || adminUnlocked || o.bulle == null || o.dernEtat == null) return false;
+        if (adminUnlocked) return false;
+        if (o == null || o.bulle == null || o.dernEtat == null) {
+            pendingResume = resume == null ? "" : resume;
+            pendingCause = cause == null ? "" : cause;
+            pendingMs = System.currentTimeMillis();
+            try { com.pa.lcr.lcp.log.LogBus.api(0, "[DIAGNOSTIC] surcouche pas prête — alerte de la flamme mise en attente"); } catch (Throwable ignored) {}
+            return true;
+        }
+        o.causeDiag = cause == null ? "" : cause;
+        o.echecForce = true;
         o.diagEchecTexte = resume == null ? "" : resume;
         // On veut que le chauffeur voie l'alerte : plus de silence demandé, diagnostic relancé avec le journal à jour.
         o.snoozeCle = ""; o.snoozeJusquaMs = 0L; o.oublieErreur = false;
@@ -493,6 +515,15 @@ final class SimplifiedDriverOverlay {
 
     private void gererAssistant(boolean coupe, boolean echecDeepLink, Etat etat) {
         if (bulle == null) return;
+        if (pendingResume != null) {
+            if (System.currentTimeMillis() - pendingMs < 5 * 60_000L) {
+                diagEchecTexte = pendingResume; causeDiag = pendingCause; echecForce = true;
+                echecDeepLink = true;     // alerte demandée par le diagnostic pendant que la surcouche n'était pas prête
+                snoozeCle = ""; snoozeJusquaMs = 0L; oublieErreur = false;
+                triageCle = null; triageAction = null; triageNiveau = null; triageDiag = null;
+            }
+            pendingResume = null; pendingCause = "";
+        }
         dernCoupe = coupe; dernEchec = echecDeepLink; dernEtat = etat;
         boolean enLivraison = etat == Etat.DEBIT || etat == Etat.CONFIRM
                 || etat == Etat.PAUSE || etat == Etat.ENDING;
@@ -523,7 +554,8 @@ final class SimplifiedDriverOverlay {
         } else if ("DEEPLINK".equals(cle)) {
             titre = "Registre introuvable";
             lancerTriage(cle);
-            action = cle.equals(triageCle) ? actionCommunication(cle)
+            action = (causeDiag != null && !causeDiag.isEmpty()) ? causeDiag
+                    : cle.equals(triageCle) ? actionCommunication(cle)
                     : "Le registre n’a pas répondu après plusieurs essais. Touchez Reconnecter, ou branchez le câble USB-C / "
                       + "activez le Bluetooth du registre. Sinon, contactez le support.";
         } else {
@@ -909,9 +941,10 @@ final class SimplifiedDriverOverlay {
         if (etat == Etat.PRET || etat == Etat.DEBIT || etat == Etat.CONFIRM || etat == Etat.PAUSE
                 || etat == Etat.ENDING || etat == Etat.TICKET || etat == Etat.FIN) {
             SimplifiedUiState.reinitialiserEchecsDeepLink();
+            echecForce = false; causeDiag = "";
         }
         boolean echecDeepLink = !coupe
-                && SimplifiedUiState.getEchecsDeepLink(woCourant()) >= SimplifiedConfig.DEEPLINK_ECHECS_AVANT_ALERTE;
+                && (echecForce || SimplifiedUiState.getEchecsDeepLink(woCourant()) >= SimplifiedConfig.DEEPLINK_ECHECS_AVANT_ALERTE);
         if ((coupe || echecDeepLink) && !oublieErreur) balancerTrombone();
         gererAssistant(coupe, echecDeepLink, etat);
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION

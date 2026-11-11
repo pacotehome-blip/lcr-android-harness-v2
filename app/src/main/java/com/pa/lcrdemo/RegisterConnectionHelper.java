@@ -726,6 +726,7 @@ public class RegisterConnectionHelper {
             new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity);
 
         final String[] verdictPerte = {""};
+        final String[][] serieAutre = {null};
         for (int attempt = 1; attempt <= 3 && !btConnecte; attempt++) {
             if (annule[0]) { fermerDialogueAnnule(dlg); return; }
             etapes[2] = "Recherche registre... (" + attempt + "/3)";
@@ -845,6 +846,7 @@ public class RegisterConnectionHelper {
                 // ✅ AJOUTÉ (11 nov 2026, demande Paul) — verdict à chaque tentative : le lien BT existe-t-il
                 // (RFCOMM ouvert mais le registre ne répond pas) ou le BT lui-même est-il inaccessible ?
                 verdictPerte[0] = classerPerte(r);
+                serieAutre[0] = serieDifferente(r);
                 try { com.pa.lcr.lcp.log.LogBus.api(fNodeFinal, "[PERTE-CONNEXION] tentative " + attempt + "/3 échouée — "
                     + libelleVerdict(verdictPerte[0])); } catch (Exception ignoredLb) {}
                 if (attempt < 3) try { Thread.sleep(2000); } catch (Exception ignored) {}
@@ -859,6 +861,7 @@ public class RegisterConnectionHelper {
                 + ("BT_INACCESSIBLE".equals(verdictPerte[0])
                     ? " → le Bluetooth est fautif : redémarrage logiciel du lien tenté ; si ça persiste, le chauffeur doit désactiver puis réactiver le Bluetooth (panneau rapide) et ouvrir l'écran Support"
                     : " → le Bluetooth est présent, c'est le registre qui ne répond pas (alimentation / mode communication / autre appareil connecté)")); } catch (Exception ignoredLb) {}
+            causeAffichee = causeChauffeur(verdictPerte[0], serieAutre[0]);
             afficherEchec(dlg[0], etapes, etapesOk,
                 "Registre non trouvé\n"
                 + "Cause probable : " + libelleVerdict(verdictPerte[0]) + "\n"
@@ -907,6 +910,7 @@ public class RegisterConnectionHelper {
         updateDlg.run();
 
         if (!lcpOk) {
+            causeAffichee = causeChauffeur("REGISTRE_MUET", null);
             afficherEchec(dlg[0], etapes, etapesOk,
                 "BT connecté mais registre LCR ne répond pas\n" + erreurDetail[0] + "\n\n"
                 + "⚡ Assurez-vous que :\n• L'alimentation du registre est branchée\n• Le registre est en mode communication\n• Aucun autre appareil n'est connecté",
@@ -1051,6 +1055,35 @@ public class RegisterConnectionHelper {
         return "INCONNU";
     }
 
+    /** Si un registre a répondu mais avec un autre #série que celui attendu : retourne {trouvé, attendu}, sinon null. */
+    private static String[] serieDifferente(com.pa.lcr.lcp.ApiResult r) {
+        try {
+            org.json.JSONArray d = (r != null && r.data != null) ? r.data.optJSONArray("attemptsDetail") : null;
+            if (d == null) return null;
+            java.util.regex.Pattern pat = java.util.regex.Pattern.compile("#série trouvé \\(([^)]*)\\) ne correspond pas à celui attendu \\(([^)]*)\\)");
+            for (int i = 0; i < d.length(); i++) {
+                org.json.JSONObject a = d.optJSONObject(i);
+                if (a == null) continue;
+                java.util.regex.Matcher m = pat.matcher(a.optString("outcome", ""));
+                if (m.find()) return new String[]{m.group(1), m.group(2)};
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    /** Message court, en mots du chauffeur, de la CAUSE trouvée par le diagnostic (affiché sur la carte de la flamme). */
+    private static String causeChauffeur(String verdict, String[] serie) {
+        if (serie != null) return "Mauvais registre : le registre joint (série " + serie[0]
+            + ") n’est pas celui du bon de travail (série " + serie[1] + "). Branchez ou appairez le bon registre, puis touchez Reconnecter.";
+        if ("REGISTRE_MUET".equals(verdict)) return "Le Bluetooth fonctionne, mais le registre ne répond pas. Vérifiez qu’il est sous tension "
+            + "et qu’aucun autre appareil n’y est connecté, puis touchez Reconnecter.";
+        if ("BT_INACCESSIBLE".equals(verdict)) return "Le registre n’est pas connecté au Bluetooth. Activez le Bluetooth de la tablette "
+            + "(coupez-le puis rallumez-le), vérifiez que le registre est sous tension, puis touchez Reconnecter.";
+        return "Aucun registre trouvé. Vérifiez l’alimentation du registre et le Bluetooth, puis touchez Reconnecter.";
+    }
+
+    private volatile String causeAffichee = "";
+
     private static String libelleVerdict(String v) {
         if ("REGISTRE_MUET".equals(v)) return "BT présent mais le registre ne répond pas";
         if ("BT_INACCESSIBLE".equals(v)) return "BT inaccessible (lien Bluetooth impossible à ouvrir)";
@@ -1134,7 +1167,7 @@ public class RegisterConnectionHelper {
             // cogne (tic tic) et sa carte donne la consigne N1 ou « Ouvrir un ticket » ; le dernier résultat du
             // diagnostic est joint à la demande de support. Mode Admin : l'écran d'échec habituel.
             try {
-                if (SimplifiedDriverOverlay.signalerEchecDiagnostic(resumeComplet)) {
+                if (SimplifiedDriverOverlay.signalerEchecDiagnostic(resumeComplet, causeAffichee)) {
                     try { com.pa.lcr.lcp.log.LogBus.api(node, "[DIAGNOSTIC] écran d'échec remplacé par l'alerte de la flamme (support)"); } catch (Exception ignored) {}
                     return;
                 }
