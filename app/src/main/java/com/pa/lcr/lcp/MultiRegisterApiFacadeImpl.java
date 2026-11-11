@@ -1049,7 +1049,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             // après l'ouverture du RFCOMM (lien pas encore stabilisé après un deep link / une Activity recréée) et
             // était déclarée « illisible », ce qui déclenchait le repli (2e RFCOMM). Pour une MAC cible, on laisse
             // le lien se stabiliser et on retente une fois avant de conclure.
-            if (cibleBt && (serial == null || serial.trim().isEmpty())) {
+            if ((cibleBt || estCleRegistreConnu(transportKey)) && (serial == null || serial.trim().isEmpty())) {
                 try { Thread.sleep(2500); } catch (InterruptedException ignoredSl) { Thread.currentThread().interrupt(); }
                 if (safeIsOpen(io)) serial = probeSerial(io, node, from);
                 try { LogBus.api(node, "[BT-RECHERCHE] 2e sonde après stabilisation du lien : "
@@ -1186,12 +1186,31 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     // ✅ AJOUTÉ (14 oct 2026, demande Paul) — ferme un transport BT ouvert qui n'a répondu à
     // aucune lecture LCP. Jamais : la MAC cible du deep link, un transport qu'une session
     // vivante utilise, ni un transport sur lequel une livraison tourne.
+    /** Vrai si cette clé de transport est celle d'un registre déjà connu de l'appli (même si sa session est morte). */
+    private boolean estCleRegistreConnu(String transportKey) {
+        try {
+            if (transportKey == null) return false;
+            for (String[] known : sessions.listKnownRegisters()) {
+                if (known != null && known.length >= 3 && transportKey.equalsIgnoreCase(known[2])) return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
     private void fermerBtNonRegistre(String transportKey, int node, String btMacCible) {
         try {
             if (transportKey == null || !transportKey.startsWith("BT:") || mediaMgr == null) return;
             if (btMacCible != null && !btMacCible.trim().isEmpty()
                     && transportKey.equalsIgnoreCase(MediaTransportManager.btKey(btMacCible.trim()))) return;
             if (sessions.hasLiveSessionOn(transportKey) || sessions.hasRunningDeliveryOn(transportKey)) return;
+            // ✅ FIX (11 nov 2026, demande Paul — écran blanc) — preuve 13:18:57→58 : au démarrage de l'Activity, la
+            // reconnexion auto « sans MAC » sondait le BT du VRAI registre (session connue mais momentanément morte),
+            // la lecture du série échouait (lien pas encore prêt) et on FERMAIT ce lien → plus aucun lien, écran blanc.
+            // Un transport appartenant à un registre déjà connu n'est jamais fermé comme « pas un registre ».
+            if (estCleRegistreConnu(transportKey)) {
+                LogBus.api(node, "[BT-RECHERCHE] " + transportKey + " — sonde sans réponse mais c'est le transport d'un registre connu : NON fermé");
+                return;
+            }
             mediaMgr.onBtDisconnected(transportKey.substring(3), "aucun registre ne répond (sonde LCP)");
             LogBus.api(node, "[BT-RECHERCHE] " + transportKey + " fermé — n'est pas un registre (aucune réponse LCP)");
         } catch (Exception ignored) {}
