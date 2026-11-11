@@ -134,7 +134,8 @@ final class SimplifiedDriverOverlay {
     // sans cesse ; après même pas 5 s on sait que le registre ne répond pas ») — « Connexion au registre… » ne dure plus
     // indéfiniment : au-delà de CONNEXION_LONGUE_MS, la flamme alerte (toc-toc + carte) et la reconnexion/diagnostic part.
     private long perteDepuisMs = 0L;
-    private volatile boolean perteEnLivraison = false;   // liaison BT/registre perdue PENDANT une livraison
+    private volatile boolean perteEnLivraison = false;
+    private volatile int perteCas = 0;   // 1 = BT connecté mais registre muet ; 2 = BT du registre (Parani) injoignable   // liaison BT/registre perdue PENDANT une livraison
     private long connexionDepuisMs = 0L;
     private boolean connexionLongueSignalee = false;
     private static final long CONNEXION_LONGUE_MS = 6000L;   // alerte demandée par le diagnostic, tenue jusqu'au retour du registre
@@ -537,7 +538,7 @@ final class SimplifiedDriverOverlay {
                 || etat == Etat.PAUSE || etat == Etat.ENDING;
         // ERREUR = communication perdue ou registre introuvable ; AVERTISSEMENT = impression (mascotte reste verte)
         boolean erreur = coupe || echecDeepLink || perteEnLivraison;
-        String cle = perteEnLivraison ? "PERTE" : coupe ? "COMM" : (echecDeepLink ? "DEEPLINK" : (!printActif ? "PRINT" : ""));
+        String cle = perteEnLivraison ? ("PERTE" + perteCas) : coupe ? "COMM" : (echecDeepLink ? "DEEPLINK" : (!printActif ? "PRINT" : ""));
         erreurActive = erreur;
         if (sMascotte != null) { sMascotte.setErreur(erreur); sMascotte.setInquiet(erreur); }
         if (cle.isEmpty()) {          // tout va bien : on range et on remet à zéro
@@ -555,9 +556,15 @@ final class SimplifiedDriverOverlay {
             triageCle = null; triageAction = null; triageNiveau = null; triageDiag = null;
         }
         String titre, action;
-        if ("PERTE".equals(cle)) {
-            titre = "Registre et Bluetooth injoignables";
-            action = "Arrêtez le débit (fermez la vanne) et vérifiez la connexion Bluetooth : la tablette ne voit plus le registre. "
+        if ("PERTE1".equals(cle)) {
+            titre = "Le registre ne répond plus";
+            action = "Arrêtez le débit (fermez la vanne). Le Bluetooth est connecté, mais le registre ne répond pas : "
+                + "vérifiez qu’il est sous tension et que son câble série est bien branché. "
+                + "Dès qu’il répond, la livraison reprend exactement là où elle était.";
+        } else if ("PERTE2".equals(cle)) {
+            titre = "Bluetooth du registre injoignable";
+            action = "Arrêtez le débit (fermez la vanne). La tablette ne voit plus le Bluetooth du registre (Parani) : "
+                + "vérifiez son alimentation, rapprochez-vous du registre et éloignez les sources d’interférence. "
                 + "Dès que la connexion revient, la livraison reprend exactement là où elle était.";
         } else if ("COMM".equals(cle)) {
             lancerTriage(cle);
@@ -993,7 +1000,8 @@ final class SimplifiedDriverOverlay {
         // « (OFF) » n'apparaissent. On regarde le lien lui-même (2 s de confirmation) ; la carte disparaît dès qu'il revient.
         boolean livraisonEnCours = etat == Etat.DEBIT || etat == Etat.CONFIRM || etat == Etat.PAUSE || etat == Etat.ENDING;
         boolean perte = false;
-        if (livraisonEnCours && host.liaisonPerduePourSimplifie()) {
+        int casLiaison = livraisonEnCours ? host.etatLiaisonPourSimplifie() : 0;
+        if (casLiaison != 0) {
             long maintenantP = android.os.SystemClock.elapsedRealtime();
             if (perteDepuisMs == 0L) perteDepuisMs = maintenantP;
             perte = maintenantP - perteDepuisMs >= 2000L;
@@ -1004,8 +1012,9 @@ final class SimplifiedDriverOverlay {
             try { com.pa.lcr.lcp.log.LogBus.api(0, perte
                 ? "[PERTE-EN-LIVRAISON] liaison BT/registre perdue pendant la livraison — consigne affichée : arrêter le débit et vérifier le Bluetooth"
                 : "[PERTE-EN-LIVRAISON] liaison rétablie — la livraison reprend à l'état réel du registre, consigne retirée"); } catch (Throwable ignoredLb) {}
-            if (perte) { snoozeCle = ""; snoozeJusquaMs = 0L; oublieErreur = false; }
+            if (perte) { snoozeCle = ""; snoozeJusquaMs = 0L; oublieErreur = false; try { host.marquerLiaisonPerdueLive(casLiaison); } catch (Throwable ignoredM) {} }
         }
+        perteCas = perte ? casLiaison : 0;
         perteEnLivraison = perte;
         gererAssistant(coupe, echecDeepLink, etat);
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION

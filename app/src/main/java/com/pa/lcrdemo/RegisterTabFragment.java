@@ -3686,21 +3686,66 @@ public class RegisterTabFragment extends Fragment {
      * tout se remet à jour. Je veux un message : arrête le flow et vérifie la connexion BT ») — vrai si le lien de CE
      * registre n'est plus ouvert (transport fermé / en erreur) ou si plus aucun tick live n'arrive depuis longtemps.
      */
-    boolean liaisonPerduePourSimplifie() {
+    /**
+     * ✅ FIX (11 nov 2026, demande Paul — précisé : « ce n'est pas le BT de la tablette, c'est le BT (Parani) du registre
+     * qui est déconnecté ») — « BT(OFF) » laissait croire que le Bluetooth de la tablette était éteint. Si l'adaptateur BT de
+     * la tablette est actif, on dit ce qui est vrai : lien avec le registre perdu, Bluetooth actif. Les mots « (OFF) » et
+     * « reconnect requis » sont conservés (l'écran simplifié et les tests les reconnaissent).
+     */
+    private String libelleHorsLigne() {
+        try {
+            if ("BT".equals(tabMediaShort)) {
+                android.bluetooth.BluetoothAdapter ad = android.bluetooth.BluetoothAdapter.getDefaultAdapter();
+                if (ad != null && ad.isEnabled()) {
+                    return "BT(OFF) — Bluetooth du registre (Parani) injoignable : débranché, hors de portée ou interférence — reconnect requis";
+                }
+                return "BT(OFF) — Bluetooth de la tablette éteint — reconnect requis";
+            }
+        } catch (Throwable ignored) {}
+        return tabMediaShort + "(OFF) — reconnect requis";
+    }
+
+    /** Appelé par l'écran simplifié quand la liaison est perdue en livraison : corrige le texte LIVE resté sur « connected ready ». */
+    void marquerLiaisonPerdueLive(int cas) {
+        try {
+            ui.post(() -> {
+                if (!isAdded() || getView() == null || txtLive == null) return;
+                String actuel = txtLive.getText() != null ? txtLive.getText().toString() : "";
+                if (actuel.contains("ne répond pas") || actuel.contains("injoignable") || actuel.contains("COUPÉ")) return;
+                txtLive.setText(cas == 1
+                    ? "LIVE: ⚠️ Bluetooth connecté mais le registre ne répond pas — le dernier état connu n'est plus fiable — reconnect requis"
+                    : "LIVE: ⚠️ Bluetooth du registre (Parani) injoignable — le dernier état connu n'est plus fiable — reconnect requis");
+            });
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * 0 = liaison correcte ; 1 = le Bluetooth (Parani) est connecté mais le REGISTRE ne répond plus (lien ouvert, aucune
+     * lecture live) ; 2 = le Bluetooth du registre est INJOIGNABLE (lien fermé/en erreur : Parani débranché, hors de
+     * portée, interférence). Demande Paul 11 nov 2026 : deux cas distincts, deux consignes distinctes.
+     */
+    int etatLiaisonPourSimplifie() {
         try {
             String k = tabTransportKey;
-            if (k == null || k.trim().isEmpty()) return false;
+            if (k == null || k.trim().isEmpty()) return 0;
             com.pa.lcr.lcp.transport.TransportIo io = com.pa.lcr.lcp.transport.MediaTransportManager
                 .get(requireContext().getApplicationContext()).getByKey(k.trim());
-            if (io == null || !io.isOpen()) return true;
+            if (io == null || !io.isOpen()) return 2;
             DeliveryController dc = controller;
             if (dc != null) {
                 long age = dc.getLastTickAgeMs();
-                if (age > 20_000L) return true;
+                com.pa.lcr.lcp.DeliveryState stT = dc.getState();
+                // Pendant un débit les lectures arrivent ~chaque seconde : 6 s de silence = registre muet.
+                // En pause elles sont plus espacées (12 s). Hors livraison : filet de sécurité de 20 s.
+                long seuil = (stT == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING) ? 6_000L
+                           : (stT == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) ? 12_000L : 20_000L;
+                if (age > seuil) return 1;
             }
         } catch (Exception ignored) {}
-        return false;
+        return 0;
     }
+
+    boolean liaisonPerduePourSimplifie() { return etatLiaisonPourSimplifie() != 0; }
 
     /**
      * ✅ AJOUTÉ (11 nov 2026, demande Paul — « si la connexion est revenue, l'interface simple doit résumer sa
@@ -5110,10 +5155,10 @@ public class RegisterTabFragment extends Fragment {
                     } else if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
                         liveMsg = "⚠️ " + tabMediaShort + " COUPÉ — livraison en pause — reconnectez le BT";
                     } else {
-                        liveMsg = "LIVE: " + tabMediaShort + "(OFF) — reconnect requis";
+                        liveMsg = "LIVE: " + libelleHorsLigne();
                     }
                 } else {
-                    liveMsg = "LIVE: " + tabMediaShort + "(OFF) — reconnect requis";
+                    liveMsg = "LIVE: " + libelleHorsLigne();
                 }
                 if (txtLive != null) txtLive.setText(liveMsg);
                 pendingReconnect = true;
@@ -5317,14 +5362,14 @@ public class RegisterTabFragment extends Fragment {
             if (io == null || !io.isOpen()) {
                 tabMediaReady = false;
                 pendingReconnect = true;
-                String msg = tabMediaShort + "(OFF) — reconnect requis";
+                String msg = libelleHorsLigne();
                 LogBus.api(node, msg);
                 android.util.Log.w("RegisterTabFragment", "connectThisRegister: io=" + (io == null ? "null" : "fermé")
                         + " pour transport=" + tkPinned + " — déclenchement diagnostic");
                 reportMediaOffToApi("CONNECT_CLICK", msg);
                 ui.post(() -> {
                     if (!isAdded() || getView() == null) return;
-                    if (txtLive != null) txtLive.setText("LIVE: " + tabMediaShort + "(OFF) — reconnexion en cours...");
+                    if (txtLive != null) txtLive.setText("LIVE: " + libelleHorsLigne().replace("reconnect requis", "reconnexion en cours..."));
                     updateButtons(null);
                 });
                 // ✅ FIX (LA vraie cause, même bug que plus bas) : ce chemin ne
