@@ -129,7 +129,13 @@ final class SimplifiedDriverOverlay {
     private static volatile String pendingCause = "";
     private static volatile long pendingMs = 0L;
     private volatile String causeDiag = "";
-    private volatile boolean echecForce = false;   // alerte demandée par le diagnostic, tenue jusqu'au retour du registre
+    private volatile boolean echecForce = false;
+    // ✅ AJOUTÉ (11 nov 2026, demande Paul — « Filgo-Registre ouvert avec le BT déconnecté du registre : ça tourne en rond
+    // sans cesse ; après même pas 5 s on sait que le registre ne répond pas ») — « Connexion au registre… » ne dure plus
+    // indéfiniment : au-delà de CONNEXION_LONGUE_MS, la flamme alerte (toc-toc + carte) et la reconnexion/diagnostic part.
+    private long connexionDepuisMs = 0L;
+    private boolean connexionLongueSignalee = false;
+    private static final long CONNEXION_LONGUE_MS = 6000L;   // alerte demandée par le diagnostic, tenue jusqu'au retour du registre
 
     static boolean signalerEchecDiagnostic(String resume, String cause) {
         SimplifiedDriverOverlay o = courant != null ? courant.get() : null;
@@ -550,7 +556,7 @@ final class SimplifiedDriverOverlay {
         if ("COMM".equals(cle)) {
             lancerTriage(cle);
             titre = "Communication perdue avec le registre";
-            action = actionCommunication(cle);
+            action = (causeDiag != null && !causeDiag.isEmpty()) ? causeDiag : actionCommunication(cle);
         } else if ("DEEPLINK".equals(cle)) {
             titre = "Registre introuvable";
             lancerTriage(cle);
@@ -933,7 +939,38 @@ final class SimplifiedDriverOverlay {
         sTxtRegistre.setText("Registre #" + serie + " · Node " + node + (plusieurs ? "  ▾" : ""));
         sTxtRegistre.setClickable(plusieurs);
         sTxtRegistre.setPadding(0, plusieurs ? 8 : 0, 0, plusieurs ? 8 : 0);
-        boolean coupe = live.contains("DISCONNECTED");
+        // ✅ FIX (11 nov 2026, demande Paul — « l'interface normale indique (OFF) — reconnect requis, pourquoi pas la
+        // simplifiée ? ») — l'onglet normal écrit « LIVE: BT(OFF) — reconnect requis » quand le média est coupé, sans jamais
+        // le mot DISCONNECTED : l'écran simplifié ne cherchait que ce mot, donc restait sur « Connexion en cours… ».
+        // Mêmes indices que l'onglet normal (voir RegisterTabFragment, test « DISCONNECTED / (OFF) / COUPÉ »).
+        boolean coupe = live.contains("DISCONNECTED") || live.contains("(OFF)") || live.contains("COUPÉ")
+                || live.toLowerCase(Locale.ROOT).contains("reconnect requis");
+        if (etat == Etat.CONNEXION) {
+            long maintenantC = android.os.SystemClock.elapsedRealtime();
+            if (connexionDepuisMs == 0L) {
+                connexionDepuisMs = maintenantC;
+            } else if (!connexionLongueSignalee && maintenantC - connexionDepuisMs > CONNEXION_LONGUE_MS && !adminUnlocked) {
+                connexionLongueSignalee = true;
+                if (!echecForce) {
+                    echecForce = true;
+                    if (causeDiag == null || causeDiag.isEmpty()) {
+                        causeDiag = "Le registre ne répond pas pour le moment. Vérifiez qu’il est sous tension et que son Bluetooth est actif ; "
+                            + "la reconnexion est en cours — vous pouvez aussi toucher Reconnecter.";
+                    }
+                    diagEchecTexte = "Connexion au registre sans réponse depuis plus de " + (CONNEXION_LONGUE_MS / 1000) + " s (écran simplifié)";
+                    snoozeCle = ""; snoozeJusquaMs = 0L; oublieErreur = false;
+                    triageCle = null; triageAction = null; triageNiveau = null; triageDiag = null;
+                }
+                try { com.pa.lcr.lcp.log.LogBus.api(0, "[CONNEXION-LONGUE] « Connexion au registre… » depuis plus de "
+                    + (CONNEXION_LONGUE_MS / 1000) + " s — alerte de la flamme + reconnexion/diagnostic"); } catch (Throwable ignoredLb) {}
+                if (!RegisterConnectionHelper.isDiagnosticEnCours()
+                        && !com.pa.lcr.lcp.MultiRegisterApiFacadeImpl.isConnectAutoEnCours()) {
+                    try { host.reconnectFromDialog(); } catch (Throwable t) { Log.w(TAG, "reconnexion auto ERR: " + t.getMessage()); }
+                }
+            }
+        } else {
+            connexionDepuisMs = 0L; connexionLongueSignalee = false;
+        }
         // Trombone : se balance de temps en temps si le registre est déconnecté OU si le service
         // d'impression (127.0.0.1:9182) ne répond pas. Immobile sinon.
         sonderServiceImpression();
