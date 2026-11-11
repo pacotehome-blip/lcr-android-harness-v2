@@ -2434,12 +2434,30 @@ public class DeepLinkHandler {
                                 .getController(tKey, node);
 
                         if (dc == null) {
-                            // Controller absent — BT zombi
-                            android.util.Log.w(TAG, "BT zombi — controller absent, restart BT");
-                            activity.btDisconnect();
-                            try { Thread.sleep(1500); } catch (Exception ignored) {}
-                            btDejaConnecte = false; // forcer reconnexion
-                        } else {
+                            // ✅ FIX (11 nov 2026, demande Paul — pertes de fluidité) — preuve 11:10:42 : le transport BT
+                            // venait d'être ouvert (RFCOMM ouvert, isOpen()) mais aucun controller n'existait encore pour
+                            // ce node (session arrêtée « logic only » par le deep link). On le déclarait « zombi » →
+                            // btDisconnect() + NOUVEAU RFCOMM vers le même registre pendant que le premier était encore
+                            // ouvert → « read failed », « Queued timeout », rc=0x23. Un transport OUVERT sans controller
+                            // n'est pas un zombi : on recrée le controller sur le lien existant, sans rien fermer.
+                            com.pa.lcr.lcp.DeliveryController dcRecree = null;
+                            try {
+                                dcRecree = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
+                                    .resolveOrCreateForNodeOnTransport(node, 255, tKey);
+                            } catch (Exception ignoredRc) {}
+                            if (dcRecree != null) {
+                                android.util.Log.i(TAG, "BT ouvert sans controller — controller recréé sur le lien existant (aucune fermeture)");
+                                try { com.pa.lcr.lcp.log.LogBus.api(node, "[BT-RECHERCHE] lien BT ouvert sans session — session recréée sur le même lien (pas de 2e connexion RFCOMM)"); } catch (Exception ignoredLb) {}
+                                dc = dcRecree;
+                            } else {
+                                // Controller absent — BT zombi
+                                android.util.Log.w(TAG, "BT zombi — controller absent, restart BT");
+                                activity.btDisconnect();
+                                try { Thread.sleep(1500); } catch (Exception ignored) {}
+                                btDejaConnecte = false; // forcer reconnexion
+                            }
+                        }
+                        if (dc != null) {
                             // Lire l'état du registre via tickSnapshot
                             com.pa.lcr.lcp.ApiResult snap = dc.api_tickSnapshot();
                             int delCode = (snap != null && snap.data != null)

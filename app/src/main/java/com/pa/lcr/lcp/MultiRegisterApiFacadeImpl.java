@@ -1045,6 +1045,16 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
             }
 
             String serial = probeSerial(io, node, from);
+            // ✅ FIX (11 nov 2026, demande Paul — pertes de fluidité) — preuve 11:10:41→42 : la sonde partait ~1 s
+            // après l'ouverture du RFCOMM (lien pas encore stabilisé après un deep link / une Activity recréée) et
+            // était déclarée « illisible », ce qui déclenchait le repli (2e RFCOMM). Pour une MAC cible, on laisse
+            // le lien se stabiliser et on retente une fois avant de conclure.
+            if (cibleBt && (serial == null || serial.trim().isEmpty())) {
+                try { Thread.sleep(2500); } catch (InterruptedException ignoredSl) { Thread.currentThread().interrupt(); }
+                if (safeIsOpen(io)) serial = probeSerial(io, node, from);
+                try { LogBus.api(node, "[BT-RECHERCHE] 2e sonde après stabilisation du lien : "
+                    + ((serial == null || serial.trim().isEmpty()) ? "toujours illisible" : "série lue")); } catch (Exception ignoredLb) {}
+            }
             if (serial == null || serial.trim().isEmpty()) {
                 attemptOutcome = "ouvert mais #série illisible (registre ne répond pas)";
                 attemptsDetail.put(buildAttemptDetail(transportKey, attemptOutcome, null));
