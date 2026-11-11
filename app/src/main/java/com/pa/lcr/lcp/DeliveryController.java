@@ -839,6 +839,12 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // ne lit plus jamais net/gross à un instant arbitraire —
     // tenterFinalisationLivraisonOrpheline() reprend maintenant le vrai
     // suivi (pollJobUntilDone). Plus jamais appelées nulle part.
+    /** Âge (ms) du dernier tick live reçu du registre, ou -1 si aucun. Sert à détecter une liaison muette en livraison. */
+    public long getLastTickAgeMs() {
+        LastTick t = lastTick;
+        return t != null ? Math.max(0L, System.currentTimeMillis() - t.tsMs) : -1L;
+    }
+
     public double getLastTickNet() {
         LastTick t = lastTick;
         return t != null ? t.net : 0.0;

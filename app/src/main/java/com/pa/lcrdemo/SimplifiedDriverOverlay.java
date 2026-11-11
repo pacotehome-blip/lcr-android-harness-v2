@@ -133,6 +133,8 @@ final class SimplifiedDriverOverlay {
     // ✅ AJOUTÉ (11 nov 2026, demande Paul — « Filgo-Registre ouvert avec le BT déconnecté du registre : ça tourne en rond
     // sans cesse ; après même pas 5 s on sait que le registre ne répond pas ») — « Connexion au registre… » ne dure plus
     // indéfiniment : au-delà de CONNEXION_LONGUE_MS, la flamme alerte (toc-toc + carte) et la reconnexion/diagnostic part.
+    private long perteDepuisMs = 0L;
+    private volatile boolean perteEnLivraison = false;   // liaison BT/registre perdue PENDANT une livraison
     private long connexionDepuisMs = 0L;
     private boolean connexionLongueSignalee = false;
     private static final long CONNEXION_LONGUE_MS = 6000L;   // alerte demandée par le diagnostic, tenue jusqu'au retour du registre
@@ -534,8 +536,8 @@ final class SimplifiedDriverOverlay {
         boolean enLivraison = etat == Etat.DEBIT || etat == Etat.CONFIRM
                 || etat == Etat.PAUSE || etat == Etat.ENDING;
         // ERREUR = communication perdue ou registre introuvable ; AVERTISSEMENT = impression (mascotte reste verte)
-        boolean erreur = coupe || echecDeepLink;
-        String cle = coupe ? "COMM" : (echecDeepLink ? "DEEPLINK" : (!printActif ? "PRINT" : ""));
+        boolean erreur = coupe || echecDeepLink || perteEnLivraison;
+        String cle = perteEnLivraison ? "PERTE" : coupe ? "COMM" : (echecDeepLink ? "DEEPLINK" : (!printActif ? "PRINT" : ""));
         erreurActive = erreur;
         if (sMascotte != null) { sMascotte.setErreur(erreur); sMascotte.setInquiet(erreur); }
         if (cle.isEmpty()) {          // tout va bien : on range et on remet à zéro
@@ -544,7 +546,7 @@ final class SimplifiedDriverOverlay {
             oublieErreur = false;             // l'erreur est terminée : la prochaine sera annoncée normalement
             return;
         }
-        if (enLivraison) { cacherBulle(); return; }
+        if (enLivraison && !perteEnLivraison) { cacherBulle(); return; }
         if (cle.equals(snoozeCle) && android.os.SystemClock.elapsedRealtime() < snoozeJusquaMs) return;
         if (!cle.equals(cleAlerte)) {
             cleAlerte = cle;
@@ -553,7 +555,11 @@ final class SimplifiedDriverOverlay {
             triageCle = null; triageAction = null; triageNiveau = null; triageDiag = null;
         }
         String titre, action;
-        if ("COMM".equals(cle)) {
+        if ("PERTE".equals(cle)) {
+            titre = "Registre et Bluetooth injoignables";
+            action = "Arrêtez le débit (fermez la vanne) et vérifiez la connexion Bluetooth : la tablette ne voit plus le registre. "
+                + "Dès que la connexion revient, la livraison reprend exactement là où elle était.";
+        } else if ("COMM".equals(cle)) {
             lancerTriage(cle);
             titre = "Communication perdue avec le registre";
             action = (causeDiag != null && !causeDiag.isEmpty()) ? causeDiag : actionCommunication(cle);
@@ -983,6 +989,24 @@ final class SimplifiedDriverOverlay {
         boolean echecDeepLink = !coupe
                 && (echecForce || SimplifiedUiState.getEchecsDeepLink(woCourant()) >= SimplifiedConfig.DEEPLINK_ECHECS_AVANT_ALERTE);
         if ((coupe || echecDeepLink) && !oublieErreur) balancerTrombone();
+        // Perte de liaison PENDANT une livraison : le texte LIVE reste figé sur RUNNING_FLOWING, donc ni « DISCONNECTED » ni
+        // « (OFF) » n'apparaissent. On regarde le lien lui-même (2 s de confirmation) ; la carte disparaît dès qu'il revient.
+        boolean livraisonEnCours = etat == Etat.DEBIT || etat == Etat.CONFIRM || etat == Etat.PAUSE || etat == Etat.ENDING;
+        boolean perte = false;
+        if (livraisonEnCours && host.liaisonPerduePourSimplifie()) {
+            long maintenantP = android.os.SystemClock.elapsedRealtime();
+            if (perteDepuisMs == 0L) perteDepuisMs = maintenantP;
+            perte = maintenantP - perteDepuisMs >= 2000L;
+        } else {
+            perteDepuisMs = 0L;
+        }
+        if (perte != perteEnLivraison) {
+            try { com.pa.lcr.lcp.log.LogBus.api(0, perte
+                ? "[PERTE-EN-LIVRAISON] liaison BT/registre perdue pendant la livraison — consigne affichée : arrêter le débit et vérifier le Bluetooth"
+                : "[PERTE-EN-LIVRAISON] liaison rétablie — la livraison reprend à l'état réel du registre, consigne retirée"); } catch (Throwable ignoredLb) {}
+            if (perte) { snoozeCle = ""; snoozeJusquaMs = 0L; oublieErreur = false; }
+        }
+        perteEnLivraison = perte;
         gererAssistant(coupe, echecDeepLink, etat);
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION
                 ? (coupe ? "Reconnexion au registre nécessaire" : "Connexion en cours…")

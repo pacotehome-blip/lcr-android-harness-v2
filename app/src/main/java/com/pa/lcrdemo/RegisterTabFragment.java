@@ -3682,6 +3682,27 @@ public class RegisterTabFragment extends Fragment {
     boolean isMediaReadyPourSimplifie() { return tabMediaReady || sessionVivantePourSimplifie(); }
 
     /**
+     * ✅ AJOUTÉ (11 nov 2026, demande Paul — « en running_flowing, je perds le BT : aucun message ; dès que le BT revient
+     * tout se remet à jour. Je veux un message : arrête le flow et vérifie la connexion BT ») — vrai si le lien de CE
+     * registre n'est plus ouvert (transport fermé / en erreur) ou si plus aucun tick live n'arrive depuis longtemps.
+     */
+    boolean liaisonPerduePourSimplifie() {
+        try {
+            String k = tabTransportKey;
+            if (k == null || k.trim().isEmpty()) return false;
+            com.pa.lcr.lcp.transport.TransportIo io = com.pa.lcr.lcp.transport.MediaTransportManager
+                .get(requireContext().getApplicationContext()).getByKey(k.trim());
+            if (io == null || !io.isOpen()) return true;
+            DeliveryController dc = controller;
+            if (dc != null) {
+                long age = dc.getLastTickAgeMs();
+                if (age > 20_000L) return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    /**
      * ✅ AJOUTÉ (11 nov 2026, demande Paul — « si la connexion est revenue, l'interface simple doit résumer sa
      * connexion, elle ne cesse pas de tourner en boucle »). Preuve (logs 11 nov 08:46) : le registre s'est
      * reconnecté ([CONNEXION] Registre connecté, [DIAGNOSTIC] écran fermé) mais le texte « LIVE: DISCONNECTED »
