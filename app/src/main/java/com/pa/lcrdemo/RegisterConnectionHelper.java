@@ -587,6 +587,39 @@ public class RegisterConnectionHelper {
             txtProgress.setText(sb.toString().trim());
         });
 
+        // ✅ AJOUTÉ (10 nov 2026, demande Paul — "après deux minutes à se connecter au registre qui tourne encore en
+        // boucle, il faut supprimer le tab; ça restaure la session en cours; ça arrive si on perd la connexion") —
+        // chien de garde : si CE diagnostic tourne encore après DIAGNOSTIC_BOUCLE_MS, on l'arrête (les étapes suivantes
+        // ne démarrent pas), on ferme l'écran et on supprime le tab comme une suppression manuelle. La détection
+        // passive recrée alors le tab et reprend la session. Sans effet si le registre est déjà joignable.
+        final long departDiag = diagnosticStartMs;
+        final String serieGarde = fSerialIdFinal;
+        final int nodeGarde = fNodeFinal;
+        new Thread(() -> {
+            try {
+                long limite = System.currentTimeMillis() + DIAGNOSTIC_BOUCLE_MS;
+                while (System.currentTimeMillis() < limite) {
+                    Thread.sleep(1000);
+                    if (annule[0] || !diagnosticEnCours || diagnosticStartMs != departDiag) return;
+                }
+                if (annule[0] || !diagnosticEnCours || diagnosticStartMs != departDiag) return;
+                if (serieGarde == null || serieGarde.isEmpty()) return;
+                if (findAliveTransportForSerial(serieGarde, nodeGarde, null) != null) return;
+                annule[0] = true;
+                RESET_AUTO_MS.put(serieGarde + "#" + nodeGarde, System.currentTimeMillis());
+                try { com.pa.lcr.lcp.log.LogBus.ui(nodeGarde, "[RESET-AUTO] Connexion toujours en cours après "
+                        + (DIAGNOSTIC_BOUCLE_MS / 1000) + " s — suppression du tab, la session sera restaurée"); } catch (Exception ignored) {}
+                activity.runOnUiThread(() -> {
+                    try { if (dlg[0] != null && dlg[0].isShowing()) dlg[0].dismiss(); } catch (Exception ignored) {}
+                    try { activity.removeTabBySerial(serieGarde, nodeGarde, "Reset auto (connexion en boucle > 2 min)"); }
+                    catch (Exception ignored) {}
+                });
+            } catch (InterruptedException ignored) {
+            } catch (Exception eGarde) {
+                Log.w(TAG, "Chien de garde diagnostic ERR (non-bloquant): " + eGarde.getMessage());
+            }
+        }, "diag-chien-de-garde").start();
+
         // ✅ Vérifier si livraison active avant de déconnecter
         boolean livraisonActive = false;
         try {
@@ -684,6 +717,7 @@ public class RegisterConnectionHelper {
         com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade =
             new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(activity);
 
+        final String[] verdictPerte = {""};
         for (int attempt = 1; attempt <= 3 && !btConnecte; attempt++) {
             if (annule[0]) { fermerDialogueAnnule(dlg); return; }
             etapes[2] = "Recherche registre... (" + attempt + "/3)";
@@ -800,14 +834,26 @@ public class RegisterConnectionHelper {
                 etapesOk[2] = true;
             } else {
                 erreurDetail[0] = r.msg;
+                // ✅ AJOUTÉ (11 nov 2026, demande Paul) — verdict à chaque tentative : le lien BT existe-t-il
+                // (RFCOMM ouvert mais le registre ne répond pas) ou le BT lui-même est-il inaccessible ?
+                verdictPerte[0] = classerPerte(r);
+                try { com.pa.lcr.lcp.log.LogBus.api(fNodeFinal, "[PERTE-CONNEXION] tentative " + attempt + "/3 échouée — "
+                    + libelleVerdict(verdictPerte[0])); } catch (Exception ignoredLb) {}
                 if (attempt < 3) try { Thread.sleep(2000); } catch (Exception ignored) {}
             }
         }
         updateDlg.run();
 
         if (!btConnecte) {
+            // Après 3 tentatives : la connexion est véritablement perdue — écrit dans Support avec la cause.
+            try { com.pa.lcr.lcp.log.LogBus.api(fNodeFinal, "[PERTE-CONNEXION] connexion véritablement perdue après 3 tentatives — "
+                + libelleVerdict(verdictPerte[0])
+                + ("BT_INACCESSIBLE".equals(verdictPerte[0])
+                    ? " → le Bluetooth est fautif : réinitialisation du service BT tentée (étapes 1-2), écran Support disponible pour le chauffeur"
+                    : " → le Bluetooth est présent, c'est le registre qui ne répond pas (alimentation / mode communication / autre appareil connecté)")); } catch (Exception ignoredLb) {}
             afficherEchec(dlg[0], etapes, etapesOk,
                 "Registre non trouvé\n"
+                + "Cause probable : " + libelleVerdict(verdictPerte[0]) + "\n"
                 + "⚡ Assurez-vous que :\n• Le Bluetooth est activé\n• Le registre est sous tension\n• Le registre est en mode communication BT",
                 woNum, fTicketNo, fNodeFinal, fSerialIdFinal,
                 woIdGuid, produit, presetStr, mac, deepLinkHandler);
@@ -976,12 +1022,46 @@ public class RegisterConnectionHelper {
     // Utilitaires
     // =========================================================
 
+    /** Verdict à partir du détail par transport : REGISTRE_MUET (RFCOMM ouvert, aucune réponse LCP),
+     *  BT_INACCESSIBLE (impossible d'ouvrir le lien BT), ou INCONNU. */
+    private static String classerPerte(com.pa.lcr.lcp.ApiResult r) {
+        try {
+            org.json.JSONArray d = (r != null && r.data != null) ? r.data.optJSONArray("attemptsDetail") : null;
+            boolean muet = false, inaccessible = false;
+            if (d != null) {
+                for (int i = 0; i < d.length(); i++) {
+                    org.json.JSONObject a = d.optJSONObject(i);
+                    if (a == null) continue;
+                    String o = a.optString("outcome", "");
+                    if (o.contains("série illisible")) muet = true;
+                    else if (o.contains("connexion à la MAC cible impossible") || o.contains("transport fermé")) inaccessible = true;
+                }
+            }
+            if (muet) return "REGISTRE_MUET";
+            if (inaccessible) return "BT_INACCESSIBLE";
+        } catch (Exception ignored) {}
+        return "INCONNU";
+    }
+
+    private static String libelleVerdict(String v) {
+        if ("REGISTRE_MUET".equals(v)) return "BT présent mais le registre ne répond pas";
+        if ("BT_INACCESSIBLE".equals(v)) return "BT inaccessible (lien Bluetooth impossible à ouvrir)";
+        return "cause indéterminée";
+    }
+
     private int getPremierEchec(boolean[] etapesOk) {
         for (int i = 0; i < etapesOk.length; i++) {
             if (!etapesOk[i]) return i;
         }
         return etapesOk.length - 1;
     }
+
+    /** Dernier reset automatique du tab, par « serial#node » (évite de supprimer le tab en boucle). */
+    private static final java.util.concurrent.ConcurrentHashMap<String, Long> RESET_AUTO_MS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long RESET_AUTO_MIN_MS = 3 * 60 * 1000L;
+    /** Durée max d'un diagnostic de connexion avant suppression automatique du tab. */
+    private static final long DIAGNOSTIC_BOUCLE_MS = 2 * 60 * 1000L;
 
     private void afficherEchec(
             android.app.AlertDialog dlgPrev,
@@ -1022,6 +1102,25 @@ public class RegisterConnectionHelper {
             if (CONNECTE_DEPUIS.containsKey(node)) {
                 try { com.pa.lcr.lcp.log.LogBus.api(node, "[DIAGNOSTIC] écran d'échec non affiché — registre déjà connecté"); } catch (Exception ignored) {}
                 return;
+            }
+            // ✅ AJOUTÉ (10 nov 2026, demande Paul — "si la connexion au registre tourne en boucle, il faut
+            // supprimer le tab et le repartir") — même geste que « Réessayer » / suppression manuelle du tab, mais
+            // automatique : une fois par registre et par RESET_AUTO_MIN_MS, seulement si le registre n'est joignable
+            // sur aucun transport. Si l'échec persiste, la suite (flamme / écran d'échec) s'affiche normalement.
+            try {
+                final String cleReset = (serialId == null ? "" : serialId) + "#" + node;
+                final long maintenant = System.currentTimeMillis();
+                Long dernier = RESET_AUTO_MS.get(cleReset);
+                if (serialId != null && !serialId.isEmpty()
+                        && (dernier == null || maintenant - dernier > RESET_AUTO_MIN_MS)
+                        && findAliveTransportForSerial(serialId, node, null) == null) {
+                    RESET_AUTO_MS.put(cleReset, maintenant);
+                    try { com.pa.lcr.lcp.log.LogBus.ui(node, "[RESET-AUTO] Échec de reconnexion — suppression du tab "
+                            + "et redémarrage de la détection (serial=" + serialId + ")"); } catch (Exception ignored) {}
+                    activity.removeTabBySerial(serialId, node, "Reset auto (échec de reconnexion) — même principe que suppression manuelle");
+                }
+            } catch (Exception eReset) {
+                Log.w(TAG, "Reset auto ERR (non-bloquant): " + eReset.getMessage());
             }
             // ✅ AJOUTÉ (10 nov 2026, demande Paul) — mode simplifié : l'écran d'échec ne reste plus ouvert. La flamme
             // cogne (tic tic) et sa carte donne la consigne N1 ou « Ouvrir un ticket » ; le dernier résultat du
