@@ -948,6 +948,36 @@ public class RegisterConnectionHelper {
         // faire un probe LCP bloquant (opGetField jusqu'à 3000ms) en tenant ce verrou,
         // le thread UI se gelait en silence — sans exception, sans log — et la relance
         // de la livraison n'avait jamais lieu.
+        // ✅ AJOUTÉ (11 nov 2026, demande Paul — « après une perte de communication, un diagnostic, et le registre revient,
+        // le processus de livraison continue sans intervention ») — un diagnostic lancé sans contexte de livraison
+        // (supervision automatique, flamme…) reprend le contexte de la livraison EN ATTENTE (ActiveDeliveryStore, posée par
+        // le vrai deep link) pour la relancer exactement comme le deep link. Seulement statut PENDING du MÊME registre ;
+        // le garde « déjà livré » et le garde « livraison réellement active » plus bas restent en vigueur.
+        String woNumX = woNum, woIdX = woIdGuid, produitX = produit, presetX = presetStr, macX = mac;
+        com.pa.lcrdemo.DeepLinkHandler dlhX = deepLinkHandler;
+        try {
+            if (woNumX == null || woNumX.isEmpty() || dlhX == null) {
+                com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery adR =
+                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(activity).load();
+                boolean memeRegistre = adR != null && (adR.serialId == null || adR.serialId.isEmpty()
+                    || fSerialIdFinal.isEmpty() || adR.serialId.equalsIgnoreCase(fSerialIdFinal));
+                if (adR != null && memeRegistre && "PENDING".equals(adR.status)
+                        && adR.woNum != null && !adR.woNum.isEmpty()) {
+                    woNumX = adR.woNum;
+                    woIdX = adR.woIdGuid != null ? adR.woIdGuid : "";
+                    produitX = String.valueOf(adR.produit);
+                    presetX = String.valueOf((int) adR.preset);
+                    if ((macX == null || macX.isEmpty()) && adR.mac != null) macX = adR.mac;
+                    if (dlhX == null) dlhX = activity.getDeepLinkHandler();
+                    try { com.pa.lcr.lcp.log.LogBus.api(fNodeFinal, "[REPRISE-APRES-PERTE] contexte repris de la livraison en attente wo="
+                        + woNumX + " — la livraison continue sans intervention si le registre est revenu"); } catch (Exception ignoredLb) {}
+                }
+            }
+        } catch (Exception eCtx) {
+            Log.w(TAG, "contexte livraison en attente non repris: " + eCtx.getMessage());
+        }
+        final String woNumR = woNumX, woIdR = woIdX, produitR = produitX, presetR = presetX, macR = macX;
+        final com.pa.lcrdemo.DeepLinkHandler dlhR = dlhX;
         new Thread(() -> {
             try { Thread.sleep(1500); } catch (Exception ignored) {}
             try {
@@ -996,12 +1026,12 @@ public class RegisterConnectionHelper {
             try {
                 LcrDeliveryStatusDb dbCheck = new LcrDeliveryStatusDb(activity);
                 try {
-                    LcrDeliveryStatusDb.DeliveryRow last = (woNum != null && !woNum.isEmpty())
-                        ? dbCheck.getLatestForWo(woNum) : null;
+                    LcrDeliveryStatusDb.DeliveryRow last = (woNumR != null && !woNumR.isEmpty())
+                        ? dbCheck.getLatestForWo(woNumR) : null;
                     if (last != null && (last.netL > 0.0 || last.grossL > 0.0)) {
                         dejaLivre = true;
                         Log.w(TAG, "diagnostic succès — relance auto ANNULÉE : dernière livraison pour "
-                            + woNum + " a déjà net=" + last.netL + " gross=" + last.grossL
+                            + woNumR + " a déjà net=" + last.netL + " gross=" + last.grossL
                             + " (ticket=" + last.ticketNo + ") — pas de relance pour éviter une livraison en plus");
                     }
                 } finally {
@@ -1012,18 +1042,18 @@ public class RegisterConnectionHelper {
                 try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterConnectionHelper.checkNetGrossAvantRelance", e); } catch (Exception ignored) {}
             }
 
-            if (!dejaLivre && deepLinkHandler != null && woNum != null && !woNum.isEmpty()) {
-                Log.i(TAG, "diagnostic succès — relance livraison auto woNum=" + woNum
+            if (!dejaLivre && dlhR != null && woNumR != null && !woNumR.isEmpty()) {
+                Log.i(TAG, "diagnostic succès — relance livraison auto woNum=" + woNumR
                     + " transportKey=" + transportKeyFinal[0]);
-                deepLinkHandler.lancerLivraison(
+                dlhR.lancerLivraison(
                     transportKeyFinal[0],
                     fNodeFinal,
                     fSerialIdFinal,
-                    woNum,
-                    woIdGuid != null ? woIdGuid : "",
-                    produit != null ? produit : "",
-                    presetStr != null ? presetStr : "",
-                    mac != null ? mac : "",
+                    woNumR,
+                    woIdR != null ? woIdR : "",
+                    produitR != null ? produitR : "",
+                    presetR != null ? presetR : "",
+                    macR != null ? macR : "",
                     true // skipConnexionCheck — diagnostic étape 4 vient de confirmer lcpOk=true
                 );
             }

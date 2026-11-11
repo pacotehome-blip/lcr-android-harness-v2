@@ -157,6 +157,27 @@ public class RegisterTabFragment extends Fragment {
     // lastCheckPendingMs ci-dessus, pour rechercherWoDepuisRegistre().
     private volatile long lastWoLookupMs = 0;
 
+    /**
+     * ✅ AJOUTÉ (11 nov 2026, demande Paul — « je veux rester dans Filgo-Registre et faire le bouton vert Lancer
+     * livraison avec les mêmes infos que le deep link ; l'interface est déjà là, je reconnecte le registre et je fais la
+     * suite ») — appelé quand le registre repasse CONNECTED sans nouveau deep link : on relit la livraison en attente
+     * (ActiveDeliveryStore) et on réaffiche le bouton vert « 🚀 Lancer la livraison » (WO, produit, preset d'origine).
+     * Rien n'est lancé tout seul : c'est le chauffeur qui appuie.
+     */
+    public void surRegistreReconnecte() {
+        try {
+            if (!isAdded()) return;
+            ui.postDelayed(() -> {
+                try {
+                    if (!isAdded()) return;
+                    lastCheckPendingMs = 0L;     // contourne l'anti-rebond : c'est un vrai changement d'état
+                    LogBus.api(node, "[LANCER-LIVRAISON] registre reconnecté — relecture de la livraison en attente (bouton vert)");
+                    checkPendingDeliveryForThisRegister();
+                } catch (Exception ignored) {}
+            }, 1200);
+        } catch (Exception ignored) {}
+    }
+
     private void checkPendingDeliveryForThisRegister() {
         try {
             android.content.Context ctx = getContext();
@@ -437,13 +458,20 @@ public class RegisterTabFragment extends Fragment {
                 "lancerDepuisStore: wo=" + fWoNum + " node=" + fNode + " preset=" + fPreset);
 
             // ✅ Vérifier que le controller du tab est prêt — pas créer nouveau facade
-            if (controller == null) {
-                android.util.Log.w("RegisterTabFragment", "lancerDepuisStore: controller null");
+            // ✅ FIX (11 nov 2026, demande Paul — « le bouton vert fait comme si on arrive du deep link : on reconnecte le
+            // registre et on fait la livraison ; si le BT n'est pas revenu, écran support ») — avant, un registre non
+            // connecté bloquait le bouton avec un simple toast. Maintenant le deep link interne ci-dessous prend le relais :
+            // il reconnecte (recherche BT/USB, diagnostic) puis lance la livraison, ou ouvre l'alerte de la flamme / le
+            // support (Reconnecter, Ouvrir un ticket, Plus tard) si le registre reste introuvable.
+            boolean registreJoignable = controller != null
+                && controller.getState() != com.pa.lcr.lcp.DeliveryState.DISCONNECTED;
+            if (registreJoignable) {
+                if (!verifierIoAvantAction("LANCER_LIVRAISON")) return;
+            } else {
+                LogBus.api(node, "[LANCER-DEPUIS-STORE] registre non connecté — le deep link interne reconnecte puis lance la livraison");
                 android.widget.Toast.makeText(requireContext(),
-                    "Registre non connecté", android.widget.Toast.LENGTH_SHORT).show();
-                return;
+                    "Reconnexion au registre…", android.widget.Toast.LENGTH_SHORT).show();
             }
-            if (!verifierIoAvantAction("LANCER_LIVRAISON")) return;
 
             // ✅ CORRIGÉ (4 sept 2026, demande Paul — "je le ferai passer
             // par la même place... il peut sauter la partie pour activer
