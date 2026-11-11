@@ -984,6 +984,22 @@ public class MainActivity extends AppCompatActivity {
      * ✅ Rattrapage UI — synchronise les tabs avec les sessions LCP connues.
      * Appelé au retour au premier plan pour rattraper les NODE_SEEN manqués en arrière-plan.
      */
+    // ✅ FIX (11 nov 2026, demande Paul — « écran blanc, je dois basculer sur Filgo-Registre puis mode admin pour
+    // récupérer l'interface simple ») — preuve BD 11:10:41 et 11:15:48 : Activity recréée, syncTabs ne trouve AUCUN
+    // transport confirmé (le registre se reconnecte encore), saute l'entrée, puis le tab provisoire « unknown » est
+    // supprimé → plus aucun tab → écran vide jusqu'à un nouveau passage en arrière-plan. Maintenant : on REJOUE la
+    // synchronisation tant qu'une session connue n'a pas de transport/tab (toutes les 2 s, 30 s max), on la rejoue
+    // aussi à chaque [CONNEXION], et si rien ne revient on lance le diagnostic (écran Support/reconnexion).
+    private int syncTabsRetries = 0;
+    private static final int SYNC_TABS_RETRIES_MAX = 15;
+
+    /** Appelé quand un registre passe CONNECTED : recrée le tab/écran simplifié s'il manque. */
+    public static void resyncTabsApresConnexion() {
+        final MainActivity a = ACTIVE_INSTANCE;
+        if (a == null) return;
+        try { a.ui.post(() -> { a.syncTabsRetries = 0; a.syncTabsFromActiveSessions(); }); } catch (Exception ignored) {}
+    }
+
     private void syncTabsFromActiveSessions() {
         try {
             RegisterSessionManager sessions = RegisterSessionManager.get(this);
@@ -992,6 +1008,8 @@ public class MainActivity extends AppCompatActivity {
                 logUi(null, "syncTabs: aucune session connue");
                 return;
             }
+            boolean manque = false;
+            String manqueSerial = ""; int manqueNode = -1;
             logUi(null, "syncTabs: " + known.size() + " session(s) connue(s)");
             boolean focused = false;
             for (String[] reg : known) {
@@ -1017,6 +1035,7 @@ public class MainActivity extends AppCompatActivity {
                 if (transportKey == null || transportKey.trim().isEmpty()) {
                     logUi(null, "syncTabs: node=" + node + " serial=" + serial
                             + " — aucun transport confirmé, ignoré (pas de devinette)");
+                    manque = true; manqueSerial = serial; manqueNode = node;
                     continue;
                 }
 
@@ -1037,6 +1056,24 @@ public class MainActivity extends AppCompatActivity {
                 ui.postDelayed(() -> refreshOneTabMediaStatus(fTabKey), 100);
             }
             refreshAllTabsMediaStatus();
+            if (!manque) {
+                syncTabsRetries = 0;
+            } else if (syncTabsRetries < SYNC_TABS_RETRIES_MAX) {
+                syncTabsRetries++;
+                ui.postDelayed(this::syncTabsFromActiveSessions, 2000);
+            } else {
+                syncTabsRetries = 0;
+                boolean aucunTab;
+                synchronized (tabsByKey) { aucunTab = tabsByKey.isEmpty(); }
+                logUi(null, "syncTabs: registre toujours sans transport après 30 s" + (aucunTab ? " et aucun tab" : "")
+                    + " — lancement du diagnostic de reconnexion");
+                if (!RegisterConnectionHelper.isDiagnosticEnCours()
+                        && !com.pa.lcr.lcp.MultiRegisterApiFacadeImpl.isConnectAutoEnCours()) {
+                    final String fSer = manqueSerial; final int fNod = manqueNode;
+                    new Thread(() -> new RegisterConnectionHelper(MainActivity.this)
+                        .lancerDiagnosticForce("", fNod, fSer, "")).start();
+                }
+            }
         } catch (Exception e) {
             logUi(null, "syncTabs: erreur: " + e.getMessage());
         }

@@ -92,6 +92,7 @@ public class RegisterConnectionHelper {
         if (connecte) {
             CONNECTE_DEPUIS.put(node, System.currentTimeMillis());
             fermerDialoguesDiagnostic("registre connecté (node=" + node + ")");
+            try { MainActivity.resyncTabsApresConnexion(); } catch (Throwable ignoredSync) {}
         } else {
             CONNECTE_DEPUIS.remove(node);
         }
@@ -694,8 +695,15 @@ public class RegisterConnectionHelper {
                         bt.disable(); Thread.sleep(1500);
                         bt.enable();  Thread.sleep(2000);
                     } else {
-                        // Android 13+ — juste attendre que le stack BT se stabilise
-                        Thread.sleep(1000);
+                        // ✅ FIX (11 nov 2026, demande Paul — tablettes Android 16) — l'appli ne peut plus couper/rallumer
+                        // l'adaptateur BT (bt.disable()/enable() sans effet dès Android 13). « Redémarrage » logiciel :
+                        // tous les sockets BT de l'appli sont fermés (étape 1 + étape 3), puis on laisse au module BT
+                        // du registre le temps de libérer l'ancien lien RFCOMM avant de rouvrir (une reconnexion trop
+                        // rapide produit « read failed » / timeouts, vu le 11 nov 11:10).
+                        try { bt.cancelDiscovery(); } catch (Exception ignoredCd) {}
+                        try { com.pa.lcr.lcp.log.LogBus.api(fNodeFinal, "[BT-RESET] redémarrage logiciel du lien BT (Android "
+                            + android.os.Build.VERSION.SDK_INT + " : adaptateur non redémarrable par l'appli) — attente 4 s"); } catch (Exception ignoredLb) {}
+                        Thread.sleep(4000);
                     }
                 }
             } catch (Exception ignored) {}
@@ -849,7 +857,7 @@ public class RegisterConnectionHelper {
             try { com.pa.lcr.lcp.log.LogBus.api(fNodeFinal, "[PERTE-CONNEXION] connexion véritablement perdue après 3 tentatives — "
                 + libelleVerdict(verdictPerte[0])
                 + ("BT_INACCESSIBLE".equals(verdictPerte[0])
-                    ? " → le Bluetooth est fautif : réinitialisation du service BT tentée (étapes 1-2), écran Support disponible pour le chauffeur"
+                    ? " → le Bluetooth est fautif : redémarrage logiciel du lien tenté ; si ça persiste, le chauffeur doit désactiver puis réactiver le Bluetooth (panneau rapide) et ouvrir l'écran Support"
                     : " → le Bluetooth est présent, c'est le registre qui ne répond pas (alimentation / mode communication / autre appareil connecté)")); } catch (Exception ignoredLb) {}
             afficherEchec(dlg[0], etapes, etapesOk,
                 "Registre non trouvé\n"
