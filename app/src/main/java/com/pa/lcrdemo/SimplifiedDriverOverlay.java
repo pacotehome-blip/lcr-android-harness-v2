@@ -883,6 +883,13 @@ final class SimplifiedDriverOverlay {
         if (admin) { arreterAnimations(); dernierEtat = null; cacherBulle(); return; }
 
         String live = txt(txtLive).toUpperCase(Locale.ROOT);
+        // ✅ 11 nov 2026 (demande Paul) — texte LIVE périmé après une reconnexion : on se fie à la session vivante.
+        if (live.contains("DISCONNECTED") || live.contains("(OFF)") || live.contains("COUPÉ")) {
+            if (host.sessionVivantePourSimplifie()) {
+                host.corrigerLivePerimePourSimplifie();
+                live = txt(txtLive).toUpperCase(Locale.ROOT);
+            }
+        }
         double net = nombre(txtQtyNet);
         double gross = nombre(txtQtyGross);
         Etat etat = calculerEtat(live, net, gross);

@@ -3651,7 +3651,50 @@ public class RegisterTabFragment extends Fragment {
     // lui sont donnés : WO courant, état du média, et la demande de permission micro (message
     // vocal de la demande de support).
     String getWoNumPourSimplifie() { return currentWoNum; }
-    boolean isMediaReadyPourSimplifie() { return tabMediaReady; }
+    boolean isMediaReadyPourSimplifie() { return tabMediaReady || sessionVivantePourSimplifie(); }
+
+    /**
+     * ✅ AJOUTÉ (11 nov 2026, demande Paul — « si la connexion est revenue, l'interface simple doit résumer sa
+     * connexion, elle ne cesse pas de tourner en boucle »). Preuve (logs 11 nov 08:46) : le registre s'est
+     * reconnecté ([CONNEXION] Registre connecté, [DIAGNOSTIC] écran fermé) mais le texte « LIVE: DISCONNECTED »
+     * laissé par l'ancien contrôleur est resté affiché — aucun nouveau statut live n'arrive sur un registre
+     * inactif — et l'écran simplifié (qui lit ce texte) est resté sur « Connexion au registre… ».
+     * Vérité = la session vivante du registre (même node + même #série), pas le texte.
+     */
+    boolean sessionVivantePourSimplifie() {
+        try {
+            String serie = (serialFromArgs != null) ? serialFromArgs.trim() : "";
+            com.pa.lcr.lcp.DeliveryController dc = null;
+            if (!serie.isEmpty()) {
+                dc = com.pa.lcr.lcp.RegisterSessionManager.get(requireContext().getApplicationContext())
+                        .findLiveControllerByNodeAndSerial(node, serie);
+            }
+            if (dc == null) return false;
+            com.pa.lcr.lcp.DeliveryState st = dc.getState();
+            return st != null && st != com.pa.lcr.lcp.DeliveryState.DISCONNECTED;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Remplace un texte « LIVE » périmé (DISCONNECTED / OFF / COUPÉ) par l'état réel : registre connecté, prêt. */
+    void corrigerLivePerimePourSimplifie() {
+        try {
+            if (txtLive == null) return;
+            CharSequence cs = txtLive.getText();
+            String t = cs == null ? "" : cs.toString().toUpperCase(java.util.Locale.ROOT);
+            if (!(t.contains("DISCONNECTED") || t.contains("(OFF)") || t.contains("COUPÉ"))) return;
+            if (!sessionVivantePourSimplifie()) return;
+            tabMediaReady = true;
+            pendingReconnect = false;
+            lastLiveText = "LIVE: CONNECTED - Ready";
+            txtLive.setText("LIVE: CONNECTED - Ready");
+            updateButtons(controller != null ? controller.getState() : null);
+            LogBus.api(node, "[SIMPLIFIÉ] texte LIVE périmé remplacé — le registre est reconnecté (session vivante)");
+        } catch (Exception e) {
+            android.util.Log.w("RegisterTabFragment", "corrigerLivePerime ERR (non-bloquant): " + e.getMessage());
+        }
+    }
 
     private Runnable micAccordeCb = null;
     private final androidx.activity.result.ActivityResultLauncher<String> micPermLauncher =
