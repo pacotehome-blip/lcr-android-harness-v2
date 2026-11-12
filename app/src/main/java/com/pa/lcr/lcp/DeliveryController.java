@@ -1231,6 +1231,9 @@ private void reproEvent(String level, String type, String message, JSONObject da
      */
     /** Dernière réponse réussie du registre au cycle net/gross (lecture #44/#45). lastTick ne bouge pas quand les valeurs sont stables (pause). */
     private volatile long lastCycleOkMs = 0L;
+    /** Dernière lecture net/gross RÉUSSIE du tick rapide — le superviseur ne doit jamais conclure à partir d'un cache plus vieux. */
+    private volatile long lastFastReadOkMs = 0L;
+    private static final long SUPERVISION_DONNEES_MAX_AGE_MS = 4000L;
     public double[] readNetGrossFromHardware() {
         try {
             int digits = (cachedDigits >= 0) ? cachedDigits : 1;
@@ -2384,6 +2387,7 @@ try {
                 }
                 double gross = g / scale;
                 double net   = n / scale;
+                lastFastReadOkMs = System.currentTimeMillis();   // le registre vient de répondre au cycle net/gross
                 if (listener != null) listener.onLiveQty(net, gross);
 
                 // ✅ AJOUTÉ (14 août 2026) — battement de cœur, indépendant
@@ -2487,6 +2491,14 @@ try {
                 // rapide reste le SEUL lecteur physique pendant le flow.
                 LastTick freshTick = lastTick;
                 if (freshTick == null) return;
+                // Registre muet (Bluetooth coupé, plus aucune réponse) : lastTick est un CACHE, immobile faute de lectures — pas une
+                // pause. Ni pause confirmée ni faux « signal vivant » : on laisse l'état tel quel, le tab déclare la perte de liaison.
+                long ageLecture = lastFastReadOkMs > 0L ? System.currentTimeMillis() - lastFastReadOkMs : 0L;
+                if (state == DeliveryState.RUNNING_FLOWING && ageLecture > SUPERVISION_DONNEES_MAX_AGE_MS) {   // le tick rapide ne tourne qu'en RUNNING_FLOWING
+                    try { emitLog("[SUPERVISION] aucune lecture réussie depuis " + ageLecture
+                        + " ms — pause non confirmée sur données périmées"); } catch (Throwable ignoredSup) {}
+                    return;
+                }
                 delStatus = freshTick.delStatus;
                 delCode = freshTick.delCode;
 
