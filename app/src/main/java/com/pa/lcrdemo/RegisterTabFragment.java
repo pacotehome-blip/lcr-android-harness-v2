@@ -578,6 +578,20 @@ public class RegisterTabFragment extends Fragment {
     private volatile boolean logRefreshDeferredByFlowing = false;
     private int ticketPendingFlag = -1;
     private volatile String lastLiveText = null;
+    // ✅ 12 nov 2026 (demande Paul — « l'écran simplifié suit le LIVE du tab ») : le tab est la SEULE source de vérité de la
+    // liaison. Il surveille (lecture seule, 1 s) le lien BT du registre et l'état du contrôleur PENDANT une livraison et
+    // écrit lui-même le diagnostic dans son LIVE ; l'écran simplifié ne fait que le lire. Aucune commande envoyée au registre.
+    private volatile int liaisonPerdueCas = 0;        // 0 ok ; 1 BT connecté mais registre muet ; 2 BT du registre (Parani) injoignable
+    private volatile boolean livraisonVue = false;    // une livraison RUNNING_FLOWING/PAUSED a été vue et n'est pas terminée
+    private long liaisonPerdueDepuisMs = 0L;
+    private volatile boolean surveillanceLiaisonActive = false;
+    private final Runnable surveillanceLiaisonRun = new Runnable() {
+        @Override public void run() {
+            if (!surveillanceLiaisonActive) return;
+            try { evaluerLiaisonLive(); } catch (Throwable ignoredSl) {}
+            try { ui.postDelayed(this, 1000L); } catch (Throwable ignoredSl2) {}
+        }
+    };
     // ✅ AJOUTÉ (28 août 2026, demande Paul — "pourquoi je n'ai plus de
     // sales_number dans la partie régistre") — voir usage plus bas dans
     // onLiveStatus(). Suit le dernier Sale Number réellement affiché, pour
@@ -2878,7 +2892,9 @@ public class RegisterTabFragment extends Fragment {
                 // répétition périodique du même statut.
                 boolean texteReelementChange = !java.util.Objects.equals(liveText, lastLiveText);
                 lastLiveText = liveText;
-                if (txtLive != null) txtLive.setText(liveText);
+                // Fin de livraison vue dans le texte LIVE : plus de « perte en livraison » possible.
+                if (liveText != null && (liveText.contains("ENDING") || liveText.contains("TICKET") || liveText.contains("ENDED"))) livraisonVue = false;
+                if (txtLive != null) txtLive.setText(liaisonPerdueCas != 0 ? texteLiaisonPerdue(liaisonPerdueCas) : liveText);
                 ensureSerialVisibleThrottled();
                 refreshDelCodeFromTickSnapshotThrottled();
                 // ✅ AJOUTÉ (28 août 2026, demande Paul — "pourquoi je
@@ -3619,6 +3635,10 @@ public class RegisterTabFragment extends Fragment {
     @Override
     public void onResume() {
         super.onResume();
+        if (!surveillanceLiaisonActive) {
+            surveillanceLiaisonActive = true;
+            try { ui.postDelayed(surveillanceLiaisonRun, 1000L); } catch (Throwable ignoredSl) {}
+        }
         // ✅ Toujours réattacher le uiListener si nécessaire au retour du tab
         // onStop() détache le listener — onResume() doit le réattacher
         // Android 9-15 : même comportement — le listener est un callback direct,
@@ -3667,6 +3687,8 @@ public class RegisterTabFragment extends Fragment {
         // donc un NOUVEAU listener sans jamais retirer l'ancien, qui
         // continuait de recevoir chaque événement — d'où la duplication qui
         // s'accumulait au fil du temps (2x, puis 4x, etc.).
+        surveillanceLiaisonActive = false;
+        liaisonPerdueCas = 0; liaisonPerdueDepuisMs = 0L;
         try { detachUiListenerSafe(); } catch (Exception ignored) {}
         try { ui.removeCallbacksAndMessages(null); } catch (Exception ignored) {}
         try { bg.shutdownNow(); } catch (Exception ignored) {}
@@ -3705,43 +3727,80 @@ public class RegisterTabFragment extends Fragment {
         return tabMediaShort + "(OFF) — reconnect requis";
     }
 
-    /** Appelé par l'écran simplifié quand la liaison est perdue en livraison : corrige le texte LIVE resté sur « connected ready ». */
-    void marquerLiaisonPerdueLive(int cas) {
-        try {
-            ui.post(() -> {
-                if (!isAdded() || getView() == null || txtLive == null) return;
-                String actuel = txtLive.getText() != null ? txtLive.getText().toString() : "";
-                if (actuel.contains("ne répond pas") || actuel.contains("injoignable") || actuel.contains("COUPÉ")) return;
-                txtLive.setText(cas == 1
-                    ? "LIVE: ⚠️ Bluetooth connecté mais le registre ne répond pas — le dernier état connu n'est plus fiable — reconnect requis"
-                    : "LIVE: ⚠️ Bluetooth du registre (Parani) injoignable — le dernier état connu n'est plus fiable — reconnect requis");
-            });
-        } catch (Exception ignored) {}
+    /** Ancien appel de l'écran simplifié : sans effet. Le tab écrit lui-même le diagnostic dans son LIVE (evaluerLiaisonLive). */
+    void marquerLiaisonPerdueLive(int cas) { }
+
+    private String texteLiaisonPerdue(int cas) {
+        return cas == 1
+            ? "LIVE: ⚠️ Bluetooth connecté mais le registre ne répond pas — le dernier état connu n'est plus fiable — reconnect requis"
+            : "LIVE: ⚠️ Bluetooth du registre (Parani) injoignable — le dernier état connu n'est plus fiable — reconnect requis";
     }
 
     /**
-     * 0 = liaison correcte ; 1 = le Bluetooth (Parani) est connecté mais le REGISTRE ne répond plus (lien ouvert, aucune
-     * lecture live) ; 2 = le Bluetooth du registre est INJOIGNABLE (lien fermé/en erreur : Parani débranché, hors de
-     * portée, interférence). Demande Paul 11 nov 2026 : deux cas distincts, deux consignes distinctes.
+     * Surveillance de la liaison PENDANT une livraison (lecture seule, aucune commande au registre, aucun effet sur le tick).
+     * 1 = le Bluetooth (Parani) est connecté mais le contrôleur a déclaré le REGISTRE muet (DISCONNECTED après des timeouts
+     * du cycle) ; 2 = le Bluetooth du registre est INJOIGNABLE (lien fermé : débranché, hors de portée, interférence).
+     * Le silence normal en pause (le registre ne répond qu'au cycle RUNNING_FLOWING) n'est PAS une perte : seul un lien fermé
+     * ou un contrôleur réellement DISCONNECTED compte. Confirmé sur 2 s. Écrit le diagnostic dans le LIVE ; le restaure au retour.
      */
-    int etatLiaisonPourSimplifie() {
-        try {
-            String k = tabTransportKey;
-            if (k == null || k.trim().isEmpty()) return 0;
-            com.pa.lcr.lcp.transport.TransportIo io = com.pa.lcr.lcp.transport.MediaTransportManager
-                .get(requireContext().getApplicationContext()).getByKey(k.trim());
-            if (io == null || !io.isOpen()) return 2;
-            // ✅ CORRECTION (12 nov 2026, demande Paul — vidéo 09:41 : la flamme apparaissait au passage de RUNNING_FLOWING à
-            // pause) — le registre ne répond qu'aux commandes du cycle RUNNING_FLOWING : en pause / fin / confirmation il est
-            // NORMAL qu'aucune lecture live n'arrive pendant longtemps. Le critère « âge du dernier tick » (support31/32)
-            // donnait donc de fausses alertes et est RETIRÉ. Seul critère fiable ici : le lien BT du registre est fermé.
-            // Le cas « BT connecté mais registre muet » reste détecté par le contrôleur lui-même (timeouts LCP consécutifs →
-            // DISCONNECTED → carte « Communication perdue »), qui sait distinguer la pause d'une vraie perte.
-        } catch (Exception ignored) {}
-        return 0;
+    private void evaluerLiaisonLive() {
+        if (!isAdded() || getView() == null || txtLive == null) return;
+        DeliveryController dc = controller;
+        com.pa.lcr.lcp.DeliveryState st = dc != null ? dc.getState() : null;
+        if (st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) {
+            livraisonVue = true;
+        } else if (st != null && st != com.pa.lcr.lcp.DeliveryState.DISCONNECTED && st != com.pa.lcr.lcp.DeliveryState.ERROR) {
+            livraisonVue = false;   // ENDING, ENDED, IDLE, CONNECTED… : plus de livraison en cours
+        }
+        int brut = 0;
+        if (livraisonVue) {
+            try {
+                String k = tabTransportKey;
+                if (k != null && !k.trim().isEmpty()) {
+                    com.pa.lcr.lcp.transport.TransportIo io = com.pa.lcr.lcp.transport.MediaTransportManager
+                        .get(requireContext().getApplicationContext()).getByKey(k.trim());
+                    if (io == null || !io.isOpen()) brut = 2;
+                    else if (st == com.pa.lcr.lcp.DeliveryState.DISCONNECTED) brut = 1;
+                }
+            } catch (Throwable ignoredLk) {}
+        }
+        long now = android.os.SystemClock.elapsedRealtime();
+        int nouveau;
+        if (brut == 0) {
+            liaisonPerdueDepuisMs = 0L;
+            nouveau = 0;
+        } else {
+            if (liaisonPerdueDepuisMs == 0L) liaisonPerdueDepuisMs = now;
+            nouveau = (now - liaisonPerdueDepuisMs >= 2000L) ? brut : liaisonPerdueCas;
+        }
+        if (nouveau == liaisonPerdueCas) return;
+        liaisonPerdueCas = nouveau;
+        if (nouveau != 0) {
+            txtLive.setText(texteLiaisonPerdue(nouveau));
+            try { LogBus.api(node, "[PERTE-EN-LIVRAISON] " + (nouveau == 1
+                ? "Bluetooth connecté mais le registre ne répond pas" : "Bluetooth du registre (Parani) injoignable")
+                + " — message affiché, aucune action automatique sur le lien pendant la livraison"); } catch (Throwable ignoredLb) {}
+        } else {
+            String l = lastLiveText;
+            txtLive.setText(l != null && !l.isEmpty() ? l : "LIVE: CONNECTED - Ready");
+            try { LogBus.api(node, "[PERTE-EN-LIVRAISON] liaison rétablie — LIVE restauré, la livraison reprend à l'état réel du registre"); } catch (Throwable ignoredLb) {}
+        }
     }
 
+    /** 0 = liaison correcte ; 1 / 2 = voir evaluerLiaisonLive(). Décidé par le tab, écrit dans son LIVE, lu par l'écran simplifié. */
+    int etatLiaisonPourSimplifie() { return liaisonPerdueCas; }
+
     boolean liaisonPerduePourSimplifie() { return etatLiaisonPourSimplifie() != 0; }
+
+    /** Vrai si une livraison est en cours (débit ou pause) sur ce registre : aucune action automatique ne doit alors toucher au lien. */
+    boolean livraisonActivePourSimplifie() {
+        try {
+            DeliveryController dc = controller;
+            if (dc == null) return false;
+            com.pa.lcr.lcp.DeliveryState st = dc.getState();
+            return st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING || st == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED;
+        } catch (Exception ignored) { return false; }
+    }
 
     /**
      * ✅ AJOUTÉ (11 nov 2026, demande Paul — « si la connexion est revenue, l'interface simple doit résumer sa
@@ -3771,6 +3830,9 @@ public class RegisterTabFragment extends Fragment {
     void corrigerLivePerimePourSimplifie() {
         try {
             if (txtLive == null) return;
+            // Pendant une livraison (ou une perte de liaison en livraison), le texte « COUPÉ/injoignable » est la vérité : ne jamais
+            // le remplacer par « CONNECTED - Ready » (c'était l'affichage faux vu en test).
+            if (livraisonVue || liaisonPerdueCas != 0) return;
             CharSequence cs = txtLive.getText();
             String t = cs == null ? "" : cs.toString().toUpperCase(java.util.Locale.ROOT);
             if (!(t.contains("DISCONNECTED") || t.contains("(OFF)") || t.contains("COUPÉ"))) return;

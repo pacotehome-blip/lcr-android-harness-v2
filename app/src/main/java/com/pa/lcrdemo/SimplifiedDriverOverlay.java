@@ -133,11 +133,9 @@ final class SimplifiedDriverOverlay {
     // ✅ AJOUTÉ (11 nov 2026, demande Paul — « Filgo-Registre ouvert avec le BT déconnecté du registre : ça tourne en rond
     // sans cesse ; après même pas 5 s on sait que le registre ne répond pas ») — « Connexion au registre… » ne dure plus
     // indéfiniment : au-delà de CONNEXION_LONGUE_MS, la flamme alerte (toc-toc + carte) et la reconnexion/diagnostic part.
-    private long perteDepuisMs = 0L;
     private volatile boolean perteEnLivraison = false;
     private Etat dernEtatLivr = null;
     private long dernEtatLivrMs = 0L;
-    private boolean silenceLegitimeLoguee = false;
     private volatile int perteCas = 0;   // 1 = BT connecté mais registre muet ; 2 = BT du registre (Parani) injoignable   // liaison BT/registre perdue PENDANT une livraison
     private long connexionDepuisMs = 0L;
     private boolean connexionLongueSignalee = false;
@@ -948,33 +946,17 @@ final class SimplifiedDriverOverlay {
         double gross = nombre(txtQtyGross);
         Etat etat = calculerEtat(live, net, gross);
 
-        // ✅ CORRECTION (12 nov 2026, demande Paul — vidéo 09:41 : flamme + « Communication perdue avec le registre » pendant les
-        // pauses de la livraison) — le registre ne répond QU'AUX commandes du cycle RUNNING_FLOWING : en pause / confirmation /
-        // fin, le silence est NORMAL (le contrôleur peut alors écrire DISCONNECTED alors que le lien BT est bien ouvert).
-        // Règle : si le dernier état de livraison vu n'était PAS un débit en cours (ou si le débit s'est arrêté il y a moins de
-        // 8 s) et que le lien BT du registre est ouvert, un texte LIVE « coupé » est du silence légitime : on garde l'état
-        // précédent (pause, confirmation, fin), sans flamme ni message. Un débit qui devient muet plus de 8 s, ou un lien BT
-        // fermé, restent de vraies pertes.
+        // 12 nov 2026 (demande Paul — « l'écran simplifié suit le LIVE du tab ») : le tab décide de la liaison pendant une
+        // livraison et l'écrit dans son LIVE (voir RegisterTabFragment.evaluerLiaisonLive). Ici on ne fait que traduire :
+        // en cas de perte, le bandeau garde le dernier état de livraison vu et la carte « Arrêtez le débit » s'affiche.
+        int casLiaison = host.etatLiaisonPourSimplifie();
         long maintenantS = android.os.SystemClock.elapsedRealtime();
-        if (etat == Etat.DEBIT || etat == Etat.PAUSE || etat == Etat.CONFIRM || etat == Etat.ENDING) {
+        if (casLiaison != 0) {
+            etat = dernEtatLivr != null ? dernEtatLivr : Etat.DEBIT;
+        } else if (etat == Etat.DEBIT || etat == Etat.PAUSE || etat == Etat.CONFIRM || etat == Etat.ENDING) {
             dernEtatLivr = etat; dernEtatLivrMs = maintenantS;
-        }
-        boolean liveCoupe = live.contains("DISCONNECTED") || live.contains("(OFF)") || live.contains("COUPÉ")
-                || live.contains("RECONNECT REQUIS") || live.contains("(EN ATTENTE)") || live.isEmpty();
-        if (liveCoupe && dernEtatLivr != null && maintenantS - dernEtatLivrMs < 15 * 60_000L
-                && (dernEtatLivr != Etat.DEBIT || maintenantS - dernEtatLivrMs < 8_000L)
-                && host.etatLiaisonPourSimplifie() == 0) {
-            live = dernEtatLivr == Etat.PAUSE ? "RUNNING_PAUSED"
-                 : dernEtatLivr == Etat.CONFIRM ? "RUNNING_FLOWING CONFIRMING"
-                 : dernEtatLivr == Etat.ENDING ? "ENDING" : "RUNNING_FLOWING FLOW ON";
-            etat = calculerEtat(live, net, gross);
-            if (!silenceLegitimeLoguee) {
-                silenceLegitimeLoguee = true;
-                try { com.pa.lcr.lcp.log.LogBus.api(0, "[SILENCE-LEGITIME] registre muet en " + dernEtatLivr
-                    + " alors que le lien BT est ouvert — normal (il ne répond qu'au cycle RUNNING_FLOWING) : aucune alerte"); } catch (Throwable ignoredLb) {}
-            }
-        } else if (!liveCoupe) {
-            silenceLegitimeLoguee = false;
+        } else if (etat == Etat.PRET || etat == Etat.ATTENTE || etat == Etat.TICKET || etat == Etat.FIN) {
+            dernEtatLivr = null;
         }
 
         // --- Registre
@@ -1008,8 +990,10 @@ final class SimplifiedDriverOverlay {
                 }
                 try { com.pa.lcr.lcp.log.LogBus.api(0, "[CONNEXION-LONGUE] « Connexion au registre… » depuis plus de "
                     + (CONNEXION_LONGUE_MS / 1000) + " s — alerte de la flamme + reconnexion/diagnostic"); } catch (Throwable ignoredLb) {}
+                // Règle Paul (12 nov 2026) : rien d'automatique ne touche au lien pendant une livraison (RUNNING_FLOWING/PAUSED).
                 if (!RegisterConnectionHelper.isDiagnosticEnCours()
-                        && !com.pa.lcr.lcp.MultiRegisterApiFacadeImpl.isConnectAutoEnCours()) {
+                        && !com.pa.lcr.lcp.MultiRegisterApiFacadeImpl.isConnectAutoEnCours()
+                        && !host.livraisonActivePourSimplifie()) {
                     try { host.reconnectFromDialog(); } catch (Throwable t) { Log.w(TAG, "reconnexion auto ERR: " + t.getMessage()); }
                 }
             }
@@ -1030,21 +1014,12 @@ final class SimplifiedDriverOverlay {
         if ((coupe || echecDeepLink) && !oublieErreur) balancerTrombone();
         // Perte de liaison PENDANT une livraison : le texte LIVE reste figé sur RUNNING_FLOWING, donc ni « DISCONNECTED » ni
         // « (OFF) » n'apparaissent. On regarde le lien lui-même (2 s de confirmation) ; la carte disparaît dès qu'il revient.
-        boolean livraisonEnCours = etat == Etat.DEBIT || etat == Etat.CONFIRM || etat == Etat.PAUSE || etat == Etat.ENDING;
-        boolean perte = false;
-        int casLiaison = livraisonEnCours ? host.etatLiaisonPourSimplifie() : 0;
-        if (casLiaison != 0) {
-            long maintenantP = android.os.SystemClock.elapsedRealtime();
-            if (perteDepuisMs == 0L) perteDepuisMs = maintenantP;
-            perte = maintenantP - perteDepuisMs >= 2000L;
-        } else {
-            perteDepuisMs = 0L;
-        }
+        boolean perte = casLiaison != 0;
         if (perte != perteEnLivraison) {
             try { com.pa.lcr.lcp.log.LogBus.api(0, perte
                 ? "[PERTE-EN-LIVRAISON] liaison BT/registre perdue pendant la livraison — consigne affichée : arrêter le débit et vérifier le Bluetooth"
                 : "[PERTE-EN-LIVRAISON] liaison rétablie — la livraison reprend à l'état réel du registre, consigne retirée"); } catch (Throwable ignoredLb) {}
-            if (perte) { snoozeCle = ""; snoozeJusquaMs = 0L; oublieErreur = false; try { host.marquerLiaisonPerdueLive(casLiaison); } catch (Throwable ignoredM) {} }
+            if (perte) { snoozeCle = ""; snoozeJusquaMs = 0L; oublieErreur = false; }
         }
         perteCas = perte ? casLiaison : 0;
         perteEnLivraison = perte;
