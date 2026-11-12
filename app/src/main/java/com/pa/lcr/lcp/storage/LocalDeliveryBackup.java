@@ -763,7 +763,42 @@ public class LocalDeliveryBackup {
             messages.add("listBackupFilesMediaStore ERR: " + e.getMessage());
             Log.w(TAG, "listBackupFilesMediaStore ERR: " + e.getMessage()); try { com.pa.lcr.lcp.log.LogBus.err(0, "LocalDeliveryBackup.listBackupFilesMediaStore", e); } catch (Exception ignored) {}
         }
+        // Après une RÉINSTALLATION, MediaStore ne rend pas les fichiers créés par
+        // l'installation précédente (propriétaire perdu). Avec « Accès à tous les
+        // fichiers » (MANAGE_EXTERNAL_STORAGE) on les lit directement dans Téléchargements.
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) {
+                File[] fichiers = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                        .listFiles((dir, name) -> name.startsWith("filgo_livraison_") && name.endsWith(".json"));
+                if (fichiers != null) {
+                    java.util.Set<String> deja = new java.util.HashSet<>();
+                    for (byte[] b : out) deja.add(new String(b, StandardCharsets.UTF_8));
+                    int ajoutes = 0;
+                    for (File f : fichiers) {
+                        try (InputStream in = new java.io.FileInputStream(f)) {
+                            byte[] raw = readAll(in);
+                            if (deja.add(new String(raw, StandardCharsets.UTF_8))) { out.add(raw); ajoutes++; }
+                        } catch (Exception e) {
+                            messages.add("Lecture directe échouée " + f.getName() + ": " + e.getMessage());
+                        }
+                    }
+                    messages.add("accès complet aux fichiers: +" + ajoutes + " fichier(s) hors MediaStore");
+                }
+            } else {
+                messages.add("accès complet aux fichiers NON accordé");
+            }
+        } catch (Exception e) {
+            messages.add("lecture directe ERR: " + e.getMessage());
+        }
         return out;
+    }
+
+    /** Trace visible dans les logs Support : combien de JSON lisibles (0 = fichiers d'une install précédente inaccessibles). */
+    private static void logListing(int nb, List<String> messages) {
+        try {
+            com.pa.lcr.lcp.log.LogBus.api(0, "[BACKUP-JSON] fichiers lisibles=" + nb
+                + (messages.isEmpty() ? "" : " — " + messages));
+        } catch (Exception ignored) {}
     }
 
     private static List<byte[]> listBackupFilesLegacy(Context ctx, List<String> messages) {
@@ -950,6 +985,7 @@ public class LocalDeliveryBackup {
         List<byte[]> files = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                 ? listBackupFilesMediaStore(ctx, messages)
                 : listBackupFilesLegacy(ctx, messages);
+        logListing(files.size(), messages);
 
         BackupMatch best = null;
         for (byte[] raw : files) {
@@ -1000,6 +1036,7 @@ public class LocalDeliveryBackup {
         List<byte[]> files = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                 ? listBackupFilesMediaStore(ctx, messages)
                 : listBackupFilesLegacy(ctx, messages);
+        logListing(files.size(), messages);
 
         BackupMatch best = null;
         for (byte[] raw : files) {
@@ -1036,6 +1073,7 @@ public class LocalDeliveryBackup {
         List<byte[]> files = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                 ? listBackupFilesMediaStore(ctx, messages)
                 : listBackupFilesLegacy(ctx, messages);
+        logListing(files.size(), messages);
 
         BackupMatch best = null;
         for (byte[] raw : files) {
