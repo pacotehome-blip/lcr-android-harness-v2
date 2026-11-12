@@ -278,7 +278,12 @@ final class SimplifiedDriverOverlay {
         final Runnable majReponseSupport = () -> {
             try {
                 final boolean bleue = new com.pa.lcr.lcp.storage.DemandeSupportStore(ctx).aReponseNonVue();
-                if (sMascotte != null) sMascotte.post(() -> sMascotte.setReponse(bleue));
+                if (sMascotte != null) sMascotte.post(() -> {
+                    sMascotte.setReponse(bleue);
+                    flammeBleue = bleue;
+                    if (!bleue) dernierRappelBleuMs = 0L;
+                    rappelBulleBleue();
+                });
             } catch (Throwable t) { Log.w(TAG, "flamme bleue ERR: " + t.getMessage()); }
         };
         SupportSuivi.ecouter(majReponseSupport);
@@ -881,12 +886,69 @@ final class SimplifiedDriverOverlay {
         } catch (Throwable ignored) {}
         if (!nouveau && bFlamme != null) bFlamme.setVisibility(View.GONE);
         Toast.makeText(holder.getContext(), nouveau
-                ? "Animation de la flamme activée"
-                : "Animation de la flamme désactivée — le toc-toc reste actif", Toast.LENGTH_SHORT).show();
+                ? "Grande flamme activée"
+                : "Grande flamme désactivée — le toc-toc reste actif", Toast.LENGTH_SHORT).show();
+    }
+
+    // ------------------------------------------------------------------ bulle de la petite flamme (en haut)
+    private TextView sBulleFlamme;
+    private final Runnable cacherBulleFlamme = () -> { if (sBulleFlamme != null) sBulleFlamme.setVisibility(View.GONE); };
+    private boolean flammeBleue = false;
+    private long dernierRappelBleuMs = 0L;
+
+    /** Petite bulle sous la petite flamme : « Youhoo, attention ! » quand elle danse, message de support quand elle est bleue. */
+    private void montrerBulleFlamme(final String texte, final long dureeMs) {
+        try {
+            if (sMascotte == null || holder == null) return;
+            final Context ctx = holder.getContext();
+            final float dp = ctx.getResources().getDisplayMetrics().density;
+            if (sBulleFlamme == null) {
+                sBulleFlamme = new TextView(ctx);
+                sBulleFlamme.setTextSize(13f);
+                sBulleFlamme.setTextColor(Color.parseColor("#0B2A4A"));
+                sBulleFlamme.setPadding((int) (12 * dp), (int) (8 * dp), (int) (12 * dp), (int) (8 * dp));
+                sBulleFlamme.setMaxWidth((int) (260 * dp));
+                android.graphics.drawable.GradientDrawable gd = new android.graphics.drawable.GradientDrawable();
+                gd.setColor(Color.WHITE);
+                gd.setCornerRadius(16 * dp);
+                gd.setStroke((int) (2 * dp), Color.parseColor("#185FA5"));
+                sBulleFlamme.setBackground(gd);
+                sBulleFlamme.setElevation(12 * dp);
+                sBulleFlamme.setVisibility(View.GONE);
+                holder.addView(sBulleFlamme, new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT));
+            }
+            sBulleFlamme.setText(texte);
+            sBulleFlamme.setVisibility(View.INVISIBLE);
+            sBulleFlamme.bringToFront();
+            sBulleFlamme.post(() -> {
+                try {
+                    int[] f = new int[2], h = new int[2];
+                    sMascotte.getLocationOnScreen(f);
+                    holder.getLocationOnScreen(h);
+                    float x = f[0] - h[0] + sMascotte.getWidth() - sBulleFlamme.getWidth();
+                    float y = f[1] - h[1] + sMascotte.getHeight() + 4 * dp;
+                    sBulleFlamme.setTranslationX(Math.max(4 * dp, x));
+                    sBulleFlamme.setTranslationY(y);
+                    sBulleFlamme.setVisibility(View.VISIBLE);
+                } catch (Throwable ignored) {}
+            });
+            ui.removeCallbacks(cacherBulleFlamme);
+            ui.postDelayed(cacherBulleFlamme, dureeMs);
+        } catch (Throwable t) { Log.w(TAG, "bulle flamme ERR: " + t.getMessage()); }
+    }
+
+    /** Flamme bleue : rappel de la demande de support (à l'apparition, puis au plus une fois par minute). */
+    private void rappelBulleBleue() {
+        if (!flammeBleue) return;
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (dernierRappelBleuMs != 0L && now - dernierRappelBleuMs < 60_000L) return;
+        dernierRappelBleuMs = now;
+        montrerBulleFlamme("Demande de support : une réponse est arrivée — touchez la flamme", 8000L);
     }
 
     private void balancerTrombone() {
-        if (sMascotte == null || !ValueAnimator.areAnimatorsEnabled() || !flammeAnimee()) return;
+        if (sMascotte == null || !ValueAnimator.areAnimatorsEnabled()) return;
         long now = android.os.SystemClock.elapsedRealtime();
         if (now - dernierBalanceMs < TROMBONE_PERIODE_MS) return;
         dernierBalanceMs = now;
@@ -895,6 +957,7 @@ final class SimplifiedDriverOverlay {
         ObjectAnimator a = ObjectAnimator.ofFloat(sMascotte, View.ROTATION, 0f, -16f, 14f, -10f, 8f, -4f, 0f);
         a.setDuration(900);
         a.start();
+        montrerBulleFlamme("Youhoo, attention !", 4000L);
     }
 
     private void rebondTrombone() {
@@ -1037,6 +1100,7 @@ final class SimplifiedDriverOverlay {
         // Trombone : se balance de temps en temps si le registre est déconnecté OU si le service
         // d'impression (127.0.0.1:9182) ne répond pas. Immobile sinon.
         sonderServiceImpression();
+        rappelBulleBleue();
         // Registre rétabli / livraison avancée : on oublie les échecs de détection du deeplink
         // (pas pendant une perte de liaison en livraison : le bandeau garde alors l'état de livraison vu, et l'échec du
         // diagnostic de reconnexion doit rester affiché jusqu'au retour réel du registre)
