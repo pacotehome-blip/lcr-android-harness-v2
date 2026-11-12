@@ -1462,6 +1462,31 @@ public class RegisterTabFragment extends Fragment {
                     }
                 }
             }
+            // La ligne peut venir de la BD locale (réinsérée par un passage précédent, SANS description de produit) :
+            // complète alors produit (description/code/type) et preset depuis le JSON de départ de livraison.
+            if (safetyNet != null && safetyNet.jobId != null && !safetyNet.jobId.isEmpty()
+                    && produitDescriptionJson.isEmpty() && produitCodeJson.isEmpty()) {
+                try {
+                    com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch mj = null;
+                    if (safetyNet.woNum != null && !safetyNet.woNum.isEmpty())
+                        mj = com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestRunningFlowingByWoNum(requireContext(), safetyNet.woNum);
+                    if (mj == null && serialFromArgs != null && !serialFromArgs.isEmpty())
+                        mj = com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestRunningFlowingBySerial(requireContext(), serialFromArgs, node);
+                    if (mj != null && safetyNet.jobId.equals(mj.json.optString("job_id", safetyNet.jobId))) {
+                        org.json.JSONObject pi = new org.json.JSONObject(mj.json.optString("payload_complet", "{}"));
+                        produitDescriptionJson = pi.optString("active_product_description", "");
+                        produitCodeJson = pi.optString("active_product_code", "");
+                        produitTypeJson = pi.optInt("active_product_type", -1);
+                        if (safetyNet.presetL <= 0) safetyNet.presetL = com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.optFirstDouble(
+                            pi, 0.0, "preset_requested", "preset_net_l");
+                        if (safetyNet.produitNo <= 0) safetyNet.produitNo = com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.optFirstInt(
+                            pi, 0, "active_product", "product_number");
+                        LogBus.api(node, "[RECUP-RUNNING] description produit complétée depuis le JSON — " + produitDescriptionJson);
+                    }
+                } catch (Exception eCompl) {
+                    LogBus.api(node, "[RECUP-RUNNING] complément produit depuis JSON ERR (non-bloquant): " + eCompl.getMessage());
+                }
+            }
             if (safetyNet == null || safetyNet.jobId == null || safetyNet.jobId.isEmpty()) {
                 LogBus.api(node, "[RECUP-RUNNING] aucune ligne filet de sécurité trouvée — rien à mettre à jour");
                 // Nouvel essai (permission accordée après coup, fichier apparu…) : toutes les 30 s,
