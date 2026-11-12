@@ -1251,7 +1251,7 @@ public class RegisterTabFragment extends Fragment {
         // session (recuperationRunningFlowingTentee). Best-effort —
         // aucune tentative ne bloque ni n'échoue bruyamment; si rien
         // n'est trouvé, tant pis, ce n'est pas grave (comme demandé).
-        if (st == DeliveryState.RUNNING_FLOWING && !recuperationRunningFlowingTentee
+        if ((st == DeliveryState.RUNNING_FLOWING || st == DeliveryState.RUNNING_PAUSED) && !recuperationRunningFlowingTentee
                 && !com.pa.lcrdemo.DeepLinkHandler.isPollActif()) {
             recuperationRunningFlowingTentee = true;
             safeBg(() -> tenterRecuperationRunningFlowing());
@@ -1351,7 +1351,20 @@ public class RegisterTabFragment extends Fragment {
             // wo_num si la BD locale ne trouve rien.
             if (safetyNet == null || safetyNet.jobId == null || safetyNet.jobId.isEmpty()) {
                 com.pa.lcr.lcp.storage.LocalDeliveryBackup.BackupMatch matchJson = null;
-                if (currentWoNum != null && !currentWoNum.isEmpty()) {
+                // BD vierge : le n° de vente/ticket du registre identifie sans
+                // ambiguïté le fichier JSON de départ de CETTE livraison.
+                try {
+                    String ticketReg = controller != null ? controller.api_readSaleNumberRaw() : null;
+                    if (ticketReg != null && !ticketReg.trim().isEmpty() && !"0".equals(ticketReg.trim())) {
+                        matchJson = com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestByTicketNo(
+                            requireContext(), ticketReg.trim());
+                        LogBus.api(node, "[RECUP-RUNNING] recherche JSON par ticket du registre=" + ticketReg.trim()
+                            + (matchJson != null ? " — trouvé" : " — aucun, repli wo/série"));
+                    }
+                } catch (Exception eTk) {
+                    LogBus.api(node, "[RECUP-RUNNING] lecture ticket registre ERR (non-bloquant): " + eTk.getMessage());
+                }
+                if (matchJson == null && currentWoNum != null && !currentWoNum.isEmpty()) {
                     matchJson = com.pa.lcr.lcp.storage.LocalDeliveryBackup.findLatestRunningFlowingByWoNum(
                         requireContext(), currentWoNum);
                 }
@@ -1465,6 +1478,9 @@ public class RegisterTabFragment extends Fragment {
             if (safetyNet.woNum != null && !safetyNet.woNum.isEmpty()) {
                 currentWoNum = safetyNet.woNum;
                 LogBus.api(node, "[RECUP-RUNNING] currentWoNum rempli depuis la reprise — wo=" + currentWoNum);
+                // « Déjà livré » : relu une fois (forcé) malgré la livraison active, après
+                // que la restauration auto des JSON ait eu le temps de remplir la BD.
+                ui.postDelayed(() -> { try { rafraichirCumulWo(true); } catch (Exception ignored) {} }, 2500);
             }
             // ✅ RECONSTRUIT (2 sept 2026, en revoyant tout le processus
             // de livraison comme demandé) — trouvé une vraie incohérence
@@ -1584,8 +1600,16 @@ public class RegisterTabFragment extends Fragment {
                         }
                         spnProduct.setText(label, false);
                     }
+                    // Le registre fait foi pour le preset : le JSON ne sert qu'à
+                    // combler un champ vide (jamais écraser une valeur déjà lue).
                     if (edtPreset != null && presetFraisFinal > 0) {
-                        edtPreset.setText(String.valueOf(presetFraisFinal));
+                        String presetAffiche = edtPreset.getText() != null ? edtPreset.getText().toString().trim() : "";
+                        if (presetAffiche.isEmpty() || "0".equals(presetAffiche) || "0.0".equals(presetAffiche)) {
+                            edtPreset.setText(String.valueOf(presetFraisFinal));
+                        } else {
+                            LogBus.api(node, "[RECUP-RUNNING] preset JSON=" + presetFraisFinal
+                                + " ignoré — preset du registre=" + presetAffiche + " conservé");
+                        }
                     }
                     initValidatedProductIdx = produitFraisFinal - 1;
                     // ✅ CORRIGÉ (9 sept 2026, demande Paul — capture d'écran
@@ -9365,7 +9389,8 @@ public class RegisterTabFragment extends Fragment {
                 }
                 LogBus.apiUntilChanged(node, "CUMUL-WO.retour", "[CUMUL-WO] getAllForWo(" + wo + ") a retourné " + rows.size() + " ligne(s)");
                 for (com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow r : rows) {
-                    if (!"ANNULATION".equals(r.type) && r.netL > 0) {
+                    // La livraison EN COURS (ligne filet RUNNING_FLOWING) n'est pas « déjà livrée ».
+                    if (!"ANNULATION".equals(r.type) && r.netL > 0 && !"RUNNING_FLOWING".equals(r.stopType)) {
                         totalNet   += r.netL;
                         totalGross += r.grossL;
                         count++;
