@@ -1614,16 +1614,13 @@ public class RegisterTabFragment extends Fragment {
                         }
                         spnProduct.setText(label, false);
                     }
-                    // Le registre fait foi pour le preset : le JSON ne sert qu'à
-                    // combler un champ vide (jamais écraser une valeur déjà lue).
+                    // Livraison récupérée : le preset du départ de livraison (JSON) fait foi —
+                    // la valeur affichée avant la récupération n'est qu'un défaut de l'écran.
                     if (edtPreset != null && presetFraisFinal > 0) {
-                        String presetAffiche = edtPreset.getText() != null ? edtPreset.getText().toString().trim() : "";
-                        if (presetAffiche.isEmpty() || "0".equals(presetAffiche) || "0.0".equals(presetAffiche)) {
-                            edtPreset.setText(String.valueOf(presetFraisFinal));
-                        } else {
-                            LogBus.api(node, "[RECUP-RUNNING] preset JSON=" + presetFraisFinal
-                                + " ignoré — preset du registre=" + presetAffiche + " conservé");
-                        }
+                        String avant = edtPreset.getText() != null ? edtPreset.getText().toString().trim() : "";
+                        edtPreset.setText(String.valueOf(presetFraisFinal));
+                        LogBus.api(node, "[RECUP-RUNNING] preset restauré depuis le JSON=" + presetFraisFinal
+                            + " (affiché avant: " + (avant.isEmpty() ? "vide" : avant) + ")");
                     }
                     initValidatedProductIdx = produitFraisFinal - 1;
                     // ✅ CORRIGÉ (9 sept 2026, demande Paul — capture d'écran
