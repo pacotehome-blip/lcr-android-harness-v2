@@ -331,6 +331,12 @@ final class SimplifiedDriverOverlay {
             android.app.Activity act = host.getActivity();
             if (act instanceof MainActivity) ((MainActivity) act).confirmQuitPourSimplifie();
         });
+        // Appui long sur le bouton power : redémarrer l'application (appui court = quitter)
+        if (sBtnQuitter != null) sBtnQuitter.setOnLongClickListener(v -> {
+            android.app.Activity act = host.getActivity();
+            if (act instanceof MainActivity) ((MainActivity) act).confirmRestartPourSimplifie();
+            return true;
+        });
         sBtnAdmin.setOnClickListener(v -> demanderMotDePasse());
         sTxtRegistre.setOnClickListener(v -> choisirRegistre());
     }

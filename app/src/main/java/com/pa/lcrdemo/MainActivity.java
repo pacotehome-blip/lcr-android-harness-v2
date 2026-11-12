@@ -664,9 +664,49 @@ public class MainActivity extends AppCompatActivity {
 
     private final LogBus.Listener mainLogListener = e -> scheduleMainLogRefresh();
 
+
+    private static boolean accesFichiersDemandeCeProcessus = false;
+
+    /**
+     * Les backups JSON de livraison ne sont relus après une réinstallation qu'avec « Accès à tous les
+     * fichiers ». Android retire cette permission à la désinstallation : on la redemande, une fois par
+     * lancement, tant qu'elle manque (un seul toucher, aucune action pendant une livraison).
+     */
+    private void demanderAccesFichiersSiAbsent() {
+        try {
+            if (accesFichiersDemandeCeProcessus) return;
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return;
+            if (android.os.Environment.isExternalStorageManager()) return;
+            accesFichiersDemandeCeProcessus = true;
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                try {
+                    if (isFinishing() || isDestroyed()) return;
+                    new android.app.AlertDialog.Builder(this)
+                        .setTitle("Accès aux fichiers requis")
+                        .setMessage("Pour retrouver une livraison en cours après une mise à jour ou une réinstallation, "
+                            + "Filgo-Registre doit pouvoir lire ses sauvegardes dans Téléchargements.\n\n"
+                            + "Touchez « Autoriser », puis activez « Autoriser l'accès pour gérer tous les fichiers ».")
+                        .setPositiveButton("Autoriser", (d, w) -> {
+                            try {
+                                Intent it = new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                    Uri.parse("package:" + getPackageName()));
+                                startActivity(it);
+                            } catch (Exception e1) {
+                                try { startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)); }
+                                catch (Exception ignored) {}
+                            }
+                        })
+                        .setNegativeButton("Plus tard", null)
+                        .show();
+                } catch (Exception ignored) {}
+            }, 4000L);
+        } catch (Exception ignored) {}
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        demanderAccesFichiersSiAbsent();
         setContentView(R.layout.activity_main);
         ACTIVE_INSTANCE = this;
 
@@ -978,6 +1018,36 @@ public class MainActivity extends AppCompatActivity {
         refreshGlobalLogView();
         // ✅ Rattrapage — sync tabs avec sessions connues (cas arrière-plan)
         ui.postDelayed(this::syncTabsFromActiveSessions, 400);
+        // ✅ AJOUTÉ (11 nov 2026, demande Paul — « encore l'écran blanc, on ne sait pas ce qui se passe ») — vérification
+        // 4 s après chaque retour au premier plan : on ÉCRIT dans Support l'état réel de l'écran (tabs, tab courant,
+        // sessions connues) et on répare ce qui est réparable (tab courant perdu, tabs absents alors qu'une session existe).
+        ui.postDelayed(this::verifierEcranNonVide, 4000);
+    }
+
+    private void verifierEcranNonVide() {
+        try {
+            if (isFinishing() || isDestroyed()) return;
+            int nbTabs; String courant; String cles;
+            synchronized (tabsByKey) { nbTabs = tabsByKey.size(); courant = currentTabKey; cles = tabsByKey.keySet().toString(); }
+            List<String[]> known = RegisterSessionManager.get(this).listKnownRegisters();
+            int nbSessions = known == null ? 0 : known.size();
+            boolean tabCourantValide;
+            synchronized (tabsByKey) { tabCourantValide = courant != null && tabsByKey.containsKey(courant); }
+            logUi(null, "[ÉCRAN] contrôle 4 s après retour — tabs=" + nbTabs + " " + cles + " tabCourant=" + courant
+                + (tabCourantValide ? " (valide)" : " (ABSENT)") + " sessionsConnues=" + nbSessions);
+            if (nbTabs > 0 && !tabCourantValide) {
+                String premier; synchronized (tabsByKey) { premier = tabsByKey.keySet().iterator().next(); }
+                logUi(null, "[ÉCRAN] tab courant perdu — activation de " + premier);
+                selectRegisterTabByKey(premier);
+                showRegisterFragmentByKey(premier);
+            } else if (nbTabs == 0 && nbSessions > 0) {
+                logUi(null, "[ÉCRAN] AUCUN tab alors qu'une session existe — resynchronisation");
+                syncTabsRetries = 0;
+                syncTabsFromActiveSessions();
+            }
+        } catch (Exception e) {
+            logUi(null, "[ÉCRAN] contrôle ERR: " + e.getMessage());
+        }
     }
 
     /**
@@ -997,7 +1067,19 @@ public class MainActivity extends AppCompatActivity {
     public static void resyncTabsApresConnexion() {
         final MainActivity a = ACTIVE_INSTANCE;
         if (a == null) return;
-        try { a.ui.post(() -> { a.syncTabsRetries = 0; a.syncTabsFromActiveSessions(); }); } catch (Exception ignored) {}
+        try { a.ui.post(() -> { a.syncTabsRetries = 0; a.syncTabsFromActiveSessions(); a.prevenirTabsRegistreReconnecte(); }); } catch (Exception ignored) {}
+    }
+
+    /** Dit à chaque onglet registre que le registre est revenu : le bouton vert « Lancer la livraison » se réaffiche. */
+    private void prevenirTabsRegistreReconnecte() {
+        try {
+            java.util.List<TabSpec> snapshot;
+            synchronized (tabsByKey) { snapshot = new ArrayList<>(tabsByKey.values()); }
+            for (TabSpec t : snapshot) {
+                Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + t.tabKey);
+                if (f instanceof RegisterTabFragment) ((RegisterTabFragment) f).surRegistreReconnecte();
+            }
+        } catch (Exception ignored) {}
     }
 
     private void syncTabsFromActiveSessions() {
@@ -1067,7 +1149,14 @@ public class MainActivity extends AppCompatActivity {
                 synchronized (tabsByKey) { aucunTab = tabsByKey.isEmpty(); }
                 logUi(null, "syncTabs: registre toujours sans transport après 30 s" + (aucunTab ? " et aucun tab" : "")
                     + " — lancement du diagnostic de reconnexion");
-                if (!RegisterConnectionHelper.isDiagnosticEnCours()
+                boolean livraisonActive = false;
+                try {
+                    for (String[] k : sessions.listKnownRegisters()) {
+                        if (k != null && k.length >= 3 && k[2] != null && !k[2].isEmpty() && sessions.hasRunningDeliveryOn(k[2])) livraisonActive = true;
+                    }
+                } catch (Exception ignoredLa) {}
+                // Règle Paul (12 nov 2026) : aucune action automatique sur le lien pendant une livraison.
+                if (!livraisonActive && !RegisterConnectionHelper.isDiagnosticEnCours()
                         && !com.pa.lcr.lcp.MultiRegisterApiFacadeImpl.isConnectAutoEnCours()) {
                     final String fSer = manqueSerial; final int fNod = manqueNode;
                     new Thread(() -> new RegisterConnectionHelper(MainActivity.this)
@@ -1569,6 +1658,8 @@ tabRegisters = findViewById(R.id.tabRegisters);
         });
         if (btnPingUsb != null) btnPingUsb.setOnClickListener(v -> openSelectedUsb());
         if (btnQuit != null) btnQuit.setOnClickListener(v -> confirmQuit());
+        // Appui long sur le bouton power : redémarrer l'application (appui court = quitter, inchangé).
+        if (btnQuit != null) btnQuit.setOnLongClickListener(v -> { confirmRestart(); return true; });
 
         // Tabs registres
         if (tabRegisters != null) {
@@ -5840,6 +5931,33 @@ private void scanUsb() {
     // branche SDK_INT nécessaire ici.
     /** Écran simplifié : le bouton « Quitter » (le bouton Quit de la barre du haut est caché). */
     public void confirmQuitPourSimplifie() { confirmQuit(); }
+    public void confirmRestartPourSimplifie() { confirmRestart(); }
+
+    private void confirmRestart() {
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Redémarrer l'application")
+            .setMessage("Filgo Registre va se fermer puis se rouvrir.\n\n"
+                + "Une livraison en cours sur le registre continue : elle sera reprise à la réouverture.")
+            .setPositiveButton("Redémarrer", (dialog, which) -> restartApp())
+            .setNegativeButton("Annuler", null)
+            .show();
+    }
+
+    private void restartApp() {
+        try { logUi(null, "[REDÉMARRAGE] demandé par appui long sur le bouton power"); } catch (Exception ignored) {}
+        try { stopService(new android.content.Intent(this, LcrHttpService.class)); } catch (Exception ignored) {}
+        try { UsbSession.clear(); } catch (Exception ignored) {}
+        try {
+            android.content.Intent intent = getPackageManager().getLaunchIntentForPackage(getPackageName());
+            if (intent != null) {
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+            }
+        } catch (Exception e) {
+            android.util.Log.e("MainActivity", "restartApp ERR: " + e.getMessage());
+        }
+        ui.postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 400);
+    }
 
     private void confirmQuit() {
         new androidx.appcompat.app.AlertDialog.Builder(this)
