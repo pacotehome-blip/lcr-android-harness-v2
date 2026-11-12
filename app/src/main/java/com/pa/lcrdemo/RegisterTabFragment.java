@@ -780,6 +780,7 @@ public class RegisterTabFragment extends Fragment {
     // session, voir son propre commentaire) — une seule tentative
     // suffit.
     private volatile boolean recuperationRunningFlowingTentee = false;
+    private volatile int recuperationRetries = 0;
     // ✅ AJOUTÉ (28 août 2026, même correctif) — drapeau séparé pour le
     // cas "CONNECTED avec filet de sécurité orphelin" — distinct du cas
     // RUNNING_FLOWING ci-dessus, pour que les deux puissent se déclencher
@@ -1463,6 +1464,19 @@ public class RegisterTabFragment extends Fragment {
             }
             if (safetyNet == null || safetyNet.jobId == null || safetyNet.jobId.isEmpty()) {
                 LogBus.api(node, "[RECUP-RUNNING] aucune ligne filet de sécurité trouvée — rien à mettre à jour");
+                // Nouvel essai (permission accordée après coup, fichier apparu…) : toutes les 30 s,
+                // 10 fois au plus, seulement tant que la livraison est active et que le WO est inconnu.
+                if (recuperationRetries++ < 10) {
+                    ui.postDelayed(() -> {
+                        try {
+                            DeliveryState stRetry = controller != null ? controller.getState() : null;
+                            boolean actif = stRetry == DeliveryState.RUNNING_FLOWING || stRetry == DeliveryState.RUNNING_PAUSED;
+                            if (isAdded() && actif && (currentWoNum == null || currentWoNum.isEmpty())) {
+                                safeBg(() -> tenterRecuperationRunningFlowing());
+                            }
+                        } catch (Exception ignored) {}
+                    }, 30_000L);
+                }
                 return;
             }
             // ✅ AJOUTÉ (21 sept 2026, demande Paul — "pourquoi je n'ai
