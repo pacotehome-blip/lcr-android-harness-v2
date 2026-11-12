@@ -1495,6 +1495,9 @@ public class RegisterTabFragment extends Fragment {
                 // « Déjà livré » : relu une fois (forcé) malgré la livraison active, après
                 // que la restauration auto des JSON ait eu le temps de remplir la BD.
                 ui.postDelayed(() -> { try { rafraichirCumulWo(true); } catch (Exception ignored) {} }, 2500);
+                // Internet présent : rapatrie aussi les livraisons déjà complétées de ce WO depuis Dataverse
+                // (fil séparé : ne retient jamais le fil bg partagé, ne touche ni le registre ni le débit).
+                tirerLivraisonsDuWoDepuisDataverse(currentWoNum);
             }
             // ✅ RECONSTRUIT (2 sept 2026, en revoyant tout le processus
             // de livraison comme demandé) — trouvé une vraie incohérence
@@ -1693,6 +1696,49 @@ public class RegisterTabFragment extends Fragment {
         } catch (Exception e) {
             android.util.Log.w("RegisterTabFragment", "tenterRecuperationRunningFlowing ERR: " + e.getMessage());
         }
+    }
+
+    private final java.util.concurrent.atomic.AtomicBoolean pullWoDataverseEnCours = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /** « Déjà livré » d'un WO sur BD vierge : toutes ses transactions Dataverse, puis relecture du cumul. */
+    private void tirerLivraisonsDuWoDepuisDataverse(final String woNum) {
+        if (woNum == null || woNum.isEmpty()) return;
+        final String serialId = (serialFromArgs != null && !serialFromArgs.trim().isEmpty()) ? serialFromArgs.trim() : null;
+        if (serialId == null || !pullWoDataverseEnCours.compareAndSet(false, true)) return;
+        final android.content.Context appCtx = requireContext().getApplicationContext();
+        new Thread(() -> {
+            try {
+                com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK.acquire();
+                try {
+                    com.pa.lcrdemo.auth.MsalTokenProvider msal = new com.pa.lcrdemo.auth.MsalTokenProvider(appCtx);
+                    final String[] tok = {null};
+                    final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+                    msal.init(new com.pa.lcrdemo.auth.MsalTokenProvider.InitCallback() {
+                        @Override public void onReady() {
+                            msal.acquireTokenSilentFromWorker(new com.pa.lcrdemo.auth.MsalTokenProvider.TokenCallback() {
+                                @Override public void onSuccess(String token) { tok[0] = token; latch.countDown(); }
+                                @Override public void onError(Exception e) { latch.countDown(); }
+                            });
+                        }
+                        @Override public void onError(Exception e) { latch.countDown(); }
+                    });
+                    latch.await(8, java.util.concurrent.TimeUnit.SECONDS);
+                    if (tok[0] == null) {
+                        LogBus.api(node, "[DEJA-LIVRE] Dataverse indisponible (pas de token / hors ligne) — cumul local seulement");
+                        return;
+                    }
+                    int n = com.pa.lcrdemo.dataverse.LcrDeliverySync.pullAllDeliveriesForWorkOrder(appCtx, tok[0], woNum, serialId);
+                    LogBus.api(node, "[DEJA-LIVRE] wo=" + woNum + " — " + n + " transaction(s) rapatriée(s) depuis Dataverse");
+                } finally {
+                    com.pa.lcrdemo.auth.MsalTokenProvider.MSAL_SERIAL_LOCK.release();
+                }
+                ui.post(() -> { try { rafraichirCumulWo(true); } catch (Exception ignored) {} });
+            } catch (Exception e) {
+                LogBus.api(node, "[DEJA-LIVRE] pull Dataverse ERR (non-bloquant): " + safeMsg(e));
+            } finally {
+                pullWoDataverseEnCours.set(false);
+            }
+        }, "DejaLivreDataverse").start();
     }
 
     private void runInitSequence() {
