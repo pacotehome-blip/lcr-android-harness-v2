@@ -582,6 +582,12 @@ final class SimplifiedDriverOverlay {
             titre = "Impression indisponible";
             action = "Le service d’impression ne répond pas. Touchez Démarrer l’impression, ou redémarrez la tablette.";
         }
+        // Perte en livraison : le chauffeur a touché Reconnecter et le diagnostic (3 tentatives) a échoué → on ajoute la cause
+        // trouvée ; le bouton devient « Ouvrir un ticket ». La reconnexion ne part JAMAIS toute seule pendant la livraison.
+        boolean perteDiagEchoue = cle.startsWith("PERTE") && echecForce;
+        if (perteDiagEchoue && causeDiag != null && !causeDiag.isEmpty()) {
+            action = action + "\n\nReconnexion sans succès : " + causeDiag;
+        }
         StringBuilder ctxA = new StringBuilder(titre).append(" — ").append(action);
         String niv = cle.equals(triageCle) ? triageNiveau : null;
         if (niv != null && !niv.isEmpty()) ctxA.append(" [").append(niv).append(']');
@@ -595,7 +601,8 @@ final class SimplifiedDriverOverlay {
         bTitre.setText(titre);
         bAction.setText(action);
         if (btnContacter != null) {
-            boolean ticket = ("COMM".equals(cle) || "DEEPLINK".equals(cle)) && cle.equals(triageCle) && !diagnosticN1(cle);
+            boolean ticket = perteDiagEchoue
+                    || (("COMM".equals(cle) || "DEEPLINK".equals(cle)) && cle.equals(triageCle) && !diagnosticN1(cle));
             btnContacter.setText(ticket ? "Ouvrir un ticket" : "Contacter le support");
         }
         if (btnReconnecter != null) btnReconnecter.setVisibility(erreur ? View.VISIBLE : View.GONE);
@@ -1004,14 +1011,15 @@ final class SimplifiedDriverOverlay {
         // d'impression (127.0.0.1:9182) ne répond pas. Immobile sinon.
         sonderServiceImpression();
         // Registre rétabli / livraison avancée : on oublie les échecs de détection du deeplink
-        if (etat == Etat.PRET || etat == Etat.DEBIT || etat == Etat.CONFIRM || etat == Etat.PAUSE
-                || etat == Etat.ENDING || etat == Etat.TICKET || etat == Etat.FIN) {
+        // (pas pendant une perte de liaison en livraison : le bandeau garde alors l'état de livraison vu, et l'échec du
+        // diagnostic de reconnexion doit rester affiché jusqu'au retour réel du registre)
+        if (casLiaison == 0 && (etat == Etat.PRET || etat == Etat.DEBIT || etat == Etat.CONFIRM || etat == Etat.PAUSE
+                || etat == Etat.ENDING || etat == Etat.TICKET || etat == Etat.FIN)) {
             SimplifiedUiState.reinitialiserEchecsDeepLink();
             echecForce = false; causeDiag = "";
         }
         boolean echecDeepLink = !coupe
                 && (echecForce || SimplifiedUiState.getEchecsDeepLink(woCourant()) >= SimplifiedConfig.DEEPLINK_ECHECS_AVANT_ALERTE);
-        if ((coupe || echecDeepLink) && !oublieErreur) balancerTrombone();
         // Perte de liaison PENDANT une livraison : le texte LIVE reste figé sur RUNNING_FLOWING, donc ni « DISCONNECTED » ni
         // « (OFF) » n'apparaissent. On regarde le lien lui-même (2 s de confirmation) ; la carte disparaît dès qu'il revient.
         boolean perte = casLiaison != 0;
@@ -1023,6 +1031,8 @@ final class SimplifiedDriverOverlay {
         }
         perteCas = perte ? casLiaison : 0;
         perteEnLivraison = perte;
+        // Flamme + toc-toc : registre/BT déconnecté (hors livraison) OU perte de liaison pendant la livraison.
+        if ((coupe || echecDeepLink || perte) && !oublieErreur) balancerTrombone();
         gererAssistant(coupe, echecDeepLink, etat);
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION
                 ? (coupe ? "Reconnexion au registre nécessaire" : "Connexion en cours…")
