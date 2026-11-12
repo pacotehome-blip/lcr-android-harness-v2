@@ -584,6 +584,12 @@ public class RegisterTabFragment extends Fragment {
     private volatile int liaisonPerdueCas = 0;        // 0 ok ; 1 BT connecté mais registre muet ; 2 BT du registre (Parani) injoignable
     private volatile boolean livraisonVue = false;    // une livraison RUNNING_FLOWING/PAUSED a été vue et n'est pas terminée
     private long liaisonPerdueDepuisMs = 0L;
+    // Dernier signe de vie du registre reçu par le tab : chaque lecture net/gross réussie du cycle RUNNING_FLOWING (onLiveQty) et
+    // le battement de cœur de 2 s (onLiveStatus) ne partent QUE si le registre vient de répondre. En RUNNING_FLOWING, ni nouveau
+    // signe de vie ni confirmation de pause = lecture impossible = registre ou BT perdu.
+    private volatile long dernierSignalVivantMs = 0L;
+    private com.pa.lcr.lcp.DeliveryState etatPrecedentLiaison = null;
+    private static final long SILENCE_FLOWING_MS = 8000L;
     private volatile boolean surveillanceLiaisonActive = false;
     private final Runnable surveillanceLiaisonRun = new Runnable() {
         @Override public void run() {
@@ -2791,6 +2797,7 @@ public class RegisterTabFragment extends Fragment {
 
         @Override
         public void onLiveQty(double net, double gross) {
+            dernierSignalVivantMs = android.os.SystemClock.elapsedRealtime();
             // ✅ CORRIGÉ (27 août 2026, demande Paul — "je veux le voir dans
             // le logcat pas ailleurs") — android.util.Log seulement
             // (logcat), pas LogBus (Support). Capturé au moment du vrai
@@ -2827,6 +2834,7 @@ public class RegisterTabFragment extends Fragment {
 
         @Override
         public void onLiveStatus(String liveText) {
+            dernierSignalVivantMs = android.os.SystemClock.elapsedRealtime();
             ui.post(() -> {
                 if (!isAdded() || getView() == null) return;
                 // ✅ AJOUTÉ (14 août 2026, demande Paul — "valider les
@@ -3733,7 +3741,7 @@ public class RegisterTabFragment extends Fragment {
     private String texteLiaisonPerdue(int cas) {
         return cas == 1
             ? "LIVE: ⚠️ Bluetooth connecté mais le registre ne répond pas — le dernier état connu n'est plus fiable — reconnect requis"
-            : "LIVE: ⚠️ Bluetooth du registre (Parani) injoignable — le dernier état connu n'est plus fiable — reconnect requis";
+            : "LIVE: ⚠️ Bluetooth du registre injoignable";
     }
 
     /**
@@ -3752,6 +3760,16 @@ public class RegisterTabFragment extends Fragment {
         } else if (st != null && st != com.pa.lcr.lcp.DeliveryState.DISCONNECTED && st != com.pa.lcr.lcp.DeliveryState.ERROR) {
             livraisonVue = false;   // ENDING, ENDED, IDLE, CONNECTED… : plus de livraison en cours
         }
+        long nowMs = android.os.SystemClock.elapsedRealtime();
+        boolean flowingMaintenant = st == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING;
+        boolean flowingAvant = etatPrecedentLiaison == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING;
+        etatPrecedentLiaison = st;
+        // Le chrono de silence repart à l'entrée en RUNNING_FLOWING, pendant un scan/impression (le battement s'arrête alors
+        // légitimement) et quand le tab n'est pas au premier plan (son écouteur est détaché : il ne reçoit rien).
+        if ((flowingMaintenant && !flowingAvant) || !isResumed()
+                || (dc != null && (dc.scanInProgress || dc.printInProgress))) {
+            dernierSignalVivantMs = nowMs;
+        }
         int brut = 0;
         if (livraisonVue) {
             try {
@@ -3761,10 +3779,13 @@ public class RegisterTabFragment extends Fragment {
                         .get(requireContext().getApplicationContext()).getByKey(k.trim());
                     if (io == null || !io.isOpen()) brut = 2;
                     else if (st == com.pa.lcr.lcp.DeliveryState.DISCONNECTED) brut = 1;
+                    // Lien ouvert, état encore RUNNING_FLOWING (pause NON confirmée) mais plus aucune lecture du registre :
+                    // il ne répond plus au cycle. En pause confirmée (RUNNING_PAUSED) ce critère ne s'applique jamais.
+                    else if (flowingMaintenant && nowMs - dernierSignalVivantMs > SILENCE_FLOWING_MS) brut = 1;
                 }
             } catch (Throwable ignoredLk) {}
         }
-        long now = android.os.SystemClock.elapsedRealtime();
+        long now = nowMs;
         int nouveau;
         if (brut == 0) {
             liaisonPerdueDepuisMs = 0L;
