@@ -38,6 +38,27 @@ import java.util.concurrent.ExecutorService;
  */
 public class DeepLinkHandler {
 
+
+    /**
+     * Après 5 échecs de job/continue : si l'état réel du job est RUNNING_FLOWING/RUNNING_PAUSED, la livraison tourne déjà
+     * (la liaison est revenue entre-temps, ex. reprise après perte de liaison) — l'échec n'en est pas un.
+     */
+    private boolean registreDejaEnLivraisonApresEchec(String jobId, String origine) {
+        try {
+            MultiRegisterApiFacadeImpl f = new MultiRegisterApiFacadeImpl(activity);
+            com.pa.lcr.lcp.ApiResult r = f.api_deliveryJobGet(jobId);
+            String st = (r != null && r.data != null) ? r.data.optString("state", "") : "";
+            boolean enLivraison = "RUNNING_FLOWING".equals(st) || "RUNNING_PAUSED".equals(st);
+            if (enLivraison) {
+                try { com.pa.lcr.lcp.log.LogBus.api(0, "[CONTINUE-IGNORÉ] " + origine + " : état réel=" + st
+                    + " — livraison déjà en cours, aucun message d'échec ni écriture d'erreur"); } catch (Exception ignored) {}
+            }
+            return enLivraison;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static final String TAG = "LCRDEMO_DEEPLINK";
     private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
@@ -3400,7 +3421,10 @@ public class DeepLinkHandler {
                                     android.util.Log.w(TAG, "job/continue: stabilisation sale_number ERR (non-bloquant): " + eStabOuter.getMessage());
                                 }
                             }
-                            if (!continueOk) {
+                            if (!continueOk && registreDejaEnLivraisonApresEchec(jobId, "continueOk")) {
+                            // Le registre est EN livraison (reprise après perte de liaison) : le message de perte appartient au tab.
+                            // Ni toast, ni ouverture de Configure, ni ligne d'erreur CONTINUE_FAILED poussée à Dataverse.
+                        } else if (!continueOk) {
                                 android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
 
                                 // ✅ Détecter changement de ticket (impression entre-temps)
@@ -3517,7 +3541,10 @@ public class DeepLinkHandler {
                                 break;
                             }
                         }
-                        if (!continueOk2) {
+                        if (!continueOk2 && registreDejaEnLivraisonApresEchec(jobId, "continueOk2")) {
+                            // Le registre est EN livraison (reprise après perte de liaison) : le message de perte appartient au tab.
+                            // Ni toast, ni ouverture de Configure, ni ligne d'erreur CONTINUE_FAILED poussée à Dataverse.
+                        } else if (!continueOk2) {
                             android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
 
                             // ✅ Détecter changement de ticket
