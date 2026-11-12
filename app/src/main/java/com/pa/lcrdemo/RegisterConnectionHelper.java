@@ -551,16 +551,14 @@ public class RegisterConnectionHelper {
         final boolean[] annule = {false};
         final android.app.AlertDialog.Builder dlgBuilder =
             new android.app.AlertDialog.Builder(activity);
-        dlgBuilder.setTitle("🔄 Connexion au registre...");
         dlgBuilder.setCancelable(false);
         dlgBuilder.setNegativeButton("Annuler", (d, w) -> {
             annule[0] = true;
             Log.w(TAG, "Diagnostic annulé par l'utilisateur");
         });
-        final android.widget.TextView txtProgress = new android.widget.TextView(activity);
-        txtProgress.setPadding(40, 20, 40, 20);
-        txtProgress.setTextSize(13f);
-        dlgBuilder.setView(txtProgress);
+        // Habillage moderne (12 nov 2026) — DiagnosticUi : mêmes données, présentation seulement.
+        final DiagnosticUi.Progression prog = new DiagnosticUi.Progression(activity);
+        dlgBuilder.setView(prog.racine());
         final android.app.AlertDialog[] dlg = {null};
         final Object dlgLock = new Object();
         activity.runOnUiThread(() -> quandChauffeurLibre(() -> {
@@ -570,6 +568,7 @@ public class RegisterConnectionHelper {
                 return;
             }
             dlg[0] = dlgBuilder.show();
+            DiagnosticUi.styler(dlg[0]);
             enregistrerDialogueDiag(dlg[0]);
             synchronized (dlgLock) { dlgLock.notifyAll(); }
         }));
@@ -579,13 +578,7 @@ public class RegisterConnectionHelper {
 
         Runnable updateDlg = () -> activity.runOnUiThread(() -> {
             if (dlg[0] == null || !dlg[0].isShowing()) return;
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < 4; i++) {
-                if (etapes[i] == null) break;
-                String icon = etapesOk[i] ? "✅" : (i == getPremierEchec(etapesOk) && !erreurDetail[0].isEmpty() ? "❌" : "🔄");
-                sb.append(icon).append(" Étape ").append(i+1).append("/4 — ").append(etapes[i]).append("\n");
-            }
-            txtProgress.setText(sb.toString().trim());
+            prog.maj(etapes, etapesOk, !erreurDetail[0].isEmpty() ? getPremierEchec(etapesOk) : -1);
         });
 
         // ✅ AJOUTÉ (10 nov 2026, demande Paul — "après deux minutes à se connecter au registre qui tourne encore en
@@ -1182,10 +1175,9 @@ public class RegisterConnectionHelper {
                 Log.w(TAG, "alerte flamme non posée (écran d'échec habituel): " + e.getMessage());
             }
             final android.app.AlertDialog.Builder dlgEchecB = new android.app.AlertDialog.Builder(activity)
-                .setTitle("⛔ Registre non joignable  ✕")
-                .setMessage(resumeAffiche)
+                .setView(DiagnosticUi.vueEchec(activity, etapes, etapesOk, erreur))
                 .setCancelable(true)
-                .setPositiveButton("🔄 Réessayer", (d, w) -> {
+                .setPositiveButton("Réessayer", (d, w) -> {
                     d.dismiss();
                     // ✅ CORRIGÉ (25 août 2026, demande Paul — "on corrige
                     // l'écran diagnostique... réessayer fait le même
@@ -1223,7 +1215,7 @@ public class RegisterConnectionHelper {
                         });
                     }).start();
                 })
-                .setNeutralButton("🔁 Redémarrer APK", (d, w) -> {
+                .setNeutralButton("Redémarrer l’app", (d, w) -> {
                     try {
                         android.content.Intent intent = activity.getPackageManager()
                             .getLaunchIntentForPackage(activity.getPackageName());
@@ -1237,27 +1229,12 @@ public class RegisterConnectionHelper {
                         Log.e(TAG, "Restart ERR: " + e.getMessage());
                         try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterConnectionHelper.restart", e); } catch (Exception ignored) {}
                     }
-                })
-                .setNegativeButton("📧 Envoyer courriel", (d, w) -> {
-                    try {
-                        android.content.Intent email = new android.content.Intent(
-                            android.content.Intent.ACTION_SEND);
-                        email.setType("message/rfc822");
-                        email.putExtra(android.content.Intent.EXTRA_EMAIL,
-                            new String[]{SUPPORT_EMAIL});
-                        email.putExtra(android.content.Intent.EXTRA_SUBJECT, sujet);
-                        email.putExtra(android.content.Intent.EXTRA_TEXT, corps);
-                        activity.startActivity(android.content.Intent.createChooser(
-                            email, "Envoyer courriel support"));
-                    } catch (Exception e) {
-                        Log.e(TAG, "Email ERR: " + e.getMessage());
-                        try { com.pa.lcr.lcp.log.LogBus.err(node, "RegisterConnectionHelper.emailSupport", e); } catch (Exception ignored) {}
-                    }
-                    d.dismiss();
                 });
             quandChauffeurLibre(() -> {
                 if (CONNECTE_DEPUIS.containsKey(node) || activity.isFinishing() || activity.isDestroyed()) return;
-                enregistrerDialogueDiag(dlgEchecB.show());
+                android.app.AlertDialog dEchec = dlgEchecB.show();
+                DiagnosticUi.styler(dEchec);
+                enregistrerDialogueDiag(dEchec);
             });
         });
     }
