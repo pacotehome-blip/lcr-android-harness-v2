@@ -705,6 +705,16 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // valeur figée.
     private static final long INACTIVE_CONFIRM_MS_JOB = 2000L;
     private volatile boolean sawFlowOnOnce = false;
+    // ✅ 12 nov 2026 (demande Paul — vidéo 11h47 : après un redémarrage de l'apk ou une reconnexion en plein RUNNING_FLOWING, le tab
+    // alternait sans fin FLOW ON / « Flow OFF - waiting progression », net figé, sans jamais passer en pause) — une NOUVELLE instance
+    // n'a jamais vu de débit (sawFlowOnOnce=false) : la pause n'était alors jamais confirmée. Le registre sait pourtant le dire :
+    // livraison active (bit 0x0008), débit inactif (bit 0x0004) et volume déjà livré > 0. Après REPRISE_PAUSE_READS lectures
+    // consécutives de cet état (et au moins REPRISE_PAUSE_MIN_MS), la pause est confirmée par le chemin normal. Un nouveau départ
+    // (volume 0) n'est jamais concerné.
+    private int reprisePauseReads = 0;
+    private long reprisePauseSinceMs = 0L;
+    private static final int  REPRISE_PAUSE_READS  = 3;
+    private static final long REPRISE_PAUSE_MIN_MS = 4000L;
     private volatile long flowOffStartMs = 0L;
     private volatile long lastCountsChangeMs = 0L;
     private volatile int lastGrossRaw = -1;
@@ -2029,6 +2039,7 @@ try {
 
         flowOffStable = false;
         sawFlowOnOnce = false;
+        reprisePauseReads = 0; reprisePauseSinceMs = 0L;
         flowOffStartMs = 0L;
         lastCountsChangeMs = 0L;
         lastGrossRaw = -1;
@@ -2414,8 +2425,13 @@ try {
                         // superviseur pour cet état précis, une seule
                         // formulation possible, plus d'alternance ni de
                         // désactivation intermittente du bouton.
+                        // 12 nov 2026 : « FLOW ON » ne se déduit plus du seul volume > 0 tant que CETTE instance n'a pas vu de débit
+                        // (reprise après redémarrage/reconnexion) — c'est le bit « débit actif » du registre qui décide. Avant, le
+                        // battement disait FLOW ON (volume > 0) pendant que le superviseur disait « waiting progression » : le LIVE
+                        // alternait sans fin et le bouton Terminer clignotait.
+                        boolean volumeLivre = net > 0.0001 || gross > 0.0001;
                         String etat = "LIVE: " + state.name()
-                                + (net > 0.0001 || gross > 0.0001
+                                + ((sawFlowOnOnce && volumeLivre)
                                     ? " (FLOW ON)"
                                     : " (Flow OFF - waiting progression)");
                         listener.onLiveStatus(etat);
@@ -2505,6 +2521,7 @@ try {
                     lastNetRaw = -1;
                     flowOffStable = false;
                     sawFlowOnOnce = false;
+                    reprisePauseReads = 0; reprisePauseSinceMs = 0L;
                     flowOffStartMs = 0L;
                     lastCountsChangeMs = 0L;
                     continueGraceUntilMs = 0L;
@@ -2572,6 +2589,24 @@ try {
                     }
                     setState(DeliveryState.RUNNING_FLOWING);
                     return;
+                }
+
+                if (!sawFlowOnOnce) {
+                    // Le bit « débit actif » du registre reste levé tant que la livraison est en RUN (vu : dc=0x012D vanne fermée) :
+                    // il ne prouve pas un débit physique. Seule preuve fiable : volume > 0 et compteurs immobiles.
+                    if (netL > 0.0 || grossL > 0.0) {
+                        if (reprisePauseSinceMs == 0L) reprisePauseSinceMs = t;
+                        reprisePauseReads++;
+                        if (reprisePauseReads >= REPRISE_PAUSE_READS && t - reprisePauseSinceMs >= REPRISE_PAUSE_MIN_MS) {
+                            sawFlowOnOnce = true;                            // le registre dit : livraison active, volume > 0, pas de débit
+                            lastCountsChangeMs = t - NO_FLOW_CONFIRM_MS;     // → pause confirmée tout de suite par le chemin normal ci-dessous
+                            try { emitLog("[REPRISE-PAUSE] livraison reprise sans débit (registre : active, débit inactif, net="
+                                + String.format(java.util.Locale.ROOT, "%.1f", netL) + "L) — " + reprisePauseReads
+                                + " lectures concordantes → RUNNING_PAUSED (le débit rouvert reprend la livraison)"); } catch (Throwable ignoredLg) {}
+                        }
+                    } else {
+                        reprisePauseReads = 0; reprisePauseSinceMs = 0L;
+                    }
                 }
 
                 if (lastCountsChangeMs == 0L) lastCountsChangeMs = t;
