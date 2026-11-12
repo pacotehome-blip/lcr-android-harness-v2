@@ -840,12 +840,6 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // ne lit plus jamais net/gross à un instant arbitraire —
     // tenterFinalisationLivraisonOrpheline() reprend maintenant le vrai
     // suivi (pollJobUntilDone). Plus jamais appelées nulle part.
-    /** Âge (ms) du dernier tick live reçu du registre, ou -1 si aucun. Sert à détecter une liaison muette en livraison. */
-    public long getLastTickAgeMs() {
-        LastTick t = lastTick;
-        return t != null ? Math.max(0L, System.currentTimeMillis() - t.tsMs) : -1L;
-    }
-
     public double getLastTickNet() {
         LastTick t = lastTick;
         return t != null ? t.net : 0.0;
@@ -3616,14 +3610,16 @@ try {
             // (2) si le cycle live a répondu il y a moins de 5 s pendant une livraison, le registre est vivant : on ne déclare
             // pas de déconnexion, on resynchronise seulement.
             long nowRt = System.currentTimeMillis();
-            if (nowRt - lastRetryishTimeoutMs > 15_000L) consecutiveRetryishTimeouts = 0;
+            boolean enLivraison = state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED;
+            // Fenêtre de 15 s SEULEMENT pendant une livraison : hors livraison les lectures de statut (keep-alive jusqu'à 60 s)
+            // doivent continuer à s'additionner pour déclarer une vraie déconnexion (comportement d'avant).
+            if (enLivraison && nowRt - lastRetryishTimeoutMs > 15_000L) consecutiveRetryishTimeouts = 0;
             lastRetryishTimeoutMs = nowRt;
             consecutiveRetryishTimeouts++;
             android.util.Log.w("DeliveryController", "handleIoException [" + ctx + "]: retryish (\"" + msg
                     + "\"), consécutifs=" + consecutiveRetryishTimeouts + "/" + MAX_CONSECUTIVE_RETRYISH_TIMEOUTS);
             if (consecutiveRetryishTimeouts >= MAX_CONSECUTIVE_RETRYISH_TIMEOUTS) {
                 long ageCycle = nowRt - lastCycleOkMs;
-                boolean enLivraison = state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED;
                 boolean cycleVivant = enLivraison && lastCycleOkMs > 0L && ageCycle < 5_000L;
                 if (cycleVivant) {
                     consecutiveRetryishTimeouts = 0;

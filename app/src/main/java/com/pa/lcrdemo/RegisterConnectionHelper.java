@@ -948,34 +948,11 @@ public class RegisterConnectionHelper {
         // faire un probe LCP bloquant (opGetField jusqu'à 3000ms) en tenant ce verrou,
         // le thread UI se gelait en silence — sans exception, sans log — et la relance
         // de la livraison n'avait jamais lieu.
-        // ✅ AJOUTÉ (11 nov 2026, demande Paul — « après une perte de communication, un diagnostic, et le registre revient,
-        // le processus de livraison continue sans intervention ») — un diagnostic lancé sans contexte de livraison
-        // (supervision automatique, flamme…) reprend le contexte de la livraison EN ATTENTE (ActiveDeliveryStore, posée par
-        // le vrai deep link) pour la relancer exactement comme le deep link. Seulement statut PENDING du MÊME registre ;
-        // le garde « déjà livré » et le garde « livraison réellement active » plus bas restent en vigueur.
+        // (11-12 nov 2026, demande Paul — « je ne veux rien briser sur le processus de livraison ») : aucune reprise
+        // automatique depuis la base. Seul le contexte transmis par le deep link (ou le bouton vert « Lancer livraison »)
+        // peut relancer une livraison ; une livraison déjà active sur le registre se rétablit via requestStatus() plus bas.
         String woNumX = woNum, woIdX = woIdGuid, produitX = produit, presetX = presetStr, macX = mac;
         com.pa.lcrdemo.DeepLinkHandler dlhX = deepLinkHandler;
-        try {
-            if (woNumX == null || woNumX.isEmpty() || dlhX == null) {
-                com.pa.lcr.lcp.storage.ActiveDeliveryStore.ActiveDelivery adR =
-                    new com.pa.lcr.lcp.storage.ActiveDeliveryStore(activity).load();
-                boolean memeRegistre = adR != null && (adR.serialId == null || adR.serialId.isEmpty()
-                    || fSerialIdFinal.isEmpty() || adR.serialId.equalsIgnoreCase(fSerialIdFinal));
-                if (adR != null && memeRegistre && "PENDING".equals(adR.status)
-                        && adR.woNum != null && !adR.woNum.isEmpty()) {
-                    woNumX = adR.woNum;
-                    woIdX = adR.woIdGuid != null ? adR.woIdGuid : "";
-                    produitX = String.valueOf(adR.produit);
-                    presetX = String.valueOf((int) adR.preset);
-                    if ((macX == null || macX.isEmpty()) && adR.mac != null) macX = adR.mac;
-                    if (dlhX == null) dlhX = activity.getDeepLinkHandler();
-                    try { com.pa.lcr.lcp.log.LogBus.api(fNodeFinal, "[REPRISE-APRES-PERTE] contexte repris de la livraison en attente wo="
-                        + woNumX + " — la livraison continue sans intervention si le registre est revenu"); } catch (Exception ignoredLb) {}
-                }
-            }
-        } catch (Exception eCtx) {
-            Log.w(TAG, "contexte livraison en attente non repris: " + eCtx.getMessage());
-        }
         final String woNumR = woNumX, woIdR = woIdX, produitR = produitX, presetR = presetX, macR = macX;
         final com.pa.lcrdemo.DeepLinkHandler dlhR = dlhX;
         new Thread(() -> {
