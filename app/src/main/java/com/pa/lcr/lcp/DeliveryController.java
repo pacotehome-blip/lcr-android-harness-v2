@@ -736,6 +736,7 @@ private void reproEvent(String level, String type, String message, JSONObject da
     // boucle indéfiniment — sans compteur, l'app ne pouvait jamais s'en
     // rendre compte elle-même.
     private volatile int consecutiveRetryishTimeouts = 0;
+    private volatile long lastRetryishTimeoutMs = 0L;   // ✅ 12 nov 2026 — fenêtre de comptage des timeouts consécutifs
     private static final int MAX_CONSECUTIVE_RETRYISH_TIMEOUTS = 5;
 
     // Pas de chevauchement LIVE
@@ -1224,6 +1225,8 @@ private void reproEvent(String level, String type, String message, JSONObject da
      * Utilise cachedDigits existant sans appeler ensureDigits().
      * @return double[]{net, gross} en litres, ou {-1,-1} si erreur
      */
+    /** Dernière réponse réussie du registre au cycle net/gross (lecture #44/#45). lastTick ne bouge pas quand les valeurs sont stables (pause). */
+    private volatile long lastCycleOkMs = 0L;
     public double[] readNetGrossFromHardware() {
         try {
             int digits = (cachedDigits >= 0) ? cachedDigits : 1;
@@ -1232,6 +1235,7 @@ private void reproEvent(String level, String type, String message, JSONObject da
             int n = beI32(withLcpLock(() -> link.opGetField(FIELD_NET_COUNT)));
             double netL   = n / scale;
             double grossL = g / scale;
+            lastCycleOkMs = System.currentTimeMillis();   // ✅ 12 nov 2026 — le registre a répondu au cycle net/gross
             return new double[]{netL, grossL};
         } catch (Exception e) {
             return new double[]{-1.0, -1.0};
@@ -3603,10 +3607,32 @@ try {
             // ✅ FIX : escalade vers une vraie déconnexion après trop
             // d'échecs consécutifs — sinon softResync() se répète à l'infini
             // sur une déconnexion physique réelle, sans jamais notifier l'UI.
+            // ✅ FIX (12 nov 2026, demande Paul — « le registre ne répond qu'aux commandes du cycle RUNNING_FLOWING ; en pause
+            // je ne dois voir ni flamme ni message ») — preuve dans le code : ce compteur n'était JAMAIS remis à zéro après une
+            // réponse réussie (seulement sur une erreur d'un autre type). Les timeouts de commandes HORS cycle (statut machine,
+            // date/heure, relectures de champ…) s'additionnaient donc pendant toute la livraison : au 5e, au bout de minutes, on
+            // déclarait une fausse déconnexion (DISCONNECTED → flamme « Communication perdue ») alors que le registre répondait
+            // très bien au cycle net/gross. Maintenant : (1) les timeouts ne s'additionnent que dans une fenêtre de 15 s ;
+            // (2) si le cycle live a répondu il y a moins de 5 s pendant une livraison, le registre est vivant : on ne déclare
+            // pas de déconnexion, on resynchronise seulement.
+            long nowRt = System.currentTimeMillis();
+            if (nowRt - lastRetryishTimeoutMs > 15_000L) consecutiveRetryishTimeouts = 0;
+            lastRetryishTimeoutMs = nowRt;
             consecutiveRetryishTimeouts++;
             android.util.Log.w("DeliveryController", "handleIoException [" + ctx + "]: retryish (\"" + msg
                     + "\"), consécutifs=" + consecutiveRetryishTimeouts + "/" + MAX_CONSECUTIVE_RETRYISH_TIMEOUTS);
             if (consecutiveRetryishTimeouts >= MAX_CONSECUTIVE_RETRYISH_TIMEOUTS) {
+                long ageCycle = nowRt - lastCycleOkMs;
+                boolean enLivraison = state == DeliveryState.RUNNING_FLOWING || state == DeliveryState.RUNNING_PAUSED;
+                boolean cycleVivant = enLivraison && lastCycleOkMs > 0L && ageCycle < 5_000L;
+                if (cycleVivant) {
+                    consecutiveRetryishTimeouts = 0;
+                    try { com.pa.lcr.lcp.log.LogBus.api(resolveLcpNode(), "[TIMEOUT-HORS-CYCLE] " + MAX_CONSECUTIVE_RETRYISH_TIMEOUTS
+                        + " timeouts (" + ctx + ") mais le cycle " + state + " répond (dernière lecture net/gross il y a " + ageCycle
+                        + " ms) — registre vivant, aucune déconnexion déclarée"); } catch (Exception ignoredLb) {}
+                    softResync("timeout/" + ctx);
+                    return;
+                }
                 android.util.Log.w("DeliveryController", "handleIoException: seuil atteint — escalade vers shutdown(true) (vraie déconnexion)");
                 consecutiveRetryishTimeouts = 0;
                 shutdown(true);
