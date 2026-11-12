@@ -50,8 +50,10 @@ final class DiagnosticUi {
         return repli;
     }
 
-    private static int texteprincipal(Context c) { return couleurTheme(c, android.R.attr.textColorPrimary, Color.parseColor("#1B1B1B")); }
-    private static int textesecondaire(Context c) { return couleurTheme(c, android.R.attr.textColorSecondary, Color.parseColor("#5F6368")); }
+    // Même format que la carte de la flamme (SimplifiedDriverOverlay.bCarte) : fond blanc, coins 16 dp, contour bleu 2 dp,
+    // titre #0B2A4A, texte #33475B — identiques quel que soit le thème de la tablette.
+    private static int texteprincipal(Context c) { return Color.parseColor("#0B2A4A"); }
+    private static int textesecondaire(Context c) { return Color.parseColor("#33475B"); }
 
     private static GradientDrawable forme(int fond, float rayonDp, Context c) {
         GradientDrawable g = new GradientDrawable();
@@ -131,7 +133,7 @@ final class DiagnosticUi {
             ctx = c;
             racine = new LinearLayout(c);
             racine.setOrientation(LinearLayout.VERTICAL);
-            racine.setPadding(dp(c, 24), dp(c, 22), dp(c, 24), dp(c, 8));
+            racine.setPadding(dp(c, 24), dp(c, 20), dp(c, 24), dp(c, 6));
 
             LinearLayout entete = new LinearLayout(c);
             entete.setOrientation(LinearLayout.HORIZONTAL);
@@ -149,7 +151,7 @@ final class DiagnosticUi {
             LinearLayout titres = new LinearLayout(c);
             titres.setOrientation(LinearLayout.VERTICAL);
             titres.setPadding(dp(c, 14), 0, 0, 0);
-            titres.addView(texte(c, "Connexion au registre", 19, texteprincipal(c), true));
+            titres.addView(texte(c, "Connexion au registre", 18, texteprincipal(c), true));
             titres.addView(texte(c, "Vérification du Bluetooth et du registre…", 13, textesecondaire(c), false));
             entete.addView(titres, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
             racine.addView(entete);
@@ -177,7 +179,7 @@ final class DiagnosticUi {
     static View vueEchec(Context c, String[] etapes, boolean[] ok, String erreur) {
         LinearLayout racine = new LinearLayout(c);
         racine.setOrientation(LinearLayout.VERTICAL);
-        racine.setPadding(dp(c, 24), dp(c, 22), dp(c, 24), dp(c, 8));
+        racine.setPadding(dp(c, 24), dp(c, 20), dp(c, 24), dp(c, 6));
 
         LinearLayout entete = new LinearLayout(c);
         entete.setOrientation(LinearLayout.HORIZONTAL);
@@ -196,7 +198,7 @@ final class DiagnosticUi {
         LinearLayout titres = new LinearLayout(c);
         titres.setOrientation(LinearLayout.VERTICAL);
         titres.setPadding(dp(c, 14), 0, 0, 0);
-        titres.addView(texte(c, "Registre non joignable", 19, texteprincipal(c), true));
+        titres.addView(texte(c, "Registre non joignable", 18, texteprincipal(c), true));
         titres.addView(texte(c, "La connexion n’a pas pu être rétablie.", 13, textesecondaire(c), false));
         entete.addView(titres, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         racine.addView(entete);
@@ -245,9 +247,9 @@ final class DiagnosticUi {
         try {
             Context c = d.getContext();
             if (d.getWindow() != null) {
-                int fond = couleurTheme(c, android.R.attr.colorBackground, Color.WHITE);
-                GradientDrawable g = forme(fond, 22, c);
-                d.getWindow().setBackgroundDrawable(new InsetDrawable(g, dp(c, 12)));
+                GradientDrawable g = forme(Color.WHITE, 16, c);
+                g.setStroke(dp(c, 2), BLEU);
+                d.getWindow().setBackgroundDrawable(new InsetDrawable(g, dp(c, 10)));
             }
             int[] boutons = {AlertDialog.BUTTON_POSITIVE, AlertDialog.BUTTON_NEUTRAL, AlertDialog.BUTTON_NEGATIVE};
             for (int id : boutons) {
