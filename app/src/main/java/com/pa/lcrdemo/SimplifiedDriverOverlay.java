@@ -321,6 +321,7 @@ final class SimplifiedDriverOverlay {
         sPanelWo.setOnClickListener(v -> cliquer(panelWoCumul));
         if (sBtnSupport != null) sBtnSupport.setOnClickListener(v -> { rebondTrombone(); ouvrirSupport(); });
         sMascotte.setOnClickListener(v -> clicMascotte());
+        sMascotte.setOnLongClickListener(v -> { basculerFlammeAnimee(); return true; });
         if (sBtnQuitter != null) sBtnQuitter.setOnClickListener(v -> {
             android.app.Activity act = host.getActivity();
             if (act instanceof MainActivity) ((MainActivity) act).confirmQuitPourSimplifie();
@@ -607,7 +608,7 @@ final class SimplifiedDriverOverlay {
         }
         if (btnReconnecter != null) btnReconnecter.setVisibility(erreur ? View.VISIBLE : View.GONE);
         if (btnPrint != null) btnPrint.setVisibility("PRINT".equals(cle) ? View.VISIBLE : View.GONE);
-        bFlamme.setVisibility(erreur ? View.VISIBLE : View.GONE);
+        bFlamme.setVisibility(erreur && flammeAnimee() ? View.VISIBLE : View.GONE);
         boolean nouvelle = !bulleVisible;
         afficherBulle();
         if (!erreur) {                 // simple avertissement : carte directe, sans mascotte, sans son
@@ -628,6 +629,11 @@ final class SimplifiedDriverOverlay {
     /** Elle cogne deux fois dans la vitre (toc-toc), explose en étincelles, se reforme inquiète ; ENSUITE la carte d'erreur apparaît. */
     private void cognerEcran(final boolean premiere) {
         if (bFlamme == null || !bulleVisible) return;
+        if (!flammeAnimee()) {                      // animation coupée : carte tout de suite, le toc-toc sonore reste
+            montrerCarte(true);
+            if (SimplifiedConfig.SON_ALERTE_ACTIF) jouerToc();
+            return;
+        }
         if (premiere) montrerCarte(false);          // première fois : le message n'apparaît qu'après l'explosion
         bFlamme.setInquiet(false);
         final boolean anime = ValueAnimator.areAnimatorsEnabled();
@@ -858,8 +864,29 @@ final class SimplifiedDriverOverlay {
         }, "simplifie-sonde-print").start();
     }
 
+    // Animation de la flamme (mascotte qui cogne/explose + balancement) : désactivable par appui long sur la petite flamme du haut.
+    // Le « toc-toc » sonore et la carte d'erreur restent actifs dans tous les cas.
+    private boolean flammeAnimee() {
+        try {
+            return holder.getContext().getSharedPreferences("simplifie_prefs", Context.MODE_PRIVATE)
+                    .getBoolean("flamme_animee", true);
+        } catch (Throwable t) { return true; }
+    }
+
+    private void basculerFlammeAnimee() {
+        boolean nouveau = !flammeAnimee();
+        try {
+            holder.getContext().getSharedPreferences("simplifie_prefs", Context.MODE_PRIVATE)
+                    .edit().putBoolean("flamme_animee", nouveau).apply();
+        } catch (Throwable ignored) {}
+        if (!nouveau && bFlamme != null) bFlamme.setVisibility(View.GONE);
+        Toast.makeText(holder.getContext(), nouveau
+                ? "Animation de la flamme activée"
+                : "Animation de la flamme désactivée — le toc-toc reste actif", Toast.LENGTH_SHORT).show();
+    }
+
     private void balancerTrombone() {
-        if (sMascotte == null || !ValueAnimator.areAnimatorsEnabled()) return;
+        if (sMascotte == null || !ValueAnimator.areAnimatorsEnabled() || !flammeAnimee()) return;
         long now = android.os.SystemClock.elapsedRealtime();
         if (now - dernierBalanceMs < TROMBONE_PERIODE_MS) return;
         dernierBalanceMs = now;
