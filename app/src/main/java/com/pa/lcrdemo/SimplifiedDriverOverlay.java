@@ -135,6 +135,9 @@ final class SimplifiedDriverOverlay {
     // indéfiniment : au-delà de CONNEXION_LONGUE_MS, la flamme alerte (toc-toc + carte) et la reconnexion/diagnostic part.
     private long perteDepuisMs = 0L;
     private volatile boolean perteEnLivraison = false;
+    private Etat dernEtatLivr = null;
+    private long dernEtatLivrMs = 0L;
+    private boolean silenceLegitimeLoguee = false;
     private volatile int perteCas = 0;   // 1 = BT connecté mais registre muet ; 2 = BT du registre (Parani) injoignable   // liaison BT/registre perdue PENDANT une livraison
     private long connexionDepuisMs = 0L;
     private boolean connexionLongueSignalee = false;
@@ -944,6 +947,35 @@ final class SimplifiedDriverOverlay {
         double net = nombre(txtQtyNet);
         double gross = nombre(txtQtyGross);
         Etat etat = calculerEtat(live, net, gross);
+
+        // ✅ CORRECTION (12 nov 2026, demande Paul — vidéo 09:41 : flamme + « Communication perdue avec le registre » pendant les
+        // pauses de la livraison) — le registre ne répond QU'AUX commandes du cycle RUNNING_FLOWING : en pause / confirmation /
+        // fin, le silence est NORMAL (le contrôleur peut alors écrire DISCONNECTED alors que le lien BT est bien ouvert).
+        // Règle : si le dernier état de livraison vu n'était PAS un débit en cours (ou si le débit s'est arrêté il y a moins de
+        // 8 s) et que le lien BT du registre est ouvert, un texte LIVE « coupé » est du silence légitime : on garde l'état
+        // précédent (pause, confirmation, fin), sans flamme ni message. Un débit qui devient muet plus de 8 s, ou un lien BT
+        // fermé, restent de vraies pertes.
+        long maintenantS = android.os.SystemClock.elapsedRealtime();
+        if (etat == Etat.DEBIT || etat == Etat.PAUSE || etat == Etat.CONFIRM || etat == Etat.ENDING) {
+            dernEtatLivr = etat; dernEtatLivrMs = maintenantS;
+        }
+        boolean liveCoupe = live.contains("DISCONNECTED") || live.contains("(OFF)") || live.contains("COUPÉ")
+                || live.contains("RECONNECT REQUIS") || live.contains("(EN ATTENTE)") || live.isEmpty();
+        if (liveCoupe && dernEtatLivr != null && maintenantS - dernEtatLivrMs < 15 * 60_000L
+                && (dernEtatLivr != Etat.DEBIT || maintenantS - dernEtatLivrMs < 8_000L)
+                && host.etatLiaisonPourSimplifie() == 0) {
+            live = dernEtatLivr == Etat.PAUSE ? "RUNNING_PAUSED"
+                 : dernEtatLivr == Etat.CONFIRM ? "RUNNING_FLOWING CONFIRMING"
+                 : dernEtatLivr == Etat.ENDING ? "ENDING" : "RUNNING_FLOWING FLOW ON";
+            etat = calculerEtat(live, net, gross);
+            if (!silenceLegitimeLoguee) {
+                silenceLegitimeLoguee = true;
+                try { com.pa.lcr.lcp.log.LogBus.api(0, "[SILENCE-LEGITIME] registre muet en " + dernEtatLivr
+                    + " alors que le lien BT est ouvert — normal (il ne répond qu'au cycle RUNNING_FLOWING) : aucune alerte"); } catch (Throwable ignoredLb) {}
+            }
+        } else if (!liveCoupe) {
+            silenceLegitimeLoguee = false;
+        }
 
         // --- Registre
         String serie = apresDeuxPoints(txtSerialId);

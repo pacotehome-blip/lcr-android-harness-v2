@@ -3731,16 +3731,12 @@ public class RegisterTabFragment extends Fragment {
             com.pa.lcr.lcp.transport.TransportIo io = com.pa.lcr.lcp.transport.MediaTransportManager
                 .get(requireContext().getApplicationContext()).getByKey(k.trim());
             if (io == null || !io.isOpen()) return 2;
-            DeliveryController dc = controller;
-            if (dc != null) {
-                long age = dc.getLastTickAgeMs();
-                com.pa.lcr.lcp.DeliveryState stT = dc.getState();
-                // Pendant un débit les lectures arrivent ~chaque seconde : 6 s de silence = registre muet.
-                // En pause elles sont plus espacées (12 s). Hors livraison : filet de sécurité de 20 s.
-                long seuil = (stT == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING) ? 6_000L
-                           : (stT == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) ? 12_000L : 20_000L;
-                if (age > seuil) return 1;
-            }
+            // ✅ CORRECTION (12 nov 2026, demande Paul — vidéo 09:41 : la flamme apparaissait au passage de RUNNING_FLOWING à
+            // pause) — le registre ne répond qu'aux commandes du cycle RUNNING_FLOWING : en pause / fin / confirmation il est
+            // NORMAL qu'aucune lecture live n'arrive pendant longtemps. Le critère « âge du dernier tick » (support31/32)
+            // donnait donc de fausses alertes et est RETIRÉ. Seul critère fiable ici : le lien BT du registre est fermé.
+            // Le cas « BT connecté mais registre muet » reste détecté par le contrôleur lui-même (timeouts LCP consécutifs →
+            // DISCONNECTED → carte « Communication perdue »), qui sait distinguer la pause d'une vraie perte.
         } catch (Exception ignored) {}
         return 0;
     }
