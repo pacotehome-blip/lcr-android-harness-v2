@@ -38,27 +38,6 @@ import java.util.concurrent.ExecutorService;
  */
 public class DeepLinkHandler {
 
-
-    /**
-     * Après 5 échecs de job/continue : si l'état réel du job est RUNNING_FLOWING/RUNNING_PAUSED, la livraison tourne déjà
-     * (la liaison est revenue entre-temps, ex. reprise après perte de liaison) — l'échec n'en est pas un.
-     */
-    private boolean registreDejaEnLivraisonApresEchec(String jobId, String origine) {
-        try {
-            MultiRegisterApiFacadeImpl f = new MultiRegisterApiFacadeImpl(activity);
-            com.pa.lcr.lcp.ApiResult r = f.api_deliveryJobGet(jobId);
-            String st = (r != null && r.data != null) ? r.data.optString("state", "") : "";
-            boolean enLivraison = "RUNNING_FLOWING".equals(st) || "RUNNING_PAUSED".equals(st);
-            if (enLivraison) {
-                try { com.pa.lcr.lcp.log.LogBus.api(0, "[CONTINUE-IGNORÉ] " + origine + " : état réel=" + st
-                    + " — livraison déjà en cours, aucun message d'échec ni écriture d'erreur"); } catch (Exception ignored) {}
-            }
-            return enLivraison;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
     private static final String TAG = "LCRDEMO_DEEPLINK";
     private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
@@ -144,7 +123,8 @@ public class DeepLinkHandler {
             String woNum      = data.getQueryParameter("wonum");
             String woIdGuid   = data.getQueryParameter("woid") != null
                                 ? data.getQueryParameter("woid") : "";
-            String btMac      = data.getQueryParameter("btmac");
+            // FIX 13 nov 2026 : tolère un préfixe "BT:" (clé de transport) ; btKey() le rajoute ensuite.
+            String btMac      = sansPrefixeBt(data.getQueryParameter("btmac"));
             String serialId   = data.getQueryParameter("serialid");
 
             // ✅ AJOUTÉ (4 sept 2026, demande Paul — "s'il y a une
@@ -321,12 +301,6 @@ public class DeepLinkHandler {
             // Lus ICI, après le verrou PENDING — un lien refusé n'écrase donc rien.
             String stopId    = nettoyerGuidDeepLink(data.getQueryParameter("stopid"));
             String productId = nettoyerGuidDeepLink(data.getQueryParameter("productid"));
-            // ✅ AJOUTÉ (6 nov 2026, demande Paul — "la description viendra du deeplink", affichage
-            // seulement) — description du produit FieldService pour l'écran simplifié chauffeur.
-            // Gardée en mémoire seulement (jamais en base ni en JSON) ; absente = vide = rien affiché.
-            // Lue ici, après le verrou PENDING : un lien refusé n'écrase donc rien.
-            SimplifiedUiState.setFsProduitDesc(woNum,
-                    data.getQueryParameter(SimplifiedConfig.DEEPLINK_PARAM_PRODUIT_DESC));
 
             // ✅ Configurer l'environnement selon l'URL Dataverse reçue de FSM
             // Un seul APK pour DEV / QA / STAGING / PROD
@@ -2410,6 +2384,13 @@ public class DeepLinkHandler {
         return true;
     }
 
+    private static String sansPrefixeBt(String m) {
+        if (m == null) return null;
+        String r = m.trim();
+        while (r.toUpperCase(java.util.Locale.ROOT).startsWith("BT:")) r = r.substring(3);
+        return r;
+    }
+
     private void connectBtByMacAndOpenTab(String btMac, int node, String serialId,
                                            String woNum, String woIdGuid,
                                            String produit, String presetStr) {
@@ -2455,30 +2436,12 @@ public class DeepLinkHandler {
                                 .getController(tKey, node);
 
                         if (dc == null) {
-                            // ✅ FIX (11 nov 2026, demande Paul — pertes de fluidité) — preuve 11:10:42 : le transport BT
-                            // venait d'être ouvert (RFCOMM ouvert, isOpen()) mais aucun controller n'existait encore pour
-                            // ce node (session arrêtée « logic only » par le deep link). On le déclarait « zombi » →
-                            // btDisconnect() + NOUVEAU RFCOMM vers le même registre pendant que le premier était encore
-                            // ouvert → « read failed », « Queued timeout », rc=0x23. Un transport OUVERT sans controller
-                            // n'est pas un zombi : on recrée le controller sur le lien existant, sans rien fermer.
-                            com.pa.lcr.lcp.DeliveryController dcRecree = null;
-                            try {
-                                dcRecree = com.pa.lcr.lcp.RegisterSessionManager.get(activity)
-                                    .resolveOrCreateForNodeOnTransport(node, 255, tKey);
-                            } catch (Exception ignoredRc) {}
-                            if (dcRecree != null) {
-                                android.util.Log.i(TAG, "BT ouvert sans controller — controller recréé sur le lien existant (aucune fermeture)");
-                                try { com.pa.lcr.lcp.log.LogBus.api(node, "[BT-RECHERCHE] lien BT ouvert sans session — session recréée sur le même lien (pas de 2e connexion RFCOMM)"); } catch (Exception ignoredLb) {}
-                                dc = dcRecree;
-                            } else {
-                                // Controller absent — BT zombi
-                                android.util.Log.w(TAG, "BT zombi — controller absent, restart BT");
-                                activity.btDisconnect();
-                                try { Thread.sleep(1500); } catch (Exception ignored) {}
-                                btDejaConnecte = false; // forcer reconnexion
-                            }
-                        }
-                        if (dc != null) {
+                            // Controller absent — BT zombi
+                            android.util.Log.w(TAG, "BT zombi — controller absent, restart BT");
+                            activity.btDisconnect();
+                            try { Thread.sleep(1500); } catch (Exception ignored) {}
+                            btDejaConnecte = false; // forcer reconnexion
+                        } else {
                             // Lire l'état du registre via tickSnapshot
                             com.pa.lcr.lcp.ApiResult snap = dc.api_tickSnapshot();
                             int delCode = (snap != null && snap.data != null)
@@ -3421,10 +3384,7 @@ public class DeepLinkHandler {
                                     android.util.Log.w(TAG, "job/continue: stabilisation sale_number ERR (non-bloquant): " + eStabOuter.getMessage());
                                 }
                             }
-                            if (!continueOk && registreDejaEnLivraisonApresEchec(jobId, "continueOk")) {
-                            // Le registre est EN livraison (reprise après perte de liaison) : le message de perte appartient au tab.
-                            // Ni toast, ni ouverture de Configure, ni ligne d'erreur CONTINUE_FAILED poussée à Dataverse.
-                        } else if (!continueOk) {
+                            if (!continueOk) {
                                 android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
 
                                 // ✅ Détecter changement de ticket (impression entre-temps)
@@ -3541,10 +3501,7 @@ public class DeepLinkHandler {
                                 break;
                             }
                         }
-                        if (!continueOk2 && registreDejaEnLivraisonApresEchec(jobId, "continueOk2")) {
-                            // Le registre est EN livraison (reprise après perte de liaison) : le message de perte appartient au tab.
-                            // Ni toast, ni ouverture de Configure, ni ligne d'erreur CONTINUE_FAILED poussée à Dataverse.
-                        } else if (!continueOk2) {
+                        if (!continueOk2) {
                             android.util.Log.w(TAG, "job/continue: échec après 5 tentatives — chauffeur prend charge");
 
                             // ✅ Détecter changement de ticket
@@ -5006,15 +4963,6 @@ public class DeepLinkHandler {
     }
 
     private void logError(String serialId, String woNum, String code, String message) {
-        // Écran simplifié : compte les échecs de détection / connexion du registre (trombone d'aide)
-        try {
-            if ("REGISTER_NOT_READY".equals(code) || "MEDIA_NOT_READY".equals(code)
-                    || "BT_CONNECT_ERROR".equals(code) || "REGISTER_INVALID".equals(code)) {
-                SimplifiedUiState.signalerEchecDeepLink(woNum, 1);
-            } else if ("NO_TRANSPORT".equals(code)) {
-                SimplifiedUiState.signalerEchecDeepLink(woNum, SimplifiedConfig.DEEPLINK_ECHECS_AVANT_ALERTE);
-            }
-        } catch (Throwable ignored) {}
         if (deliveryStore == null) return;
         try {
             String errorJson = new JSONObject()

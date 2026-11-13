@@ -103,7 +103,10 @@ public final class BtAutoPairing {
      */
     public static Resultat assurerAppairage(Context ctx, String macBrut, int node,
                                             Runnable avantAppairage) {
-        final String mac = (macBrut == null) ? "" : macBrut.trim().toUpperCase(Locale.ROOT);
+        String macTmp = (macBrut == null) ? "" : macBrut.trim().toUpperCase(Locale.ROOT);
+        // FIX 13 nov 2026 : tolère un préfixe "BT:" (clé de transport)
+        while (macTmp.startsWith("BT:")) macTmp = macTmp.substring(3);
+        final String mac = macTmp;
         BroadcastReceiver receiver = null;
         Context app = null;
         try {
