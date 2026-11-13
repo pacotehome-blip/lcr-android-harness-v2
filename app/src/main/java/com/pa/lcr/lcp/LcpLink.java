@@ -560,6 +560,28 @@ public class LcpLink {
         );
     }
 
+    // ✅ AJOUTÉ (13 nov 2026, demande Paul — registre figé par l'imprimante
+    // TM-T88VII : GET_MACHINE_STATUS / GET_FIELD restent en file ~17 sondages,
+    // notre timeout les abandonne et la réponse tardive pollue la requête
+    // suivante). Variantes PATIENTES, QUEUEABLES, à timeout long, réservées à
+    // la console de récupération — n'influencent ni l'apprentissage du
+    // timeout STATUS ni aucun flux de livraison.
+    public MachineStatus opGetMachineStatusPatient(int timeoutMs) throws IOException {
+        Response r = sendRecv(buildPayload(MSG_GET_MACHINE_STATUS, null), true, timeoutMs, false);
+        ensureOk(r, "GET_MACHINE_STATUS(patient)");
+        return new MachineStatus(
+                r.payload[0] & 0xFF, r.payload[1] & 0xFF, r.payload[2] & 0xFF,
+                u16be(r.payload[3], r.payload[4]), u16be(r.payload[5], r.payload[6]));
+    }
+
+    public byte[] opGetFieldPatient(int field, int timeoutMs) throws IOException {
+        Response r = sendRecv(buildPayload(MSG_GET_FIELD, new byte[]{(byte) field}), true, timeoutMs, false);
+        ensureOk(r, "GET_FIELD #" + field + "(patient)");
+        byte[] out = new byte[r.payload.length - 2];
+        System.arraycopy(r.payload, 2, out, 0, out.length);
+        return out;
+    }
+
     /** Timeout 30s pour commande queueable */
     public void opIssueCommand(int cmd) throws IOException {
         Response r = sendRecv(buildPayload(MSG_ISSUE_COMMAND, new byte[]{(byte) cmd}), OpClass.ACTION);

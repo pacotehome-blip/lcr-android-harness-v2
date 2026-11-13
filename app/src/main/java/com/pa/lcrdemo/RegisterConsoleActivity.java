@@ -285,67 +285,90 @@ public class RegisterConsoleActivity extends Activity {
         return v;
     }
 
-    /** Lit #22 + net/gross (même à 0), imprime (CMD #6) ; si l'état ne se libère pas : Abort (0x7E) puis CMD_END (0x02). */
-    private void recuperer(LcpLink lk, StringBuilder out) throws Exception {
-        rl(out, "=== DÉBUT récupération registre " + serial + " ===");
-        String avant = etat(lk, out, "AVANT");
-        try {
-            LcpLink.MachineStatus ms = lk.opGetMachineStatus();
-            rl(out, String.format(Locale.ROOT, "AVANT machine : rc=0x%02X dev=0x%02X prn=0x%02X delStatus=0x%04X delCode=0x%04X",
-                ms.rc, ms.devStatus, ms.prnStatus, ms.delStatus, ms.delCode));
-        } catch (Exception e) { rl(out, "AVANT machine : échec " + e.getMessage()); }
+    private static String prnTexte(int prn) {
+        StringBuilder b = new StringBuilder();
+        if ((prn & 0x80) != 0) b.append("occupée ");
+        if ((prn & 0x40) != 0) b.append("ERREUR ");
+        if ((prn & 0x20) != 0) b.append("HORS LIGNE ");
+        if ((prn & 0x10) != 0) b.append("PLUS DE PAPIER ");
+        return b.length() == 0 ? "aucun bit actif" : b.toString().trim();
+    }
 
-        // 1) lecture : sale_number, net, gross — même si 0
+    private static final int PATIENCE_MS = 45000;
+
+    /** Récupération (13 nov 2026). Cause trouvée : imprimante du registre (TM-T88VII) en erreur →
+     *  le registre garde les requêtes en file. Étapes : état livraison, état machine (patient 45 s),
+     *  lecture #22 + net/gross (même 0), impression CMD #6 seulement si l'imprimante n'est pas en erreur,
+     *  abort + CMD_END seulement si un vrai état bloqué reste (0x0480/0x03A0 = repos normal, on n'y touche pas). */
+    private void recuperer(LcpLink lk, StringBuilder out) throws Exception {
+        rl(out, "=== DÉBUT récupération registre " + serial + " (attente max " + (PATIENCE_MS / 1000) + " s par lecture) ===");
+        String avant = etat(lk, out, "AVANT");
+
+        // 1) état machine, patient
+        LcpLink.MachineStatus ms = null;
+        long t0 = System.currentTimeMillis();
+        try {
+            ms = lk.opGetMachineStatusPatient(PATIENCE_MS);
+            rl(out, String.format(Locale.ROOT, "AVANT machine (+%d ms) : rc=0x%02X dev=0x%02X [%s] prn=0x%02X [%s] delStatus=0x%04X delCode=0x%04X",
+                System.currentTimeMillis() - t0, ms.rc, ms.devStatus, LcpLink.decodeDeviceStatus(ms.devStatus),
+                ms.prnStatus, prnTexte(ms.prnStatus), ms.delStatus, ms.delCode));
+        } catch (Exception e) {
+            rl(out, "AVANT machine : AUCUNE réponse en " + (PATIENCE_MS / 1000) + " s — " + e.getMessage()
+                + ". REGISTRE FIGÉ : vérifier l'imprimante (TM-T88VII) : éteindre/débrancher, puis relancer. Aucune commande envoyée.");
+            rl(out, "=== FIN (arrêt sans écriture) — état livraison avant=" + avant + " ===");
+            return;
+        }
+        boolean prnErreur = (ms.prnStatus & 0x70) != 0; // erreur / hors ligne / papier
+        if (prnErreur) rl(out, "⚠ IMPRIMANTE EN ÉTAT D'ANOMALIE (" + prnTexte(ms.prnStatus) + ") — cause probable du blocage de la file");
+
+        // 2) lecture #22, net, gross — même à 0
         long sale = -1; double net = Double.NaN, gross = Double.NaN;
         try {
-            sale = be32(lk.opGetField(22, 3000)) & 0xFFFFFFFFL;
+            sale = be32(lk.opGetFieldPatient(22, PATIENCE_MS)) & 0xFFFFFFFFL;
             int dig = lk.getDecimalDigits();
             double sc = Math.pow(10, dig);
-            gross = be32(lk.opGetField(44, 3000)) / sc;
-            net = be32(lk.opGetField(45, 3000)) / sc;
+            gross = be32(lk.opGetFieldPatient(44, PATIENCE_MS)) / sc;
+            net = be32(lk.opGetFieldPatient(45, PATIENCE_MS)) / sc;
             rl(out, String.format(Locale.ROOT, "LECTURE : sale_number(#22)=%d net=%.*f gross=%.*f (décimales=%d)%s",
                 sale, dig, net, dig, gross, dig, (net == 0 && gross == 0) ? "  ⚠ 0 L — conservé, à signaler" : ""));
         } catch (Exception e) { rl(out, "LECTURE : échec " + e.getMessage()); }
 
-        // 2) imprimer d'abord (CMD #6 = print last ticket)
-        try {
-            lk.opIssueCommand(0x06);
-            rl(out, "CMD #6 (print last ticket) envoyée");
-        } catch (Exception e) { rl(out, "CMD #6 : échec " + e.getMessage()); }
-        Thread.sleep(2500);
-        String apresPrint = etat(lk, out, "APRÈS PRINT");
+        // 3) impression (CMD #6) — seulement si l'imprimante n'est pas en anomalie
+        if (prnErreur) {
+            rl(out, "CMD #6 NON envoyée : imprimante en anomalie (envoyer une impression aggraverait le blocage). Corrige l'imprimante puis relance.");
+        } else {
+            try { lk.opIssueCommand(0x06); rl(out, "CMD #6 (print last ticket) acceptée (rc=0x00)"); }
+            catch (Exception e) { rl(out, "CMD #6 : échec " + e.getMessage()); }
+            Thread.sleep(2500);
+        }
+        String apres = etat(lk, out, "APRÈS PRINT");
 
-        // 3) pas assez → abort, puis fin
-        boolean residuel = true; // en cas de doute (lecture échouée) on poursuit
+        // 4) abort + fin seulement si l'état n'est PAS le repos normal 0480/03A0
+        boolean reposNormal = "0480/03A0".equals(apres);
+        boolean bloque = true;
         try {
-            String[] pp = apresPrint.split("/");
+            String[] pp = apres.split("/");
             int dsv = Integer.parseInt(pp[0], 16), dcv = Integer.parseInt(pp[1], 16);
-            residuel = (dsv & 0x0600) != 0 || (dcv & 0x0009) != 0; // stop/end demandé, ticket en attente ou livraison active
+            bloque = !reposNormal && ((dsv & 0x0600) != 0 || (dcv & 0x0009) != 0);
         } catch (Exception ignored) {}
-        if (residuel) {
+        if (!bloque) {
+            rl(out, reposNormal ? "État de repos normal (0x0480/0x03A0) — abort/fin NON envoyés."
+                                : "Aucun état bloqué — abort/fin NON envoyés.");
+        } else {
             try {
                 int rc = lk.opAbortRequest();
                 rl(out, String.format(Locale.ROOT, "ABORT REQUEST (0x7E) rc=0x%02X (0x28 annulée, 0x29 en cours, 0x2A trop tard, 0x27 aucune)", rc));
             } catch (Exception e) { rl(out, "ABORT : échec " + e.getMessage()); }
             Thread.sleep(1500);
-            try {
-                lk.opIssueCommand(0x02);
-                rl(out, "CMD_END (0x02) envoyée");
-            } catch (Exception e) { rl(out, "CMD_END : échec " + e.getMessage()); }
+            try { lk.opIssueCommand(0x02); rl(out, "CMD_END (0x02) acceptée"); }
+            catch (Exception e) { rl(out, "CMD_END : échec " + e.getMessage()); }
             Thread.sleep(1500);
-            try {
-                lk.opIssueCommand(0x06);
-                rl(out, "CMD #6 (2e impression après fin) envoyée");
-            } catch (Exception e) { rl(out, "CMD #6 (2e) : échec " + e.getMessage()); }
-            Thread.sleep(2500);
             etat(lk, out, "APRÈS ABORT+FIN");
-        } else {
-            rl(out, "État libéré par l'impression seule — abort non nécessaire.");
         }
         try {
-            LcpLink.MachineStatus ms = lk.opGetMachineStatus();
-            rl(out, String.format(Locale.ROOT, "APRÈS machine : rc=0x%02X dev=0x%02X prn=0x%02X delStatus=0x%04X delCode=0x%04X",
-                ms.rc, ms.devStatus, ms.prnStatus, ms.delStatus, ms.delCode));
+            LcpLink.MachineStatus m2 = lk.opGetMachineStatusPatient(PATIENCE_MS);
+            rl(out, String.format(Locale.ROOT, "APRÈS machine : rc=0x%02X dev=0x%02X [%s] prn=0x%02X [%s] delStatus=0x%04X delCode=0x%04X",
+                m2.rc, m2.devStatus, LcpLink.decodeDeviceStatus(m2.devStatus), m2.prnStatus, prnTexte(m2.prnStatus), m2.delStatus, m2.delCode));
         } catch (Exception e) { rl(out, "APRÈS machine : échec " + e.getMessage()); }
         rl(out, String.format(Locale.ROOT, "=== FIN — ticket #%d net=%s gross=%s (avant=%s) ===", sale, net, gross, avant));
     }
@@ -596,7 +619,7 @@ public class RegisterConsoleActivity extends Activity {
             + "  securite      niveau de sécurité (GET_SECURITY)   (aussi : --show-security)\n"
             + "  status        état machine (GET_MACHINE_STATUS)\n"
             + "  livraison     état de livraison (GET_DELIVERY_STATUS)\n"
-            + "  recuperer     ÉCRIT : lit #22 + net/gross, imprime (CMD #6), puis abort + CMD_END si l'état reste bloqué. Tout va au journal support [RECUP-REGISTRE]. Refusé pendant une livraison.\n"
+            + "  recuperer     lit état machine (attente 45 s), #22 + net/gross, imprime (CMD #6) si l'imprimante est OK, abort + CMD_END seulement si état vraiment bloqué. Si l'imprimante est en erreur : n'envoie rien. Tout va au journal support [RECUP-REGISTRE]. Refusé pendant une livraison.\n"
             + "  effacer       vide l'écran\n"
             + "Les 352 champs de l'Excel LCR_Registers_Fields sont décrits : get <champ> affiche le nom, le niveau de sécurité, "
             + "le type, la description et les valeurs possibles, puis la valeur lue. Aucune écriture.");
