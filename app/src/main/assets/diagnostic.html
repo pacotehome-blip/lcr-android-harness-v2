@@ -622,7 +622,8 @@ var CMDS = {
 var cur = null, logs = [];
 
 function port() { return document.getElementById('iPort').value.trim() || '8765'; }
-function base() { return 'https://' + window.location.hostname + ':' + port(); }
+function proto() { var pr = window.location.protocol; return (pr === 'http:' || pr === 'https:') ? pr : 'https:'; }
+function base() { return proto() + '//' + (window.location.hostname || '127.0.0.1') + ':' + port(); }
 
 // ✅ (4 août 2026) — téléchargement direct du dump DB en JSON (support).
 // Ouvre l'URL directement : le navigateur gère le téléchargement grâce au
@@ -1270,7 +1271,7 @@ function updateCmds() {
   var r = buildCmdParams();
   var ps, curl;
   // $BASE = host only, CMDS[cur].p starts with /v1/
-  var baseUrl = 'https://127.0.0.1:' + port();
+  var baseUrl = proto() + '//127.0.0.1:' + port();
   if (r.method === 'POST') {
     var bodyOneLine = r.body ? r.body.replace(/\s+/g,' ').trim() : '{}';
     ps   = '$BASE = "' + baseUrl + '"\n\n'
