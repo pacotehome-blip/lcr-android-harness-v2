@@ -131,7 +131,7 @@ public class RegisterConsoleActivity extends Activity {
                     ajouter("Registre LC3 : cette console parle le protocole LCR-II (LCP) et n'est pas disponible pour un LC3.");
                 } else {
                     btnRun.setEnabled(true);
-                    ajouter("Tape 'aide' pour la liste des commandes. Rien n'est écrit dans le registre.");
+                    ajouter("Tape 'aide' pour la liste des commandes. Seule la commande « recuperer » agit sur le registre (imprime puis, au besoin, abort/fin).");
                 }
             }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
@@ -166,8 +166,20 @@ public class RegisterConsoleActivity extends Activity {
             champ = n;
         } else if (commande.equals("securite") || commande.equals("security") || commande.equals("show-security")
                 || commande.equals("status") || commande.equals("statut")
-                || commande.equals("livraison") || commande.equals("delivery")) {
+                || commande.equals("livraison") || commande.equals("delivery")
+                || commande.equals("recuperer") || commande.equals("recup") || commande.equals("recover")) {
             champ = -1;
+            if (commande.startsWith("recup") || commande.equals("recover")) {
+                // Jamais pendant une livraison active (règle : rien d'automatique/manuel sur le lien pendant le débit)
+                try {
+                    com.pa.lcr.lcp.RegisterSessionManager sm = com.pa.lcr.lcp.RegisterSessionManager.get(this);
+                    if (transportKey != null && sm.hasRunningDeliveryOn(transportKey)) {
+                        ajouter("Refusé : une livraison est en cours sur ce registre (RUNNING). Récupération impossible pendant le débit.");
+                        try { LogBus.api(node, "[RECUP-REGISTRE] REFUSÉ — livraison active sur " + transportKey); } catch (Exception ignored) {}
+                        return;
+                    }
+                } catch (Exception ignored) {}
+            }
         } else {
             ajouter("Commande inconnue : " + tok[0] + "  (tape 'aide')");
             return;
@@ -222,6 +234,10 @@ public class RegisterConsoleActivity extends Activity {
                         out.append(String.format(Locale.ROOT, "delCode=0x%04X (%s)\n", ms.delCode, LcpLink.describeDelCode(ms.delCode)));
                         break;
                     }
+                    case "recuperer": case "recup": case "recover": {
+                        recuperer(lk, out);
+                        break;
+                    }
                     default: { // livraison / delivery
                         int[] ds = lk.opDeliveryStatus(3000);
                         out.append(String.format(Locale.ROOT, "delStatus=0x%04X (%s)\ndelCode=0x%04X (%s)\n",
@@ -242,6 +258,97 @@ public class RegisterConsoleActivity extends Activity {
         }).start();
     }
 
+
+    // ───────────── récupération du registre (13 nov 2026) ─────────────
+    private void rl(StringBuilder out, String m) {
+        out.append(m).append('\n');
+        try { LogBus.api(node, "[RECUP-REGISTRE] " + m + " (#série=" + serial + ")"); } catch (Exception ignored) {}
+    }
+
+    private String etat(LcpLink lk, StringBuilder out, String quand) {
+        try {
+            int[] ds = lk.opDeliveryStatus(3000);
+            String r = String.format(Locale.ROOT, "%s : delStatus=0x%04X (%s) delCode=0x%04X (%s)", quand,
+                ds[0], LcpLink.describeDelStatus(ds[0]), ds[1], LcpLink.describeDelCode(ds[1]));
+            rl(out, r);
+            return String.format(Locale.ROOT, "%04X/%04X", ds[0], ds[1]);
+        } catch (Exception e) {
+            rl(out, quand + " : lecture état échouée — " + e.getMessage());
+            return "?";
+        }
+    }
+
+    private static int be32(byte[] b) {
+        if (b == null) return 0;
+        int v = 0;
+        for (int i = 0; i < b.length && i < 4; i++) v = (v << 8) | (b[i] & 0xFF);
+        return v;
+    }
+
+    /** Lit #22 + net/gross (même à 0), imprime (CMD #6) ; si l'état ne se libère pas : Abort (0x7E) puis CMD_END (0x02). */
+    private void recuperer(LcpLink lk, StringBuilder out) throws Exception {
+        rl(out, "=== DÉBUT récupération registre " + serial + " ===");
+        String avant = etat(lk, out, "AVANT");
+        try {
+            LcpLink.MachineStatus ms = lk.opGetMachineStatus();
+            rl(out, String.format(Locale.ROOT, "AVANT machine : rc=0x%02X dev=0x%02X prn=0x%02X delStatus=0x%04X delCode=0x%04X",
+                ms.rc, ms.devStatus, ms.prnStatus, ms.delStatus, ms.delCode));
+        } catch (Exception e) { rl(out, "AVANT machine : échec " + e.getMessage()); }
+
+        // 1) lecture : sale_number, net, gross — même si 0
+        long sale = -1; double net = Double.NaN, gross = Double.NaN;
+        try {
+            sale = be32(lk.opGetField(22, 3000)) & 0xFFFFFFFFL;
+            int dig = lk.getDecimalDigits();
+            double sc = Math.pow(10, dig);
+            gross = be32(lk.opGetField(44, 3000)) / sc;
+            net = be32(lk.opGetField(45, 3000)) / sc;
+            rl(out, String.format(Locale.ROOT, "LECTURE : sale_number(#22)=%d net=%.*f gross=%.*f (décimales=%d)%s",
+                sale, dig, net, dig, gross, dig, (net == 0 && gross == 0) ? "  ⚠ 0 L — conservé, à signaler" : ""));
+        } catch (Exception e) { rl(out, "LECTURE : échec " + e.getMessage()); }
+
+        // 2) imprimer d'abord (CMD #6 = print last ticket)
+        try {
+            lk.opIssueCommand(0x06);
+            rl(out, "CMD #6 (print last ticket) envoyée");
+        } catch (Exception e) { rl(out, "CMD #6 : échec " + e.getMessage()); }
+        Thread.sleep(2500);
+        String apresPrint = etat(lk, out, "APRÈS PRINT");
+
+        // 3) pas assez → abort, puis fin
+        boolean residuel = true; // en cas de doute (lecture échouée) on poursuit
+        try {
+            String[] pp = apresPrint.split("/");
+            int dsv = Integer.parseInt(pp[0], 16), dcv = Integer.parseInt(pp[1], 16);
+            residuel = (dsv & 0x0600) != 0 || (dcv & 0x0009) != 0; // stop/end demandé, ticket en attente ou livraison active
+        } catch (Exception ignored) {}
+        if (residuel) {
+            try {
+                int rc = lk.opAbortRequest();
+                rl(out, String.format(Locale.ROOT, "ABORT REQUEST (0x7E) rc=0x%02X (0x28 annulée, 0x29 en cours, 0x2A trop tard, 0x27 aucune)", rc));
+            } catch (Exception e) { rl(out, "ABORT : échec " + e.getMessage()); }
+            Thread.sleep(1500);
+            try {
+                lk.opIssueCommand(0x02);
+                rl(out, "CMD_END (0x02) envoyée");
+            } catch (Exception e) { rl(out, "CMD_END : échec " + e.getMessage()); }
+            Thread.sleep(1500);
+            try {
+                lk.opIssueCommand(0x06);
+                rl(out, "CMD #6 (2e impression après fin) envoyée");
+            } catch (Exception e) { rl(out, "CMD #6 (2e) : échec " + e.getMessage()); }
+            Thread.sleep(2500);
+            etat(lk, out, "APRÈS ABORT+FIN");
+        } else {
+            rl(out, "État libéré par l'impression seule — abort non nécessaire.");
+        }
+        try {
+            LcpLink.MachineStatus ms = lk.opGetMachineStatus();
+            rl(out, String.format(Locale.ROOT, "APRÈS machine : rc=0x%02X dev=0x%02X prn=0x%02X delStatus=0x%04X delCode=0x%04X",
+                ms.rc, ms.devStatus, ms.prnStatus, ms.delStatus, ms.delCode));
+        } catch (Exception e) { rl(out, "APRÈS machine : échec " + e.getMessage()); }
+        rl(out, String.format(Locale.ROOT, "=== FIN — ticket #%d net=%s gross=%s (avant=%s) ===", sale, net, gross, avant));
+    }
 
     // ───────────── table ressource des champs ─────────────
     private void chargerChamps() {
@@ -489,6 +596,7 @@ public class RegisterConsoleActivity extends Activity {
             + "  securite      niveau de sécurité (GET_SECURITY)   (aussi : --show-security)\n"
             + "  status        état machine (GET_MACHINE_STATUS)\n"
             + "  livraison     état de livraison (GET_DELIVERY_STATUS)\n"
+            + "  recuperer     ÉCRIT : lit #22 + net/gross, imprime (CMD #6), puis abort + CMD_END si l'état reste bloqué. Tout va au journal support [RECUP-REGISTRE]. Refusé pendant une livraison.\n"
             + "  effacer       vide l'écran\n"
             + "Les 352 champs de l'Excel LCR_Registers_Fields sont décrits : get <champ> affiche le nom, le niveau de sécurité, "
             + "le type, la description et les valeurs possibles, puis la valeur lue. Aucune écriture.");
