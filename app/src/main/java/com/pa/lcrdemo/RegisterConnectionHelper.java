@@ -729,7 +729,13 @@ public class RegisterConnectionHelper {
             // et SEULEMENT si USB n'est pas physiquement présent (voir fix
             // plus haut — inutile et potentiellement nuisible de toucher au
             // BT quand le registre visé est sur USB).
-            if (attempt == 1 && !usbDevicePresent) {
+            // ✅ CORRIGÉ (13 nov 2026, demande Paul — coupure volontaire du BT pendant le flux :
+            // le journal montrait « [MEDIA][DÉCONNEXION] … diag cleanup » à 15:28:58, puis
+            // « state=null — abandon du suivi ») — cette fermeture des sockets BT n'avait pas la
+            // garde `livraisonActive` des étapes 1 et 2 : un diagnostic parti d'une erreur de
+            // connexion (surErreurConnexion → validerConnexion) fermait donc le lien en pleine
+            // livraison. Règle Paul : aucune action automatique sur le lien pendant une livraison.
+            if (attempt == 1 && !usbDevicePresent && !livraisonActive) {
                 try {
                     com.pa.lcr.lcp.transport.MediaTransportManager mtmClose =
                         activity.getMediaTransportManager();
