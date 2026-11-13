@@ -336,10 +336,14 @@ public class LocalDeliveryBackup {
                         JSONObject j = new JSONObject(new String(ref.content, StandardCharsets.UTF_8));
                         String ticketNo = j.optString("ticket_no", "");
                         String woNum = j.optString("wo_num", "");
-                        if (ticketNo.isEmpty() || woNum.isEmpty()) continue;
+                        final boolean armementJson = estJsonArmement(j); // FIX 13 nov 2026
+                        if ((ticketNo.isEmpty() && !armementJson) || woNum.isEmpty()) continue;
                         // ✅ CORRIGÉ (16 oct 2026, demande Paul) — présence testée par ticket_no ET #série
                         // du registre (le numéro de ticket est propre à chaque registre).
-                        if (lcrDb.getByTicketNoAndSerial(ticketNo, j.optString("serial_id", "")) != null) continue; // déjà présent
+                        // FIX 13 nov 2026 : un JSON d'armement se teste par job_id (identité réelle).
+                        if (armementJson) {
+                            if (lcrDb.getByJobId(j.optString("job_id", "")) != null) continue; // déjà présent
+                        } else if (lcrDb.getByTicketNoAndSerial(ticketNo, j.optString("serial_id", "")) != null) continue; // déjà présent
 
                         ContentValues cv = new ContentValues();
                         cv.put(LcrDeliveryStatusDb.COL_WO_NUM, woNum);
@@ -355,6 +359,10 @@ public class LocalDeliveryBackup {
                         cv.put(LcrDeliveryStatusDb.COL_TYPE, LcrDeliveryStatusDb.TYPE_ORIGINAL);
                         cv.put(LcrDeliveryStatusDb.COL_SOURCE, "RESTORE_CLEANUP");
                         cv.put(LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
+                        if (armementJson) { // FIX 13 nov 2026 — jamais poussé à 0 L ; finalisé par lecture du registre
+                            cv.put(LcrDeliveryStatusDb.COL_STOP_TYPE, "RUNNING_FLOWING");
+                            cv.put(LcrDeliveryStatusDb.COL_JOB_ID, j.optString("job_id", ""));
+                        }
                         // ✅ CORRIGÉ (16 oct 2026, demande Paul) — respecte le sync_status du JSON
                         // (comme restoreAllAsync) : un fichier SYNCED n'est pas re-poussé à
                         // Dataverse ; tout le reste repart en PENDING pour être synchronisé.
@@ -541,7 +549,7 @@ public class LocalDeliveryBackup {
         new Thread(() -> {
             try {
                 try { Thread.sleep(delaiMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                cleanupOldBackupsAsync(app, 3, checker, false, (restored, kept, deleted, messages) -> {
+                cleanupOldBackupsAsync(app, 0, checker, false, (restored, kept, deleted, messages) -> { // FIX 13 nov 2026 : 0 = supprime chaque JSON SYNCED dès que Dataverse le confirme (jamais sans confirmation)
                     cleanupAutoDebutMs.set(0L);
                     cleanupAutoFinMs.set(System.currentTimeMillis());
                     cleanupAutoRefusesConsecutifs.set(0);
@@ -631,6 +639,23 @@ public class LocalDeliveryBackup {
         return out;
     }
 
+    /**
+     * FIX 13 nov 2026 (demande Paul — livraison 436) : un JSON écrit à l'ARMEMENT (statut RUNNING_FLOWING,
+     * aucun « result », net 0) est l'identité d'une livraison en cours, pas une livraison terminée. Restauré
+     * comme une ligne LIVRAISON normale, il repartirait vers Dataverse avec 0 L. Il doit revenir comme ligne
+     * RUNNING_FLOWING avec son job_id : jamais poussée, retrouvée par getRunningFlowingSafetyNet() et
+     * finalisée avec les vraies valeurs lues sur le registre.
+     */
+    static boolean estJsonArmement(JSONObject j) {
+        try {
+            if (j.optString("job_id", "").isEmpty()) return false;
+            JSONObject pl = new JSONObject(j.optString("payload_complet", "{}"));
+            return "RUNNING_FLOWING".equals(pl.optString("status", "")) && !pl.has("result");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     public static void restoreAllAsync(Context ctx, RestoreCallback cb) {
         new Thread(() -> {
             List<String> messages = new ArrayList<>();
@@ -711,6 +736,10 @@ public class LocalDeliveryBackup {
                         cv.put(LcrDeliveryStatusDb.COL_TYPE, LcrDeliveryStatusDb.TYPE_ORIGINAL);
                         cv.put(LcrDeliveryStatusDb.COL_SOURCE, "RESTORE_BACKUP");
                         cv.put(LcrDeliveryStatusDb.COL_STOP_TYPE, "LIVRAISON");
+                        if (estJsonArmement(j)) { // FIX 13 nov 2026 — voir estJsonArmement()
+                            cv.put(LcrDeliveryStatusDb.COL_STOP_TYPE, "RUNNING_FLOWING");
+                            cv.put(LcrDeliveryStatusDb.COL_JOB_ID, jobIdRestore);
+                        }
                         cv.put(LcrDeliveryStatusDb.COL_SYNC_STATUS, syncStatusJson);
                         cv.put(LcrDeliveryStatusDb.COL_PAYLOAD_JSON, j.optString("payload_complet", ""));
 

@@ -1309,6 +1309,12 @@ public class RegisterTabFragment extends Fragment {
             if (safetyNet == null || safetyNet.jobId == null || safetyNet.jobId.isEmpty()) {
                 return; // rien d'orphelin à reprendre
             }
+            // FIX 13 nov 2026 (demande Paul — livraison 436 : le Bluetooth tombe pendant le débit, le preset est
+            // atteint/dépassé, le registre termine seul ; au retour du BT le job n'existe plus en mémoire
+            // ("Job unknown") et le suivi abandonnait pour toujours) : si le REGISTRE affirme que la livraison
+            // est finie (preset atteint, livraison plus active), on finalise avec sa vraie lecture au lieu de
+            // reprendre un suivi dont le job est inconnu.
+            if (finaliserOrphelineSiRegistreTermine(safetyNet)) return;
             LogBus.api(node, "[FINALISATION-ORPHELINE] ligne filet de sécurité trouvée pour jobId="
                 + safetyNet.jobId + " — reprise du vrai suivi (pas de finalisation à la volée)");
             if (!(getActivity() instanceof MainActivity)) return;
@@ -1322,6 +1328,81 @@ public class RegisterTabFragment extends Fragment {
         }
     }
 
+
+    /**
+     * FIX 13 nov 2026 — finalise une livraison orpheline (ligne RUNNING_FLOWING) quand le registre
+     * lui-même indique qu'elle est terminée : bit « preset net/gross atteint » ET « livraison active » éteint.
+     * Même lecture de confirmation (2 lectures net/gross) que FILET-CONNECTED. Retourne true si finalisée
+     * ou déjà finalisée ailleurs ; false si le registre ne confirme pas la fin (le suivi normal reprend).
+     */
+    private boolean finaliserOrphelineSiRegistreTermine(
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow safetyNet) {
+        try {
+            DeliveryController c = controller;
+            if (c == null || safetyNet == null) return false;
+            int dc = c.getLastDelCode();
+            if (dc == 0) {
+                try { Thread.sleep(1500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                dc = c.getLastDelCode();
+            }
+            boolean presetAtteint =
+                (dc & com.pa.lcr.lcp.LcpLink.DC_NET_PRESET_REACHED) != 0
+                || (dc & com.pa.lcr.lcp.LcpLink.DC_GROSS_PRESET_REACHED) != 0;
+            boolean livraisonActive = (dc & com.pa.lcr.lcp.LcpLink.DC_DELIVERY_ACTIVE) != 0;
+            if (!presetAtteint || livraisonActive) {
+                LogBus.api(node, "[FINALISATION-ORPHELINE] registre ne confirme pas la fin (delCode=0x"
+                    + Integer.toHexString(dc) + ") — reprise du suivi normal, jobId=" + safetyNet.jobId);
+                return false;
+            }
+            double[] ng1 = c.readNetGrossFromHardware();
+            try { Thread.sleep(400); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            double[] ng2 = c.readNetGrossFromHardware();
+            if (ng2[0] < 0 && ng1[0] >= 0) ng2 = ng1;
+            if (ng2[0] < 0) {
+                LogBus.api(node, "[FINALISATION-ORPHELINE] lecture net/gross impossible — pas de finalisation, jobId=" + safetyNet.jobId);
+                return false;
+            }
+            // Revérifie qu'une autre voie n'a pas finalisé entre-temps
+            try {
+                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbV =
+                    new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(requireContext());
+                try {
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow rv = dbV.getByJobId(safetyNet.jobId);
+                    if (rv != null && !com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING.equals(rv.syncStatus)) {
+                        LogBus.api(node, "[FINALISATION-ORPHELINE] déjà finalisée ailleurs — jobId=" + safetyNet.jobId);
+                        return true;
+                    }
+                } finally {
+                    try { dbV.close(); } catch (Exception ignored) {}
+                }
+            } catch (Exception ignoredV) {}
+            String ticket = c.api_readTicketNo23Frais();
+            if (ticket == null || ticket.isEmpty()) ticket = lastKnownTicketNo;
+            org.json.JSONObject res = new org.json.JSONObject();
+            res.put("ticket_no", ticket != null ? ticket : "");
+            res.put("sale_no", ticket != null ? ticket : "");
+            res.put("fs_net_l", ng2[0]);
+            res.put("fs_gross_l", ng2[1]);
+            res.put("product_number", safetyNet.produitNo);
+            res.put("preset_requested", safetyNet.presetL);
+            org.json.JSONObject extra = new org.json.JSONObject();
+            extra.put("result", res);
+            extra.put("jobId", safetyNet.jobId);
+            extra.put("preset_requested", safetyNet.presetL);
+            MainActivity main = (MainActivity) getActivity();
+            if (main == null) return false;
+            String woN = (safetyNet.woNum != null && !safetyNet.woNum.isEmpty()) ? safetyNet.woNum : currentWoNum;
+            String woG = (safetyNet.woIdGuid != null && !safetyNet.woIdGuid.isEmpty()) ? safetyNet.woIdGuid : currentWoIdGuid;
+            main.onDeliveryEnded(woN, woG, extra.toString(), node, serialFromArgs,
+                (tabTransportKey != null ? tabTransportKey.trim() : ""));
+            LogBus.api(node, "[FINALISATION-ORPHELINE] finalisée par lecture du registre — jobId=" + safetyNet.jobId
+                + " net=" + ng2[0] + " gross=" + ng2[1] + " (delCode=0x" + Integer.toHexString(dc) + ")");
+            return true;
+        } catch (Exception e) {
+            android.util.Log.w("RegisterTabFragment", "finaliserOrphelineSiRegistreTermine ERR: " + e.getMessage());
+            return false;
+        }
+    }
 
     private void tenterRecuperationRunningFlowing() {
         try {
