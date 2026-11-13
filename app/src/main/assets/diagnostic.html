@@ -134,6 +134,8 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
 
     <div class="sec">Imprimante</div>
     <button class="cb" onclick="sel('printer_status')"><span class="tag tg">GET</span>/v1/printer/status</button>
+    <button class="cb" onclick="sel('print_text')"><span class="tag tp">POST</span>/v1/print/text</button>
+    <button class="cb" onclick="sel('print_form_check')"><span class="tag tg">GET</span>/v1/print/form-check</button>
 
     <div class="sec">Livraison</div>
     <button class="cb" onclick="sel('delivery_b')"><span class="tag tp">POST</span>/v1/delivery/B</button>
@@ -144,6 +146,7 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
     <button class="cb" onclick="sel('delivery_job_get')"><span class="tag tg">GET</span>/v1/delivery/job/{id}</button>
     <button class="cb" onclick="sel('delivery_job_continue')"><span class="tag tp">POST</span>/v1/delivery/job/continue</button>
     <button class="cb" onclick="sel('delivery_job_terminate')"><span class="tag tp">POST</span>/v1/delivery/job/terminate</button>
+    <button class="cb" onclick="sel('delivery_last_result')"><span class="tag tg">GET</span>/v1/delivery/last-result</button>
 
     <div class="sec">Ticket</div>
     <button class="cb" onclick="sel('ticket_reprint')"><span class="tag tp">POST</span>/v1/ticket/reprint</button>
@@ -160,6 +163,11 @@ header{background:#fff;border-bottom:1px solid var(--border);padding:12px 16px;d
     <button class="cb" onclick="sel('profile_drift')"><span class="tag tg">GET</span>/v1/profile/drift</button>
     <button class="cb" onclick="sel('profile_acknowledge')"><span class="tag tp">POST</span>/v1/profile/acknowledge</button>
     <button class="cb" onclick="sel('profile_delete')"><span class="tag tp">POST</span>/v1/profile/delete</button>
+
+    <div class="sec">Support</div>
+    <button class="cb" onclick="sel('support_events')"><span class="tag tg">GET</span>/v1/support/events</button>
+    <button class="cb" onclick="sel('support_logbus')"><span class="tag tg">GET</span>/v1/support/logbus</button>
+    <button class="cb" onclick="sel('support_diagnose')"><span class="tag tg">GET</span>/v1/support/diagnose</button>
 
     <div class="sec">Base de données</div>
     <button class="cb" onclick="sel('db_dump')"><span class="tag tp">POST</span>/v1/db/dump</button>
@@ -466,7 +474,7 @@ var CMDS = {
   },
   delivery_job_continue: {
     m:'POST', p:'/v1/delivery/job/continue', l:'Job — Continuer',
-    desc:"Continue un job de livraison en pause.",
+    desc:"Continue un job de livraison en pause (envoie CMD_RUN au registre). Le jobId n'existe qu'en mémoire : après un redémarrage de l'APK il retourne JOB_NOT_FOUND (la récupération passe alors par le fichier JSON de sauvegarde et le numéro de ticket). Si le registre est déjà en RUNNING_*, un échec de continue est ignoré côté deep link.",
     f:[
       {k:'jobId', l:'Job ID', h:'ID du job à continuer', t:'text'},
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'}
@@ -474,7 +482,7 @@ var CMDS = {
   },
   delivery_job_terminate: {
     m:'POST', p:'/v1/delivery/job/terminate', l:'Job — Terminer',
-    desc:"Termine/annule un job de livraison.",
+    desc:"Termine un job de livraison (envoie CMD_END au registre, ferme le ticket). Retourne les deltas net/gross. Le jobId n'existe qu'en mémoire : JOB_NOT_FOUND après redémarrage de l'APK.",
     f:[
       {k:'jobId', l:'Job ID', h:'ID du job à terminer', t:'text'},
       {k:'lcrnode_dec', l:'Node LCP', h:'250 par défaut', t:'number'}
@@ -562,6 +570,47 @@ var CMDS = {
     desc:"Supprime définitivement un profil camion.",
     f:[
       {k:'truck_id', l:'ID Camion', h:'ex: CAMION-12', t:'text'}
+    ]
+  },
+  print_text: {
+    m:'POST', p:'/v1/print/text', l:'Imprimer du texte',
+    desc:"Imprime des lignes de texte sur l'imprimante du registre. Sans lcrnode_dec, le registre vivant et libre est choisi automatiquement (imprimante partagée entre deux registres; le #série attendu a priorité). Séparez les lignes par | dans le champ Lignes.",
+    f:[
+      {k:'lines', l:'Lignes', h:'ligne1|ligne2|ligne3', t:'lines'},
+      {k:'lcrnode_dec', l:'Node LCP', h:'Optionnel — auto si absent', t:'number'},
+      {k:'expected_serial_id', l:'#Série (optionnel)', h:'ex: 16466294 — ERR_SERIAL_MISMATCH si autre registre', t:'text'},
+      {k:'delay_ms', l:'Pause entre lignes (ms)', h:'150 par défaut, max 2000', t:'number'}
+    ]
+  },
+  print_form_check: {
+    m:'GET', p:'/v1/print/form-check', l:'Vérifier formulaire d\'impression',
+    desc:"Vérifie un formulaire d'impression (appelé par le deep link Field Service): compare avec Dataverse et pousse la mise à jour au service d'impression si Dataverse est plus récent. status = A_JOUR, MAJ_APPLIQUEE ou INDISPONIBLE (jamais d'erreur HTTP).",
+    f:[
+      {k:'code', l:'Code formulaire', h:'code du formulaire', t:'text', inQuery:true},
+      {k:'version', l:'Version', h:'version connue de l\'appelant', t:'text', inQuery:true}
+    ]
+  },
+  delivery_last_result: {
+    m:'GET', p:'/v1/delivery/last-result', l:'Dernier résultat de livraison',
+    desc:"Retourne le dernier résultat de livraison déposé par le deep link (en mémoire). Expire après 10 minutes (RESULT_EXPIRED). NO_RESULT si aucun.",
+    f:[]
+  },
+  support_events: {
+    m:'GET', p:'/v1/support/events', l:'Support — événements d\'un ticket',
+    desc:"Historique v_diagnostic_events pour un ticket. Lecture seule.",
+    f:[ {k:'ticket_no', l:'No ticket', h:'ex: 422', t:'text', inQuery:true} ]
+  },
+  support_logbus: {
+    m:'GET', p:'/v1/support/logbus', l:'Support — log brut du registre',
+    desc:"Log brut du registre (UI/API/IO_TX/IO_RX) persisté, pour un node. Lecture seule.",
+    f:[ {k:'node', l:'Node LCP', h:'ex: 2', t:'number', inQuery:true} ]
+  },
+  support_diagnose: {
+    m:'GET', p:'/v1/support/diagnose', l:'Support — diagnostic',
+    desc:"Triage complet (niveau de support + couche transport/api/ui). Écrit dans diagnostic_match_history (même comportement que le bouton Diagnostiquer).",
+    f:[
+      {k:'ticket_no', l:'No ticket', h:'ex: 422', t:'text', inQuery:true},
+      {k:'node', l:'Node LCP', h:'optionnel', t:'number', inQuery:true}
     ]
   },
   db_dump: {
@@ -716,7 +765,7 @@ function execCmd() {
     if (!el) return;
     var v = el.value.trim();
     if (!v) return;
-    var val = f.t === 'number' ? parseInt(v) : v;
+    var val = f.t === 'number' ? parseInt(v) : (f.t === 'lines' ? v.split('|') : v);
     if (f.inQuery) query[f.k] = v;
     else if (f.inPath) query['__path__'] = v;
     else body[f.k] = val;
@@ -1052,6 +1101,30 @@ var EXAMPLES = {
     ok: {"code":1,"msg":"Profile: 1 - Supprime: CAMION-12","err":null,"data":{"truck_id":"CAMION-12","deleted":1}},
     err: {"code":0,"msg":"Profile: 0 - Profil introuvable: CAMION-99","err":"ERR_PROFILE_NOT_FOUND","data":{}}
   },
+  print_text: {
+    ok: {"code":1,"msg":"PrintText: 1 - OK","err":null,"data":{"lines":3}},
+    err: {"code":0,"msg":"PrintText: 0 - aucune ligne","err":"ERR_NO_LINES","data":{}}
+  },
+  print_form_check: {
+    ok: {"code":1,"msg":"FORM-CHECK: A_JOUR","err":null,"data":{"status":"A_JOUR","code":"FORM-01"}},
+    err: {"code":1,"msg":"FORM-CHECK: INDISPONIBLE","err":null,"data":{"status":"INDISPONIBLE","code":"FORM-01"}}
+  },
+  delivery_last_result: {
+    ok: {"code":1,"msg":"last-result: 1 - OK","err":null,"data":{"ts":1778857754819}},
+    err: {"code":0,"msg":"last-result: 0 - Aucun résultat disponible","err":"NO_RESULT","data":{}}
+  },
+  support_events: {
+    ok: {"code":1,"msg":"support/events: OK","err":null,"data":{"ticket_no":"422"}},
+    err: {"code":0,"msg":"support/events: ticket_no requis","err":"MISSING_PARAM","data":{}}
+  },
+  support_logbus: {
+    ok: {"code":1,"msg":"support/logbus: OK","err":null,"data":{"node":2,"count":1,"lines":[{"ts":1778857754819,"src":"API","msg":"..."}]}},
+    err: {"code":0,"msg":"support/logbus: node requis","err":"MISSING_PARAM","data":{}}
+  },
+  support_diagnose: {
+    ok: {"code":1,"msg":"support/diagnose: niveau=N1 couche=transport","err":null,"data":{"ticket_no":"422","support_level":"N1","layer":"transport","layer_counts":{"transport":1,"api":0,"ui":0,"indetermine":0},"matches":[]}},
+    err: {"code":0,"msg":"support/diagnose: ticket_no requis","err":"MISSING_PARAM","data":{}}
+  },
   db_dump: {
     ok: {"code":1,"msg":"DB dump: 1 - OK","err":null,"data":{"tables":["delivery_summary","delivery_attempt","delivery_event","truck_profile","truck_drift"],"row_counts":{"delivery_summary":42,"truck_profile":1}}},
     err: {"code":0,"msg":"DB dump: 0 - Error","err":"ERR_DB_DUMP","data":{}}
@@ -1176,7 +1249,7 @@ function buildCmdParams() {
     var el = document.getElementById('f_' + f.k);
     if (!el) return;
     var v = el.value.trim(); if (!v) return;
-    var val = f.t === 'number' ? parseInt(v) : v;
+    var val = f.t === 'number' ? parseInt(v) : (f.t === 'lines' ? v.split('|') : v);
     if (f.inQuery) query[f.k] = v;
     else if (f.inPath) query['__path__'] = v;
     else body[f.k] = val;
