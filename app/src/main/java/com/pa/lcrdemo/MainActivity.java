@@ -481,6 +481,9 @@ public class MainActivity extends AppCompatActivity {
     private String visibleRegFragmentTag = null; // fragment visible dans registerContainer
 
     private int currentRegNode = -1; // node actif (fallback pour logs API)
+    /** ✅ 10 nov 2026 — copie statique du node actif (onglet affiché), lue par l'API HTTP d'impression (/v1/print/text). */
+    private static volatile int sNodeActif = -1;
+    public static int nodeActif() { return sNodeActif; }
 
     // ===== LOG GLOBAL (MAIN) =====
     private CheckBox cbShowLog;
@@ -661,9 +664,49 @@ public class MainActivity extends AppCompatActivity {
 
     private final LogBus.Listener mainLogListener = e -> scheduleMainLogRefresh();
 
+
+    private static boolean accesFichiersDemandeCeProcessus = false;
+
+    /**
+     * Les backups JSON de livraison ne sont relus après une réinstallation qu'avec « Accès à tous les
+     * fichiers ». Android retire cette permission à la désinstallation : on la redemande, une fois par
+     * lancement, tant qu'elle manque (un seul toucher, aucune action pendant une livraison).
+     */
+    private void demanderAccesFichiersSiAbsent() {
+        try {
+            if (accesFichiersDemandeCeProcessus) return;
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return;
+            if (android.os.Environment.isExternalStorageManager()) return;
+            accesFichiersDemandeCeProcessus = true;
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                try {
+                    if (isFinishing() || isDestroyed()) return;
+                    new android.app.AlertDialog.Builder(this)
+                        .setTitle("Accès aux fichiers requis")
+                        .setMessage("Pour retrouver une livraison en cours après une mise à jour ou une réinstallation, "
+                            + "Filgo-Registre doit pouvoir lire ses sauvegardes dans Téléchargements.\n\n"
+                            + "Touchez « Autoriser », puis activez « Autoriser l'accès pour gérer tous les fichiers ».")
+                        .setPositiveButton("Autoriser", (d, w) -> {
+                            try {
+                                Intent it = new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                    Uri.parse("package:" + getPackageName()));
+                                startActivity(it);
+                            } catch (Exception e1) {
+                                try { startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)); }
+                                catch (Exception ignored) {}
+                            }
+                        })
+                        .setNegativeButton("Plus tard", null)
+                        .show();
+                } catch (Exception ignored) {}
+            }, 4000L);
+        } catch (Exception ignored) {}
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        demanderAccesFichiersSiAbsent();
         setContentView(R.layout.activity_main);
         ACTIVE_INSTANCE = this;
 
@@ -831,10 +874,14 @@ public class MainActivity extends AppCompatActivity {
                         // Déclencher sync immédiat si items en attente
                         DeliverySyncScheduler.triggerNow(MainActivity.this);
                         // ✅ Sync filgo_delivery_status + filgo_note_template au lancement
-                        new Thread(() ->
+                        new Thread(() -> {
                             com.pa.lcrdemo.dataverse.LcrDeliverySync.syncAll(
-                                MainActivity.this, token)
-                        ).start();
+                                MainActivity.this, token);
+                            // Formulaires et bannieres d'impression (30 oct 2026) : Dataverse -> tables locales,
+                            // puis tables locales -> service d'impression. Jamais d'exception vers l'appelant.
+                            com.pa.lcrdemo.dataverse.PrintDataverseSync.syncAll(
+                                MainActivity.this, token);
+                        }).start();
                     }
                     @Override
                     public void onError(Exception e) {
@@ -971,12 +1018,70 @@ public class MainActivity extends AppCompatActivity {
         refreshGlobalLogView();
         // ✅ Rattrapage — sync tabs avec sessions connues (cas arrière-plan)
         ui.postDelayed(this::syncTabsFromActiveSessions, 400);
+        // ✅ AJOUTÉ (11 nov 2026, demande Paul — « encore l'écran blanc, on ne sait pas ce qui se passe ») — vérification
+        // 4 s après chaque retour au premier plan : on ÉCRIT dans Support l'état réel de l'écran (tabs, tab courant,
+        // sessions connues) et on répare ce qui est réparable (tab courant perdu, tabs absents alors qu'une session existe).
+        ui.postDelayed(this::verifierEcranNonVide, 4000);
+    }
+
+    private void verifierEcranNonVide() {
+        try {
+            if (isFinishing() || isDestroyed()) return;
+            int nbTabs; String courant; String cles;
+            synchronized (tabsByKey) { nbTabs = tabsByKey.size(); courant = currentTabKey; cles = tabsByKey.keySet().toString(); }
+            List<String[]> known = RegisterSessionManager.get(this).listKnownRegisters();
+            int nbSessions = known == null ? 0 : known.size();
+            boolean tabCourantValide;
+            synchronized (tabsByKey) { tabCourantValide = courant != null && tabsByKey.containsKey(courant); }
+            logUi(null, "[ÉCRAN] contrôle 4 s après retour — tabs=" + nbTabs + " " + cles + " tabCourant=" + courant
+                + (tabCourantValide ? " (valide)" : " (ABSENT)") + " sessionsConnues=" + nbSessions);
+            if (nbTabs > 0 && !tabCourantValide) {
+                String premier; synchronized (tabsByKey) { premier = tabsByKey.keySet().iterator().next(); }
+                logUi(null, "[ÉCRAN] tab courant perdu — activation de " + premier);
+                selectRegisterTabByKey(premier);
+                showRegisterFragmentByKey(premier);
+            } else if (nbTabs == 0 && nbSessions > 0) {
+                logUi(null, "[ÉCRAN] AUCUN tab alors qu'une session existe — resynchronisation");
+                syncTabsRetries = 0;
+                syncTabsFromActiveSessions();
+            }
+        } catch (Exception e) {
+            logUi(null, "[ÉCRAN] contrôle ERR: " + e.getMessage());
+        }
     }
 
     /**
      * ✅ Rattrapage UI — synchronise les tabs avec les sessions LCP connues.
      * Appelé au retour au premier plan pour rattraper les NODE_SEEN manqués en arrière-plan.
      */
+    // ✅ FIX (11 nov 2026, demande Paul — « écran blanc, je dois basculer sur Filgo-Registre puis mode admin pour
+    // récupérer l'interface simple ») — preuve BD 11:10:41 et 11:15:48 : Activity recréée, syncTabs ne trouve AUCUN
+    // transport confirmé (le registre se reconnecte encore), saute l'entrée, puis le tab provisoire « unknown » est
+    // supprimé → plus aucun tab → écran vide jusqu'à un nouveau passage en arrière-plan. Maintenant : on REJOUE la
+    // synchronisation tant qu'une session connue n'a pas de transport/tab (toutes les 2 s, 30 s max), on la rejoue
+    // aussi à chaque [CONNEXION], et si rien ne revient on lance le diagnostic (écran Support/reconnexion).
+    private int syncTabsRetries = 0;
+    private static final int SYNC_TABS_RETRIES_MAX = 15;
+
+    /** Appelé quand un registre passe CONNECTED : recrée le tab/écran simplifié s'il manque. */
+    public static void resyncTabsApresConnexion() {
+        final MainActivity a = ACTIVE_INSTANCE;
+        if (a == null) return;
+        try { a.ui.post(() -> { a.syncTabsRetries = 0; a.syncTabsFromActiveSessions(); a.prevenirTabsRegistreReconnecte(); }); } catch (Exception ignored) {}
+    }
+
+    /** Dit à chaque onglet registre que le registre est revenu : le bouton vert « Lancer la livraison » se réaffiche. */
+    private void prevenirTabsRegistreReconnecte() {
+        try {
+            java.util.List<TabSpec> snapshot;
+            synchronized (tabsByKey) { snapshot = new ArrayList<>(tabsByKey.values()); }
+            for (TabSpec t : snapshot) {
+                Fragment f = getSupportFragmentManager().findFragmentByTag("regtab_" + t.tabKey);
+                if (f instanceof RegisterTabFragment) ((RegisterTabFragment) f).surRegistreReconnecte();
+            }
+        } catch (Exception ignored) {}
+    }
+
     private void syncTabsFromActiveSessions() {
         try {
             RegisterSessionManager sessions = RegisterSessionManager.get(this);
@@ -985,6 +1090,8 @@ public class MainActivity extends AppCompatActivity {
                 logUi(null, "syncTabs: aucune session connue");
                 return;
             }
+            boolean manque = false;
+            String manqueSerial = ""; int manqueNode = -1;
             logUi(null, "syncTabs: " + known.size() + " session(s) connue(s)");
             boolean focused = false;
             for (String[] reg : known) {
@@ -1010,6 +1117,7 @@ public class MainActivity extends AppCompatActivity {
                 if (transportKey == null || transportKey.trim().isEmpty()) {
                     logUi(null, "syncTabs: node=" + node + " serial=" + serial
                             + " — aucun transport confirmé, ignoré (pas de devinette)");
+                    manque = true; manqueSerial = serial; manqueNode = node;
                     continue;
                 }
 
@@ -1030,6 +1138,31 @@ public class MainActivity extends AppCompatActivity {
                 ui.postDelayed(() -> refreshOneTabMediaStatus(fTabKey), 100);
             }
             refreshAllTabsMediaStatus();
+            if (!manque) {
+                syncTabsRetries = 0;
+            } else if (syncTabsRetries < SYNC_TABS_RETRIES_MAX) {
+                syncTabsRetries++;
+                ui.postDelayed(this::syncTabsFromActiveSessions, 2000);
+            } else {
+                syncTabsRetries = 0;
+                boolean aucunTab;
+                synchronized (tabsByKey) { aucunTab = tabsByKey.isEmpty(); }
+                logUi(null, "syncTabs: registre toujours sans transport après 30 s" + (aucunTab ? " et aucun tab" : "")
+                    + " — lancement du diagnostic de reconnexion");
+                boolean livraisonActive = false;
+                try {
+                    for (String[] k : sessions.listKnownRegisters()) {
+                        if (k != null && k.length >= 3 && k[2] != null && !k[2].isEmpty() && sessions.hasRunningDeliveryOn(k[2])) livraisonActive = true;
+                    }
+                } catch (Exception ignoredLa) {}
+                // Règle Paul (12 nov 2026) : aucune action automatique sur le lien pendant une livraison.
+                if (!livraisonActive && !RegisterConnectionHelper.isDiagnosticEnCours()
+                        && !com.pa.lcr.lcp.MultiRegisterApiFacadeImpl.isConnectAutoEnCours()) {
+                    final String fSer = manqueSerial; final int fNod = manqueNode;
+                    new Thread(() -> new RegisterConnectionHelper(MainActivity.this)
+                        .lancerDiagnosticForce("", fNod, fSer, "")).start();
+                }
+            }
         } catch (Exception e) {
             logUi(null, "syncTabs: erreur: " + e.getMessage());
         }
@@ -1525,6 +1658,8 @@ tabRegisters = findViewById(R.id.tabRegisters);
         });
         if (btnPingUsb != null) btnPingUsb.setOnClickListener(v -> openSelectedUsb());
         if (btnQuit != null) btnQuit.setOnClickListener(v -> confirmQuit());
+        // Appui long sur le bouton power : redémarrer l'application (appui court = quitter, inchangé).
+        if (btnQuit != null) btnQuit.setOnLongClickListener(v -> { confirmRestart(); return true; });
 
         // Tabs registres
         if (tabRegisters != null) {
@@ -1641,6 +1776,89 @@ tabRegisters = findViewById(R.id.tabRegisters);
         if (btnValiderCandidats != null) {
             btnValiderCandidats.setOnClickListener(v ->
                 startActivity(new android.content.Intent(MainActivity.this, RegisterValidationActivity.class)));
+        }
+        // 3 nov 2026 (demande Paul) — Configurer → Changer le node du registre (champ LCP 102).
+        Button btnChangerNode = findViewById(R.id.btnChangerNode);
+        if (btnChangerNode != null) {
+            btnChangerNode.setOnClickListener(v -> {
+                TabSpec sp = currentTabKey != null ? tabsByKey.get(currentTabKey) : null;
+                if (sp == null || sp.serialId == null || sp.serialId.trim().isEmpty()
+                        || sp.transportKey == null || sp.transportKey.trim().isEmpty()) {
+                    Toast.makeText(MainActivity.this,
+                        "Ouvre d'abord l'onglet du registre (connecté, avec son #série).", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                android.content.Intent it = new android.content.Intent(MainActivity.this, RegisterNodeActivity.class);
+                it.putExtra("serial", sp.serialId.trim());
+                it.putExtra("node", sp.node);
+                it.putExtra("transportKey", sp.transportKey.trim());
+                it.putExtra("isLc3", sp.isLc3);
+                startActivity(it);
+            });
+        }
+        // 4 nov 2026 (demande Paul) — Configurer : console registre (lecture seule) + connexion directe repliée par défaut.
+        Button btnConsoleRegistre = findViewById(R.id.btnConsoleRegistre);
+        if (btnConsoleRegistre != null) {
+            btnConsoleRegistre.setOnClickListener(v -> {
+                // 4 nov 2026 (demande Paul) : la console propose TOUS les registres des onglets ouverts (2 ou 3), pas
+                // seulement l'onglet actif ; l'onglet actif est présélectionné.
+                java.util.ArrayList<String> serials = new java.util.ArrayList<>();
+                java.util.ArrayList<String> transports = new java.util.ArrayList<>();
+                java.util.ArrayList<Integer> nodes = new java.util.ArrayList<>();
+                java.util.ArrayList<Boolean> lc3s = new java.util.ArrayList<>();
+                int selected = 0;
+                synchronized (tabsByKey) {
+                    for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                        TabSpec sp = e.getValue();
+                        if (sp == null || sp.serialId == null || sp.serialId.trim().isEmpty()
+                                || sp.transportKey == null || sp.transportKey.trim().isEmpty()) continue;
+                        if (e.getKey() != null && e.getKey().equals(currentTabKey)) selected = serials.size();
+                        serials.add(sp.serialId.trim());
+                        transports.add(sp.transportKey.trim());
+                        nodes.add(sp.node);
+                        lc3s.add(sp.isLc3);
+                    }
+                }
+                if (serials.isEmpty()) {
+                    Toast.makeText(MainActivity.this,
+                        "Aucun registre connecté (avec son #série) dans les onglets.", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                int[] nodeArr = new int[nodes.size()];
+                boolean[] lc3Arr = new boolean[lc3s.size()];
+                for (int i = 0; i < nodeArr.length; i++) { nodeArr[i] = nodes.get(i); lc3Arr[i] = lc3s.get(i); }
+                android.content.Intent it = new android.content.Intent(MainActivity.this, RegisterConsoleActivity.class);
+                it.putExtra("serials", serials.toArray(new String[0]));
+                it.putExtra("transports", transports.toArray(new String[0]));
+                it.putExtra("nodes", nodeArr);
+                it.putExtra("lc3s", lc3Arr);
+                it.putExtra("selected", selected);
+                startActivity(it);
+            });
+        }
+        final Button btnToggleConnexion = findViewById(R.id.btnToggleConnexionDirecte);
+        final android.view.View containerConnexion = findViewById(R.id.containerConnexionDirecte);
+        if (btnToggleConnexion != null && containerConnexion != null) {
+            btnToggleConnexion.setOnClickListener(v -> {
+                boolean ouvrir = containerConnexion.getVisibility() != android.view.View.VISIBLE;
+                containerConnexion.setVisibility(ouvrir ? android.view.View.VISIBLE : android.view.View.GONE);
+                btnToggleConnexion.setText((ouvrir ? "▾" : "▸") + " Connexion directe (USB / Bluetooth / TCP)");
+            });
+        }
+        // 29 oct 2026 (demande Paul) — Configurer → Imprimantes (ajout pilote + BT-MAC + citerne).
+        Button btnConfigImprimantes = findViewById(R.id.btnConfigImprimantes);
+        if (btnConfigImprimantes != null) {
+            btnConfigImprimantes.setOnClickListener(v -> {
+                android.content.Intent it = new android.content.Intent(MainActivity.this,
+                    com.pa.lcrdemo.print.PrinterConfigActivity.class);
+                // Le registre est déjà connu par l'onglet actif : on le passe tel quel.
+                TabSpec specActif = currentTabKey != null ? tabsByKey.get(currentTabKey) : null;
+                if (specActif != null && specActif.serialId != null && !specActif.serialId.trim().isEmpty()) {
+                    it.putExtra("serial", specActif.serialId.trim());
+                    it.putExtra("node", specActif.node);
+                }
+                startActivity(it);
+            });
         }
         if (btnAnnulerCandidats != null) {
             btnAnnulerCandidats.setOnClickListener(v -> {
@@ -1764,7 +1982,74 @@ private void setupTabsTop() {
         });
     }
 
+    // ✅ AJOUTÉ (6 nov 2026, demande Paul — "je cacherais toute la partie main, api, configure,
+    // support... la partie Livraison et quit devrait aussi être masquée pour garder que le registre
+    // actif") — mode simplifié chauffeur : null = pas encore appliqué, TRUE = barre du haut, onglets
+    // et éléments de la page Main masqués ; FALSE = mode Admin (interface actuelle complète).
+    private Boolean modeSimplifieApplique = null;
+
+    /**
+     * Appelé par SimplifiedDriverOverlay (toutes les 250 ms, idempotent). Ne fait que montrer/cacher
+     * des vues existantes : aucune logique de l'app n'est modifiée.
+     */
+    public void appliquerModeSimplifie(boolean simple) {
+        if (Boolean.valueOf(simple).equals(modeSimplifieApplique)) return;
+        modeSimplifieApplique = simple;
+        int vis = simple ? View.GONE : View.VISIBLE;
+        int[] ids = { R.id.headerFilgo, R.id.tabLayout, R.id.txtActiveNode, R.id.tabRegisters,
+                R.id.txtVersionBuildMain };
+        for (int id : ids) {
+            View v = findViewById(id);
+            if (v != null) v.setVisibility(vis);
+        }
+        // « Afficher log global » : on utilise le champ lié au démarrage (cbShowLog), PAS
+        // findViewById(R.id.cbShowLog) — le layout de l'onglet registre porte le même id et sa
+        // case serait trouvée en premier (c'est pourquoi la case restait visible).
+        if (cbShowLog != null) cbShowLog.setVisibility(vis);
+        // Le panneau de log suit la case « Afficher log global » (comme le fait déjà l'app)
+        if (logPanel != null) {
+            logPanel.setVisibility(simple ? View.GONE : (cbShowLog != null && cbShowLog.isChecked() ? View.VISIBLE : View.GONE));
+        }
+        if (simple) showPage(0);
+        masquerBarresSysteme(simple);
+    }
+
+    /**
+     * Mode plein écran (9 nov 2026, demande Paul — « couvrir tout l'écran ») : en mode simplifié chauffeur, la barre
+     * d'état et la barre / le dock de navigation Android sont masqués ; un glissement depuis le bord les fait
+     * réapparaître un instant. Le mode Admin les remet. Aucune autre logique de l'app n'est touchée.
+     */
+    private void masquerBarresSysteme(boolean masquer) {
+        try {
+            android.view.Window w = getWindow();
+            androidx.core.view.WindowInsetsControllerCompat c =
+                    androidx.core.view.WindowCompat.getInsetsController(w, w.getDecorView());
+            if (c == null) return;
+            if (masquer) {
+                c.setSystemBarsBehavior(
+                        androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                c.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars());
+            } else {
+                c.show(androidx.core.view.WindowInsetsCompat.Type.systemBars());
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("MainActivity", "masquerBarresSysteme ERR: " + t.getMessage());
+        }
+    }
+
+    /** Après une boîte de dialogue, un retour d'application ou une barre apparue un instant : on remasque. */
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && Boolean.TRUE.equals(modeSimplifieApplique)) masquerBarresSysteme(true);
+    }
+
     public void showPage(int index) {
+        // En mode simplifié, aucune autre page que Main n'est accessible (plus d'onglets pour revenir).
+        if (Boolean.TRUE.equals(modeSimplifieApplique) && index != 0) {
+            android.util.Log.i("MainActivity", "showPage(" + index + ") ramené à Main — mode simplifié actif");
+            index = 0;
+        }
         if (pageMain != null) pageMain.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         if (pageApiFace != null) pageApiFace.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
         if (pageConfigure != null) pageConfigure.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
@@ -3579,12 +3864,8 @@ private void setupTabsTop() {
                     + ") — reprise sur le nouveau transport=" + transportKey);
                 try {
                     com.pa.lcr.lcp.storage.ActiveDeliveryStore adsCrossTransport = new com.pa.lcr.lcp.storage.ActiveDeliveryStore(this);
-                    // FIX 13 nov 2026 : ActiveDeliveryStore.mac doit contenir la MAC nue, pas la clé "BT:<MAC>"
-                    // (sinon le deep link de relance envoie btmac=BT:... -> "MAC invalide").
-                    final String macNueCross = (transportKey != null && transportKey.startsWith("BT:"))
-                        ? transportKey.substring(3) : transportKey;
                     adsCrossTransport.save(rowCrossTransport.woNum, rowCrossTransport.woIdGuid, rowCrossTransport.jobId,
-                        macNueCross, node, serial, rowCrossTransport.produitNo, rowCrossTransport.presetL, "STARTED");
+                        (transportKey != null && transportKey.startsWith("BT:") ? transportKey.substring(3) : transportKey), node, serial, rowCrossTransport.produitNo, rowCrossTransport.presetL, "STARTED");
                 } catch (Exception eSaveCrossTransport) {
                     android.util.Log.w("MainActivity", "upsertRegisterTabFromScan: sauvegarde ActiveDeliveryStore (reprise cross-transport) ERR: " + eSaveCrossTransport.getMessage());
                 }
@@ -3860,6 +4141,38 @@ private void setupTabsTop() {
         }
     }
 
+    /** ✅ AJOUTÉ (6 nov 2026, demande Paul — écran simplifié) — liste des registres ouverts, pour le
+     *  sélecteur de l'écran simplifié (la barre d'onglets est cachée). Chaque entrée :
+     *  {tabKey, libellé, "1" si c'est l'onglet actif sinon "0"}. */
+    public java.util.List<String[]> registresPourSimplifie() {
+        java.util.List<String[]> out = new java.util.ArrayList<>();
+        try {
+            if (tabRegisters == null) return out;
+            int sel = tabRegisters.getSelectedTabPosition();
+            for (int i = 0; i < tabRegisters.getTabCount(); i++) {
+                TabLayout.Tab t = tabRegisters.getTabAt(i);
+                if (t == null || !(t.getTag() instanceof String)) continue;
+                String label = "";
+                View custom = t.getCustomView();
+                if (custom != null) {
+                    TextView tv = custom.findViewById(R.id.txtTabLabel);
+                    if (tv != null && tv.getText() != null) label = tv.getText().toString();
+                }
+                if (label.isEmpty() && t.getText() != null) label = t.getText().toString();
+                if (label.isEmpty()) label = "Registre " + (i + 1);
+                out.add(new String[] { (String) t.getTag(), label, i == sel ? "1" : "0" });
+            }
+        } catch (Exception e) {
+            android.util.Log.w("MainActivity", "registresPourSimplifie ERR: " + e.getMessage());
+        }
+        return out;
+    }
+
+    /** Bascule sur un autre registre (même chemin que le toucher d'un onglet). */
+    public void choisirRegistrePourSimplifie(String tabKey) {
+        selectRegisterTabByKey(tabKey);
+    }
+
     private void showRegisterFragmentByKey(String tabKey) {
         // ✅ AJOUTÉ (26 août 2026, demande Paul — traçage du scan qui ne se
         // déclenche jamais) — trouvé : ce garde était complètement
@@ -3888,6 +4201,7 @@ private void setupTabsTop() {
 
         currentTabKey = tabKey;
         currentRegNode = spec.node;
+        sNodeActif = spec.node;
 
         if (txtActiveNode != null) {
             txtActiveNode.setText("Node actif : " + tabLabelOf(spec.mediaShort, spec.node, spec.serialId, spec.isLc3));
@@ -4064,6 +4378,7 @@ private void setupTabsTop() {
         if (tabKey.equals(currentTabKey)) {
             currentTabKey = null;
             currentRegNode = -1;
+            sNodeActif = -1;
             try {
                 if (tabRegisters != null && tabRegisters.getTabCount() > 0) {
                     TabLayout.Tab t0 = tabRegisters.getTabAt(0);
@@ -4521,6 +4836,7 @@ private void setupTabsTop() {
             try {
                 for (BluetoothDevice d : btBonded) {
                     if (d == null) continue;
+                    if (estImprimanteBt(d)) continue; // jamais sonder une imprimante (30 oct 2026)
                     candidats.add("BT:" + d.getAddress());
                 }
             } catch (Exception ignored) {}
@@ -5613,6 +5929,36 @@ private void scanUsb() {
     // ✅ Compatibilité Android 9-15 (API 28-35) : finish() et
     // Process.killProcess() sont des API stables depuis l'API 16 — aucune
     // branche SDK_INT nécessaire ici.
+    /** Écran simplifié : le bouton « Quitter » (le bouton Quit de la barre du haut est caché). */
+    public void confirmQuitPourSimplifie() { confirmQuit(); }
+    public void confirmRestartPourSimplifie() { confirmRestart(); }
+
+    private void confirmRestart() {
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Redémarrer l'application")
+            .setMessage("Filgo Registre va se fermer puis se rouvrir.\n\n"
+                + "Une livraison en cours sur le registre continue : elle sera reprise à la réouverture.")
+            .setPositiveButton("Redémarrer", (dialog, which) -> restartApp())
+            .setNegativeButton("Annuler", null)
+            .show();
+    }
+
+    private void restartApp() {
+        try { logUi(null, "[REDÉMARRAGE] demandé par appui long sur le bouton power"); } catch (Exception ignored) {}
+        try { stopService(new android.content.Intent(this, LcrHttpService.class)); } catch (Exception ignored) {}
+        try { UsbSession.clear(); } catch (Exception ignored) {}
+        try {
+            android.content.Intent intent = getPackageManager().getLaunchIntentForPackage(getPackageName());
+            if (intent != null) {
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP | android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+            }
+        } catch (Exception e) {
+            android.util.Log.e("MainActivity", "restartApp ERR: " + e.getMessage());
+        }
+        ui.postDelayed(() -> android.os.Process.killProcess(android.os.Process.myPid()), 400);
+    }
+
     private void confirmQuit() {
         new androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Quitter l'application")
@@ -6400,6 +6746,56 @@ private boolean ensureBtConnectPermission() {
         logMedia1("BT Refresh: appairés=" + btBonded.size());
     }
 
+    /**
+     * Vrai si cet appareil Bluetooth appairé est une IMPRIMANTE (30 oct 2026, demande Paul : le diagnostic / la
+     * validation ne doit provoquer aucune réaction des imprimantes Brother PJ et RJ, on veut seulement savoir si
+     * elles sont actives). La recherche d'un registre perdu saute les imprimantes ; la validation les teste par
+     * simple connexion, sans aucune commande (le balayage des nodes LCP n'est jamais envoyé à une imprimante). Reconnue par : sa MAC dans les imprimantes ajoutées dans Filgo-Registre
+     * (imprimante_citerne), sa classe Bluetooth « Imaging », ou un nom de modèle d'imprimante (PJ-, RJ-, QL-, TD-, TM-).
+     * Au moindre doute d'accès (permission, erreur), l'appareil n'est PAS exclu : le comportement d'avant est conservé.
+     */
+    private boolean estImprimanteBt(BluetoothDevice d) {
+        if (d == null) return false;
+        String raison = null;
+        try {
+            String mac = d.getAddress() == null ? "" : d.getAddress().trim().toUpperCase(java.util.Locale.ROOT);
+            try {
+                for (com.pa.lcr.lcp.storage.ImprimanteCiterneStore.Row r
+                        : new com.pa.lcr.lcp.storage.ImprimanteCiterneStore(this).listAll()) {
+                    if (r.btMac != null && mac.equals(r.btMac.trim().toUpperCase(java.util.Locale.ROOT))) {
+                        raison = "imprimante ajoutée dans Filgo-Registre";
+                        break;
+                    }
+                }
+            } catch (Exception ignored) {}
+            if (raison == null) {
+                try {
+                    android.bluetooth.BluetoothClass bc = d.getBluetoothClass();
+                    if (bc != null && bc.getMajorDeviceClass() == android.bluetooth.BluetoothClass.Device.Major.IMAGING) {
+                        raison = "classe Bluetooth imprimante";
+                    }
+                } catch (SecurityException ignored) {}
+            }
+            if (raison == null) {
+                String nom = null;
+                try { nom = d.getName(); } catch (SecurityException ignored) {}
+                if (nom != null) {
+                    String n = nom.trim().toUpperCase(java.util.Locale.ROOT);
+                    if (n.startsWith("PJ-") || n.startsWith("RJ-") || n.startsWith("QL-")
+                            || n.startsWith("TD-") || n.startsWith("TM-")) {
+                        raison = "nom de modèle d'imprimante (" + nom + ")";
+                    }
+                }
+            }
+            if (raison != null) {
+                try { com.pa.lcr.lcp.log.LogBus.ui(0, "[MEDIA] BT " + mac + " = imprimante (" + raison + ") : aucune commande envoyée"); }
+                catch (Exception ignored) {}
+                return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
     private BluetoothDevice getSelectedBonded() {
         if (spnBtBonded == null) return null;
         int idx = spnBtBonded.getSelectedItemPosition();
@@ -6624,6 +7020,167 @@ private boolean ensureBtConnectPermission() {
         void onDone(boolean annule, String messageFinal);
     }
 
+    /**
+     * 3 nov 2026 (demande Paul) : clés des candidats (USB, BT:MAC, TCP:ip:port, en MAJUSCULES) dont le média porte
+     * une livraison en cours. Ces candidats ne peuvent pas être validés ; les autres le peuvent.
+     */
+    public java.util.Set<String> candidatsAvecLivraisonActive() {
+        return com.pa.lcr.lcp.RegisterSessionManager.get(this).sessionsAvecLivraisonActive().get(0);
+    }
+
+    /** Refus si un candidat COCHÉ est le média d'une livraison en cours, sinon null. Les candidats décochés sont ignorés. */
+    public String verifierSelectionSansLivraison(java.util.List<String[]> selection) {
+        java.util.Set<String> actifs = candidatsAvecLivraisonActive();
+        if (actifs.isEmpty() || selection == null) return null;
+        StringBuilder sb = new StringBuilder();
+        for (String[] c : selection) {
+            if (c != null && c.length > 1 && c[1] != null
+                    && actifs.contains(c[1].trim().toUpperCase(java.util.Locale.ROOT))) {
+                if (sb.length() > 0) sb.append(", ");
+                sb.append(c[0]);
+            }
+        }
+        if (sb.length() == 0) return null;
+        return "⛔ Validation refusée — une livraison est en cours sur : " + sb
+            + ". Décochez ce média pour valider les autres sans y toucher, ou terminez la livraison.";
+    }
+
+    /** Progression d'un changement de node (appelée sur le thread UI). */
+    public interface NodeChangeListener {
+        void onStep(String message);
+        void onDone(boolean ok, String message);
+    }
+
+    /** Champ LCP 102 = node du registre (Excel de Paul), 2 octets big-endian. */
+    static final int FIELD_LCR_NODE = 102;
+
+    /**
+     * 3 nov 2026 (demande Paul) — change le node d'un registre LCR-II (champ 102). Étapes : contrôles (plage, livraison,
+     * conflit sur le même transport, #série et valeur actuelle relus), écriture, VÉRIFICATION par relecture du #série et
+     * du champ à la NOUVELLE adresse, puis fermeture de l'ancienne session, mise à jour de la table registre (la fiche
+     * repasse en attente de synchronisation Dataverse), suppression de l'ancien onglet et reconnexion.
+     * Chaque étape est écrite dans Support (LogBus, préfixe [NODE]).
+     */
+    public void changerNodeRegistre(final String transportKey, final int ancienNode, final String serial,
+                                    final int nouveauNode, final NodeChangeListener l) {
+        new Thread(() -> {
+            final java.util.function.Consumer<String> step = m -> {
+                try { com.pa.lcr.lcp.log.LogBus.api(ancienNode, "[NODE] " + m); } catch (Exception ignored) {}
+                android.util.Log.i("MainActivity", "[NODE] " + m);
+                if (l != null) runOnUiThread(() -> l.onStep(m));
+            };
+            final java.util.function.BiConsumer<Boolean, String> fin = (ok, m) -> {
+                try { com.pa.lcr.lcp.log.LogBus.api(ok ? nouveauNode : ancienNode, "[NODE] " + (ok ? "TERMINÉ — " : "ÉCHEC — ") + m); } catch (Exception ignored) {}
+                if (l != null) runOnUiThread(() -> l.onDone(ok, m));
+            };
+            try {
+                step.accept("Demande : registre #série=" + serial + ", node " + ancienNode + " → " + nouveauNode
+                    + " (transport " + transportKey + ")");
+                if (nouveauNode < 1 || nouveauNode > 250) { fin.accept(false, "node hors plage (1 à 250)"); return; }
+                if (nouveauNode == ancienNode) { fin.accept(false, "le nouveau node est identique à l'actuel"); return; }
+                String refus = verifierAucuneLivraisonActive();
+                if (refus != null) { fin.accept(false, refus); return; }
+                // Conflit : un autre onglet du MÊME transport ayant déjà ce node.
+                synchronized (tabsByKey) {
+                    for (TabSpec t : tabsByKey.values()) {
+                        if (t != null && t.transportKey != null && t.transportKey.equalsIgnoreCase(transportKey)
+                                && t.node == nouveauNode && (t.serialId == null || !t.serialId.trim().equals(serial))) {
+                            fin.accept(false, "le node " + nouveauNode + " est déjà utilisé par un autre registre sur ce transport (#série "
+                                + t.serialId + ")");
+                            return;
+                        }
+                    }
+                }
+                com.pa.lcr.lcp.transport.TransportIo io = (mediaTransportManager != null)
+                    ? mediaTransportManager.getByKey(transportKey) : null;
+                if (io == null || !io.isOpen()) { fin.accept(false, "transport non ouvert (" + transportKey + ")"); return; }
+
+                // Contrôles + écriture, sous le verrou LCP de l'ancien node (même verrou que le contrôleur du registre).
+                java.util.concurrent.locks.ReentrantLock lock = com.pa.lcr.lcp.LcpNodeLocks.tryAcquire(
+                    ancienNode, com.pa.lcr.lcp.LcpNodeLocks.LOCK_TIMEOUT_MS);
+                if (lock == null) { fin.accept(false, "verrou LCP indisponible (registre occupé)"); return; }
+                try {
+                    com.pa.lcr.lcp.LcpLink lk = new com.pa.lcr.lcp.LcpLink(io, ancienNode, 255, true);
+                    byte[] r80 = lk.opGetField(80, 3000);
+                    String lu = new String(r80, java.nio.charset.StandardCharsets.UTF_8).split("\u0000")[0].trim();
+                    if (!lu.equals(serial)) { fin.accept(false, "#série lu (" + lu + ") différent de celui attendu (" + serial + ") — rien n'a été écrit"); return; }
+                    int courant = com.pa.lcr.lcp.LcpLink.bigEndianInt(lk.opGetField(FIELD_LCR_NODE, 3000));
+                    step.accept("Lecture avant écriture : #série=" + lu + ", champ " + FIELD_LCR_NODE + " = " + courant);
+                    if (courant != ancienNode) { fin.accept(false, "le champ " + FIELD_LCR_NODE + " vaut " + courant + ", pas " + ancienNode + " — rien n'a été écrit"); return; }
+                    step.accept("Écriture du champ " + FIELD_LCR_NODE + " = " + nouveauNode);
+                    try {
+                        lk.opSetField(FIELD_LCR_NODE, new byte[]{ (byte) ((nouveauNode >> 8) & 0xFF), (byte) (nouveauNode & 0xFF) });
+                    } catch (java.io.IOException e) {
+                        String m = String.valueOf(e.getMessage());
+                        if (m.contains("rc=0x23")) {
+                            fin.accept(false, "le registre refuse (rc=0x23, champ protégé). Au script, l'écriture passait en RUN : vérifie le niveau de sécurité du registre. Rien n'a été modifié.");
+                        } else {
+                            fin.accept(false, "écriture refusée : " + m);
+                        }
+                        return;
+                    }
+                } finally {
+                    com.pa.lcr.lcp.LcpNodeLocks.release(lock);
+                }
+
+                // Vérification à la NOUVELLE adresse.
+                try { Thread.sleep(700); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                String verifSerial = "?"; int verifNode = -1;
+                try {
+                    com.pa.lcr.lcp.LcpLink lk2 = new com.pa.lcr.lcp.LcpLink(io, nouveauNode, 255, true);
+                    byte[] a = lk2.opGetField(80, 3000);
+                    verifSerial = new String(a, java.nio.charset.StandardCharsets.UTF_8).split("\u0000")[0].trim();
+                    verifNode = com.pa.lcr.lcp.LcpLink.bigEndianInt(lk2.opGetField(FIELD_LCR_NODE, 3000));
+                } catch (Exception e) {
+                    step.accept("Relecture à la nouvelle adresse impossible : " + e.getMessage());
+                }
+                if (!serial.equals(verifSerial) || verifNode != nouveauNode) {
+                    fin.accept(false, "écriture envoyée mais NON confirmée à l'adresse " + nouveauNode + " (#série relu=" + verifSerial
+                        + ", champ relu=" + verifNode + "). Le registre est peut-être encore à " + ancienNode
+                        + " ou à " + nouveauNode + " : vérifie avant toute autre action. Aucune donnée locale n'a été modifiée.");
+                    return;
+                }
+                step.accept("Confirmé à la nouvelle adresse : #série=" + verifSerial + ", champ " + FIELD_LCR_NODE + " = " + verifNode);
+
+                // Après succès : session, base locale, onglet, reconnexion.
+                com.pa.lcr.lcp.RegisterSessionManager.get(this).closeSession(transportKey, ancienNode);
+                try {
+                    new com.pa.lcr.lcp.storage.RegistreStore(getApplicationContext())
+                        .upsertDepuisValidation(serial, nouveauNode, null, null, null, null, null, null);
+                    step.accept("Base locale : nud=" + nouveauNode + " (fiche en attente de synchronisation Dataverse)");
+                } catch (Exception e) {
+                    step.accept("Base locale : mise à jour impossible (" + e.getMessage() + ") — à corriger à la prochaine validation");
+                }
+                java.util.List<String> anciens = new java.util.ArrayList<>();
+                synchronized (tabsByKey) {
+                    for (java.util.Map.Entry<String, TabSpec> e : tabsByKey.entrySet()) {
+                        TabSpec t = e.getValue();
+                        if (t != null && t.node == ancienNode && t.serialId != null && t.serialId.trim().equals(serial)) anciens.add(e.getKey());
+                    }
+                }
+                final java.util.concurrent.CountDownLatch uiDone = new java.util.concurrent.CountDownLatch(1);
+                runOnUiThread(() -> {
+                    try { for (String tk : anciens) { removeTabAndFragment(tk, "NODE_CHANGE"); } }
+                    finally { uiDone.countDown(); }
+                });
+                try { uiDone.await(5, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                step.accept("Ancien onglet supprimé (" + anciens.size() + "), reconnexion à la nouvelle adresse…");
+                try {
+                    com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade =
+                        new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(getApplicationContext());
+                    com.pa.lcr.lcp.ApiResult r = facade.api_registerConnectAuto(serial, nouveauNode);
+                    step.accept("Reconnexion : " + (r != null ? r.msg : "null"));
+                } catch (Exception e) {
+                    step.accept("Reconnexion automatique impossible (" + e.getMessage() + ") — relance une validation ou un scan.");
+                }
+                fin.accept(true, "node " + ancienNode + " → " + nouveauNode + ", #série " + serial);
+            } catch (Exception e) {
+                try { com.pa.lcr.lcp.log.LogBus.err(ancienNode, "MainActivity.changerNodeRegistre", e); } catch (Exception ignored) {}
+                fin.accept(false, "erreur : " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+        }).start();
+    }
+
     /** Retourne le refus si une livraison est active quelque part, sinon null. Vérification seule, sans effet de bord. */
     public String verifierAucuneLivraisonActive() {
         if (com.pa.lcr.lcp.RegisterSessionManager.get(this).isAnyDeliveryActiveAnywhere()) {
@@ -6678,16 +7235,25 @@ private boolean ensureBtConnectPermission() {
      * par la sélection au lieu de toujours tout tester.
      */
     public void runValidationOnCandidats(java.util.List<String[]> candidatsSelectionnes, ValidationProgressListener listener) {
-        String refus = verifierAucuneLivraisonActive();
+        String refus = verifierSelectionSansLivraison(candidatsSelectionnes);
         if (refus != null) {
             if (listener != null) listener.onDone(false, refus);
             return;
+        }
+        // 3 nov 2026 : sessions / tabs / transports portant une livraison en cours = intouchés.
+        java.util.List<java.util.Set<String>> protegees =
+            com.pa.lcr.lcp.RegisterSessionManager.get(this).sessionsAvecLivraisonActive();
+        final java.util.Set<String> clesProtegees = protegees.get(0);
+        final java.util.Set<String> seriesProtegees = protegees.get(1);
+        if (!clesProtegees.isEmpty()) {
+            logMedia1("[VALIDATION-CANDIDATS] livraison en cours sur " + clesProtegees + " : ce média n'est pas touché");
+            if (listener != null) runOnUiThread(() -> listener.onPreparationStep("🔒 Livraison en cours sur " + clesProtegees + " — non touché"));
         }
         validationExterneAnnulee = false;
         serialsProduitsValides.clear();
         validationEnCoursDepuisMs = System.currentTimeMillis();
         try {
-            com.pa.lcr.lcp.RegisterSessionManager.get(this).closeAllForValidation();
+            com.pa.lcr.lcp.RegisterSessionManager.get(this).closeAllForValidation(clesProtegees);
             android.util.Log.i("MainActivity", "runValidationOnCandidats: toutes les connexions fermées avant validation");
             if (listener != null) runOnUiThread(() -> listener.onPreparationStep("✅ Couche logique (contrôleurs/schedulers) arrêtée"));
         } catch (Exception e) {
@@ -6698,11 +7264,17 @@ private boolean ensureBtConnectPermission() {
             synchronized (tabsByKey) {
                 tabKeysSnapshot = new java.util.ArrayList<>(tabsByKey.keySet());
             }
+            int gardes = 0;
             for (String tk : tabKeysSnapshot) {
+                TabSpec sp = tabsByKey.get(tk);
+                boolean garder = sp != null
+                    && ((sp.transportKey != null && clesProtegees.contains(sp.transportKey.trim().toUpperCase(java.util.Locale.ROOT)))
+                        || (sp.serialId != null && !sp.serialId.trim().isEmpty() && seriesProtegees.contains(sp.serialId.trim())));
+                if (garder) { gardes++; continue; }
                 removeTabAndFragment(tk, "VALIDATION_MANUELLE");
             }
-            android.util.Log.i("MainActivity", "runValidationOnCandidats: " + tabKeysSnapshot.size() + " tab(s) supprimé(s) avant validation");
-            final int nbTabs = tabKeysSnapshot.size();
+            android.util.Log.i("MainActivity", "runValidationOnCandidats: " + (tabKeysSnapshot.size() - gardes) + " tab(s) supprimé(s), " + gardes + " gardé(s) (livraison en cours)");
+            final int nbTabs = tabKeysSnapshot.size() - gardes;
             if (listener != null) runOnUiThread(() -> listener.onPreparationStep("✅ " + nbTabs + " tab(s) supprimé(s)"));
         } catch (Exception e) {
             android.util.Log.w("MainActivity", "runValidationOnCandidats: suppression des tabs ERR: " + e.getMessage());
@@ -6716,7 +7288,7 @@ private boolean ensureBtConnectPermission() {
         // vraiment chaque transport (io.close() via setDisconnected()),
         // avec un vrai compte confirmé — jamais deviné.
         try {
-            int fermes = com.pa.lcr.lcp.transport.MediaTransportManager.get(this).closeAllRealTransports();
+            int fermes = com.pa.lcr.lcp.transport.MediaTransportManager.get(this).closeAllRealTransports(clesProtegees);
             android.util.Log.i("MainActivity", "runValidationOnCandidats: " + fermes + " transport(s) physique(s) réellement fermé(s)");
             if (listener != null) runOnUiThread(() -> listener.onPreparationStep("✅ " + fermes + " transport(s) physique(s) réellement fermé(s) (port/socket)"));
         } catch (Exception e) {
@@ -7135,6 +7707,23 @@ private boolean ensureBtConnectPermission() {
      *  ailleurs dans l'app pour l'affichage normal (celui-ci est un
      *  diagnostic brut, pas l'affichage métier). */
     private String infosSupplementaires(com.pa.lcr.lcp.LcpLink tmp, int node, String baudConfirme) {
+        return infosSupplementaires(tmp, node, baudConfirme, null);
+    }
+
+    /** @param typeImprimante champ LCP 56 déjà lu (null = le lire ici). Lecture seule. */
+    private String infosSupplementaires(com.pa.lcr.lcp.LcpLink tmp, int node, String baudConfirme, Integer typeImprimante) {
+        // 3 nov 2026 (demande Paul) : type d'imprimante configuré dans le registre (champ 56) et compensation du
+        // produit actif (champs 57, 58, 59). Lectures seules, best-effort : "?" si le registre ne répond pas.
+        int prn = (typeImprimante != null) ? typeImprimante : tmp.opGetPrinterType();
+        int compType = tmp.opGetCompensationType();
+        Float compParam = tmp.opGetCompensationParam();
+        Float baseTemp = tmp.opGetBaseTemp();
+        String ligneImprimante = "\n  imprimante=" + com.pa.lcr.lcp.LcpLink.printerTypeName(prn)
+            + (prn >= 0 ? " (" + prn + ")" : "");
+        String ligneCompensation = "\n  compensation (produit actif)=" + com.pa.lcr.lcp.LcpLink.compensationTypeName(compType)
+            + (compType >= 0 ? " (" + compType + ")" : "")
+            + ", paramètre=" + (compParam != null ? String.valueOf(compParam) : "?")
+            + ", temp. de base=" + (baseTemp != null ? String.valueOf(baseTemp) : "?");
         String firmware = "?";
         try { firmware = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
         String ticketNo = "?";
@@ -7157,6 +7746,7 @@ private boolean ensureBtConnectPermission() {
         // le débit (confirmé ou supposé) saute maintenant aux yeux, pas
         // noyé dans le reste.
         return "\n  node=" + node + "\n  ticket=" + ticketNo + "\n  firmware=" + firmware
+            + ligneImprimante + ligneCompensation
             + (baudConfirme != null ? "\n  débit=" + baudConfirme : "");
     }
 
@@ -7229,6 +7819,73 @@ private boolean ensureBtConnectPermission() {
         return null;
     }
 
+    // ✅ AJOUTÉ (10 nov 2026, demande Paul — "la validation doit continuer jusqu'à 250 car il peut y avoir plus d'un
+    // compteur") — même balayage que scannerNodePourSerie(), mais NE S'ARRÊTE PAS au premier node qui répond :
+    // les 250 nodes sont tous sondés et chaque registre trouvé est retourné (ordre croissant des nodes).
+    private java.util.List<NodeTrouve> scannerTousLesNodes(com.pa.lcr.lcp.transport.TransportIo io,
+                                                           int timeoutMs, int essaisParNode, int pauseMs) {
+        java.util.List<NodeTrouve> trouves = new java.util.ArrayList<>();
+        for (int node = 1; node <= 250; node++) {
+            boolean trouveCeNode = false;
+            for (int essai = 1; essai <= essaisParNode && !trouveCeNode; essai++) {
+                if (validationExterneAnnulee) return trouves;
+                try {
+                    com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, node, 255, true);
+                    byte[] raw = tmp.opGetField(80, timeoutMs);
+                    String serial = decodeSerialBytes(raw);
+                    if (serial != null && !serial.trim().isEmpty()) {
+                        logMedia1("[VALIDATION-SCAN] node=" + node + " trouvé à l'essai " + essai + "/" + essaisParNode
+                            + " (délai=" + timeoutMs + "ms, pause=" + pauseMs + "ms) — le balayage continue jusqu'à 250");
+                        trouves.add(new NodeTrouve(node, serial));
+                        trouveCeNode = true;
+                    }
+                } catch (Exception ignored) {}
+                if (!trouveCeNode && pauseMs > 0 && !(node == 250 && essai == essaisParNode)) {
+                    try { Thread.sleep(pauseMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return trouves; }
+                }
+            }
+        }
+        if (trouves.isEmpty()) {
+            logMedia1("[VALIDATION-SCAN] aucun node n'a répondu (250 nodes, délai=" + timeoutMs
+                + "ms, essais=" + essaisParNode + ", pause=" + pauseMs + "ms)");
+        } else {
+            logMedia1("[VALIDATION-SCAN] " + trouves.size() + " registre(s) trouvé(s) sur 250 nodes");
+        }
+        return trouves;
+    }
+
+    /**
+     * Détail COMPLET des registres 2, 3… trouvés par le balayage des 250 nodes — même contenu que le premier :
+     * fiche locale (RegistreStore, d'où part la synchro Dataverse), firmware, infos supplémentaires et, pour la
+     * validation manuelle, scan des 16 produits (register_products).
+     */
+    private String lignesAutresNodes(com.pa.lcr.lcp.transport.TransportIo io, String candidatKey,
+                                     java.util.List<NodeTrouve> tous, String baudTxt, boolean avecProduits) {
+        if (tous == null || tous.size() < 2) return "";
+        StringBuilder sb = new StringBuilder("\n\n⚠ " + tous.size() + " registres sur ce transport");
+        for (int i = 1; i < tous.size(); i++) {
+            NodeTrouve t = tous.get(i);
+            sb.append("\n\n── Registre ").append(i + 1).append(" — node ").append(t.node).append(" ──");
+            try {
+                long t1 = System.currentTimeMillis();
+                com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, t.node, 255, true);
+                String fw = null;
+                try { fw = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
+                final int prn = tmp.opGetPrinterType();
+                enregistrerRegistreDepuisValidation(candidatKey, t.node, t.serial, fw, prn);
+                String produits = avecProduits ? scannerProduitsPourValidation(tmp, t.node, t.serial) : "";
+                sb.append("\n✅ Présent — #série=").append(t.serial)
+                  .append(" (").append(System.currentTimeMillis() - t1).append("ms)")
+                  .append(infosSupplementaires(tmp, t.node, baudTxt, prn))
+                  .append(produits);
+            } catch (Exception e) {
+                sb.append("\n⚠ #série=").append(t.serial).append(" — détail incomplet : ")
+                  .append(e.getClass().getSimpleName()).append(": ").append(e.getMessage());
+            }
+        }
+        return sb.toString();
+    }
+
     private String validerUnCandidatLectureSeule(String candidatKey) {
         return validerUnCandidatLectureSeule(candidatKey, false);
     }
@@ -7257,13 +7914,15 @@ private boolean ensureBtConnectPermission() {
                 com.pa.lcr.lcp.transport.TransportIo io = (mediaTransportManager != null)
                     ? mediaTransportManager.getByKey("USB") : null;
                 if (io == null || !io.isOpen()) return "❌ Absent — port USB non ouvert";
-                NodeTrouve trouve = scannerNodePourSerie(io, cfgScan[0], cfgScan[1], cfgScan[2]);
+                java.util.List<NodeTrouve> tousUsb = scannerTousLesNodes(io, cfgScan[0], cfgScan[1], cfgScan[2]);
+                NodeTrouve trouve = tousUsb.isEmpty() ? null : tousUsb.get(0);
                 long ms = System.currentTimeMillis() - t0;
                 if (trouve != null) {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, trouve.node, 255, true);
                     String fwUsb = null;
                     try { fwUsb = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
-                    enregistrerRegistreDepuisValidation("USB", trouve.node, trouve.serial, fwUsb);
+                    final int prn_fwUsb = tmp.opGetPrinterType();
+                    enregistrerRegistreDepuisValidation("USB", trouve.node, trouve.serial, fwUsb, prn_fwUsb);
                     // Scan produits AVANT la détection de débit (qui peut changer le baud du port).
                     String ligneProduits = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
                     String detailBauds = "";
@@ -7271,7 +7930,7 @@ private boolean ensureBtConnectPermission() {
                         java.util.List<String> lignesBaud = detecterBaudDetaille(usbPort, trouve.node);
                         detailBauds = "\n  Débits testés :\n" + String.join("\n", lignesBaud);
                     }
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "19200 (confirmé — port app)") + ligneProduits + detailBauds;
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "19200 (confirmé — port app)", prn_fwUsb) + ligneProduits + detailBauds + lignesAutresNodes(io, "USB", tousUsb, "19200 (confirmé — port app)", avecProduits);
                 }
                 // ✅ AJOUTÉ (20 août 2026, demande Paul — "ajouter dans la
                 // validation la détection du baud rate") — au lieu de
@@ -7343,18 +8002,26 @@ private boolean ensureBtConnectPermission() {
                 }
                 if (connectErr[0] != null) throw connectErr[0];
                 android.bluetooth.BluetoothSocket sock = sockHolder[0];
+                // IMPRIMANTE (30 oct 2026, demande Paul) : on veut seulement savoir si elle est ACTIVE. La connexion vient
+                // de réussir : on s'arrête là, AUCUNE commande envoyée (le balayage LCP des 250 nodes ci-dessous ferait
+                // réagir une Brother PJ ou RJ : même problème que celui corrigé pour le deep link au commit 771c6e8).
+                if (estImprimanteBt(dev)) {
+                    return "🖨 Imprimante — active (connexion établie), aucune commande envoyée";
+                }
                 com.pa.lcr.lcp.transport.BtSppTransportIo tmpIo = new com.pa.lcr.lcp.transport.BtSppTransportIo(
                     "BT:" + mac, sock, sock.getInputStream(), sock.getOutputStream(),
                     "Validation candidat BT:" + mac, System.currentTimeMillis());
-                NodeTrouve trouve = scannerNodePourSerie(tmpIo, cfgScan[0], cfgScan[1], cfgScan[2]);
+                java.util.List<NodeTrouve> tousBt = scannerTousLesNodes(tmpIo, cfgScan[0], cfgScan[1], cfgScan[2]);
+                NodeTrouve trouve = tousBt.isEmpty() ? null : tousBt.get(0);
                 long ms = System.currentTimeMillis() - t0;
                 if (trouve != null) {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, trouve.node, 255, true);
                     String fwBt = null;
                     try { fwBt = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
-                    enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwBt);
+                    final int prn_fwBt = tmp.opGetPrinterType();
+                    enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwBt, prn_fwBt);
                     String ligneProduitsBt = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)") + ligneProduitsBt;
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)", prn_fwBt) + ligneProduitsBt + lignesAutresNodes(tmpIo, candidatKey, tousBt, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)", avecProduits);
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — débit du pont BT à vérifier séparément (voir guide)";
             } catch (Exception e) {
@@ -7374,15 +8041,17 @@ private boolean ensureBtConnectPermission() {
                 com.pa.lcr.lcp.transport.TcpTransportIo tmpIo = new com.pa.lcr.lcp.transport.TcpTransportIo(
                     tcpKey, sock, sock.getInputStream(), sock.getOutputStream(),
                     "Validation candidat " + tcpKey, System.currentTimeMillis());
-                NodeTrouve trouve = scannerNodePourSerie(tmpIo, cfgScan[0], cfgScan[1], cfgScan[2]);
+                java.util.List<NodeTrouve> tousTcp = scannerTousLesNodes(tmpIo, cfgScan[0], cfgScan[1], cfgScan[2]);
+                NodeTrouve trouve = tousTcp.isEmpty() ? null : tousTcp.get(0);
                 long ms = System.currentTimeMillis() - t0;
                 if (trouve != null) {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(tmpIo, trouve.node, 255, true);
                     String fwTcp = null;
                     try { fwTcp = tmp.opGetFirmwareVersion(); } catch (Exception ignored) {}
-                    enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwTcp);
+                    final int prn_fwTcp = tmp.opGetPrinterType();
+                    enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwTcp, prn_fwTcp);
                     String ligneProduitsTcp = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)") + ligneProduitsTcp;
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)", prn_fwTcp) + ligneProduitsTcp + lignesAutresNodes(tmpIo, candidatKey, tousTcp, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)", avecProduits);
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — mauvais débit probable";
             } catch (Exception e) {
@@ -7404,6 +8073,11 @@ private boolean ensureBtConnectPermission() {
      */
     private void enregistrerRegistreDepuisValidation(String candidatKey, int node, String serial,
                                                        String firmware) {
+        enregistrerRegistreDepuisValidation(candidatKey, node, serial, firmware, null);
+    }
+
+    private void enregistrerRegistreDepuisValidation(String candidatKey, int node, String serial,
+                                                       String firmware, Integer typeImprimante) {
         try {
             String btAddr = null, btNom = null, ipAddr = null;
             Integer ipPort = null, transportPrefere = null;
@@ -7435,7 +8109,7 @@ private boolean ensureBtConnectPermission() {
             }
             if (serial != null && !serial.trim().isEmpty()) {
                 new com.pa.lcr.lcp.storage.RegistreStore(getApplicationContext())
-                    .upsertDepuisValidation(serial, node, btAddr, btNom, ipAddr, ipPort, transportPrefere, firmware);
+                    .upsertDepuisValidation(serial, node, btAddr, btNom, ipAddr, ipPort, transportPrefere, firmware, typeImprimante);
             }
         } catch (Exception e) {
             android.util.Log.w("MainActivity", "enregistrerRegistreDepuisValidation ERR (non-bloquant): " + e.getMessage());
