@@ -4539,6 +4539,12 @@ public class DeepLinkHandler {
         if (tabArmRef == null) return false;
 
                 String raisonMismatch = tabArmRef.getProduitDeepLinkIntrouvableRaison();
+                // ✅ AJOUTÉ (17 nov 2026, demande Paul) — pas d'armement tant que le produit du registre ne concorde pas
+                // avec le deeplink, sauf choix express du chauffeur (appui long + mot de passe sur l'écran simplifié).
+                if (raisonMismatch == null || raisonMismatch.isEmpty()) {
+                    String raisonNonConcord = tabArmRef.raisonProduitNonConcordant(woNum);
+                    if (raisonNonConcord != null) raisonMismatch = raisonNonConcord + " — appui long sur l’encadré vert du produit pour le changer (mot de passe), ou retour au bon de travail.";
+                }
                 if (raisonMismatch != null && !raisonMismatch.isEmpty()) {
                     android.util.Log.w(TAG, "lancerLivraison: REFUS armement — mismatch produit: " + raisonMismatch);
                     logError(serialId, woNum, "PRODUIT_MISMATCH", raisonMismatch);

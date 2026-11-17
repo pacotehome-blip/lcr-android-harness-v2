@@ -4015,6 +4015,43 @@ public class RegisterTabFragment extends Fragment {
     /** ✅ AJOUTÉ (17 nov 2026, demande Paul) — raison « produit demandé absent du registre » (null = aucune erreur). Lecture seule. */
     String produitIntrouvableRaisonPourSimplifie() { return produitDeepLinkIntrouvableRaison; }
 
+    /** Produit du registre choisi EXPRESSÉMENT par le chauffeur (appui long + mot de passe) : seul cas où une non-concordance avec le deeplink est tolérée. */
+    private volatile String produitChoisiParChauffeur = null;
+
+    /**
+     * ✅ AJOUTÉ (17 nov 2026, demande Paul) — porte d'armement : null = on peut armer ; sinon raison du refus.
+     * Refuse si le produit du registre ne concorde pas avec le produit demandé par le deeplink, sauf choix express du chauffeur.
+     * Inconnu / pas de produit demandé => ne bloque pas (on ne casse rien sur une comparaison incertaine).
+     */
+    public String raisonProduitNonConcordant(String woNum) {
+        try {
+            String label = (spnProduct != null && spnProduct.getText() != null) ? spnProduct.getText().toString().trim() : "";
+            if (label.isEmpty()) return null;
+            if (produitChoisiParChauffeur != null && produitChoisiParChauffeur.equals(label)) return null;
+            if (SimplifiedUiState.comparerProduit(woNum, label) != SimplifiedUiState.PRODUIT_DIFFERENT) return null;
+            String dem = SimplifiedUiState.getFsProduitDesc(woNum);
+            if (dem == null || dem.isEmpty()) dem = SimplifiedUiState.getProduitDemande(woNum);
+            return "Le produit du registre (" + label + ") ne correspond pas au produit demandé (" + dem + ")";
+        } catch (Exception e) { return null; }
+    }
+
+    /** Annulation depuis l'écran simplifié : seulement si NET et GROSS = 0. Même confirmation et même chemin que le bouton du tab. */
+    void annulerPourSimplifie() {
+        try {
+            if (parseDisplayNet() > 0.0 || parseDisplayGross() > 0.0) {
+                android.widget.Toast.makeText(requireContext(), "Impossible d'annuler — du volume a été livré. Terminez la livraison.", android.widget.Toast.LENGTH_LONG).show();
+                return;
+            }
+            LogBus.api(node, "[ACTION-CLIC] ANNULER (écran simplifié, NET=0)");
+            new android.app.AlertDialog.Builder(requireContext())
+                .setTitle("Confirmer l'annulation")
+                .setMessage("Aucun volume livré. La livraison sera annulée et le registre réinitialisé.")
+                .setPositiveButton("Annuler la livraison", (d, w) -> annulerLivraison())
+                .setNegativeButton("Continuer", null)
+                .show();
+        } catch (Exception ignored) {}
+    }
+
     /** Libellés des produits réellement présents dans le registre (table lue lors du scan). Vide si table inconnue. */
     java.util.List<String> produitsRegistrePourSimplifie() {
         java.util.List<String> out = new java.util.ArrayList<>();
@@ -4038,6 +4075,7 @@ public class RegisterTabFragment extends Fragment {
             String avant = spnProduct.getText() != null ? spnProduct.getText().toString() : "";
             spnProduct.setText(label, false);
             produitDeepLinkIntrouvableRaison = null; // le produit choisi existe dans la table du registre
+            produitChoisiParChauffeur = label; // choix express du chauffeur : lève le refus de non-concordance
             LogBus.api(node, "[PRODUIT-MANUEL] Écran simplifié (mot de passe) — registre: \"" + avant + "\" → \"" + label
                 + "\" ; produit demandé (FieldService, inchangé)=" + produitDemande);
             return true;

@@ -327,7 +327,11 @@ final class SimplifiedDriverOverlay {
 
         // Les boutons d'action délèguent aux boutons existants de l'onglet.
         sBtnTerminer.setOnClickListener(v -> cliquer(btnFinish));
-        sBtnAnnuler.setOnClickListener(v -> cliquer(btnAnnuler));
+        sBtnAnnuler.setOnClickListener(v -> {
+            double n = 0, g = 0;
+            try { n = nombre(txtQtyNet); g = nombre(txtQtyGross); } catch (Throwable ignored) {}
+            if (n <= 0.0 && g <= 0.0) host.annulerPourSimplifie(); else cliquer(btnAnnuler);
+        });
         sBtnLancer.setOnClickListener(v -> cliquer(btnRetourWO));
         sBtnRetour.setOnClickListener(v -> cliquer(btnRetourWO));
         sPanelWo.setOnClickListener(v -> cliquer(panelWoCumul));
@@ -1177,7 +1181,7 @@ final class SimplifiedDriverOverlay {
                 String demande = !fsDesc.isEmpty() ? fsDesc : (dem.isEmpty() ? "—" : (dem.matches("\\d+") ? "produit " + dem : dem));
                 sTxtProdCmp.setText(absent != null
                     ? "✖ ERREUR — le produit demandé (" + demande + ") n’est pas dans le registre. Livraison non armée : retournez au bon de travail."
-                    : "✖ ERREUR — le produit du registre ne correspond pas au produit demandé (" + demande + ")");
+                    : "✖ ERREUR — le produit du registre ne correspond pas au produit demandé (" + demande + "). Livraison non armée : appui long pour changer (mot de passe) ou retour au bon de travail.");
                 sTxtProdCmp.setTextColor(Color.parseColor("#B3261E"));
                 sTxtProdCmp.setVisibility(View.VISIBLE);
             } else {
@@ -1215,8 +1219,17 @@ final class SimplifiedDriverOverlay {
 
         boolean montrerAnnuler = btnAnnuler != null && btnAnnuler.getVisibility() == View.VISIBLE
                 && etat != Etat.CONNEXION && etat != Etat.PREP;
+        // ✅ AJOUTÉ (17 nov 2026, demande Paul) — NET et GROSS à 0 : on doit pouvoir annuler depuis l'écran simplifié,
+        // même si le bouton du tab est resté grisé (« Impossible d'annuler »).
+        final boolean zeroVolume = net <= 0.0 && gross <= 0.0
+                && (etat == Etat.PRET || etat == Etat.DEBIT || etat == Etat.PAUSE);
+        if (zeroVolume) montrerAnnuler = true;
         sBtnAnnuler.setVisibility(montrerAnnuler ? View.VISIBLE : View.GONE);
-        if (montrerAnnuler) {
+        if (montrerAnnuler && zeroVolume) {
+            sBtnAnnuler.setEnabled(true);
+            sBtnAnnuler.setAlpha(1f);
+            sBtnAnnuler.setText("Annuler la livraison");
+        } else if (montrerAnnuler) {
             sBtnAnnuler.setEnabled(btnAnnuler.isEnabled());
             sBtnAnnuler.setAlpha(btnAnnuler.isEnabled() ? 1f : 0.45f);
             String t = btnAnnuler.getText() != null ? btnAnnuler.getText().toString().replace("⛔", "").trim() : "";
