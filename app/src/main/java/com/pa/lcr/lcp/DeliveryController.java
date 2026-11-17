@@ -841,6 +841,12 @@ private void reproEvent(String level, String type, String message, JSONObject da
         return t != null ? t.delCode : 0;
     }
 
+    /** ✅ AJOUTÉ (17 nov 2026) — dernier delStatus connu (0 si aucun tick). */
+    public int getLastDelStatus() {
+        LastTick t = lastTick;
+        return t != null ? t.delStatus : 0;
+    }
+
     // 🪦 CODE MORT — CANDIDAT (4 sept 2026, demande Paul — "marque-les
     // comme mort, on fera une tâche de repérage systématique de tout le
     // code mort de l'apk plus tard") — ajoutées pour une deuxième

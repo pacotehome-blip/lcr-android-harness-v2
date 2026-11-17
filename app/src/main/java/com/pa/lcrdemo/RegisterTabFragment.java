@@ -6324,7 +6324,10 @@ public class RegisterTabFragment extends Fragment {
                         // pendant qu'une livraison à impression
                         // obligatoire est en cours.
                         boolean hasJobId = row != null && row.jobId != null && !row.jobId.trim().isEmpty();
-                        hasData = row != null && (hasTicket || isAnnulation || hasJobId);
+                        // ✅ 17 nov 2026 (logs Paul) — une ligne ERROR (sans ticket ni job) est quand même une trace pour ce WO :
+                        // le chauffeur doit pouvoir retourner au bon de travail après une annulation.
+                        boolean isErreur = row != null && "ERROR".equalsIgnoreCase(row.type);
+                        hasData = row != null && (hasTicket || isAnnulation || hasJobId || isErreur);
                         LogBus.apiUntilChanged(node, "BTN-RETOUR-WO.woCheck", "[BTN-RETOUR-WO] woCheck=" + woCheck + " connectedFinal=" + connectedFinal
                                 + " row=" + (row != null) + " row.ticketNo=" + (row != null ? row.ticketNo : "n/a")
                                 + " row.type=" + (row != null ? row.type : "n/a")
@@ -8288,7 +8291,20 @@ public class RegisterTabFragment extends Fragment {
                         if (!jobIdAnnul.isEmpty()) {
                             dbAnnuler.upsertByJobId(cv);
                         } else {
-                            dbAnnuler.insertDelivery(cv);
+                            long idIns = dbAnnuler.insertDelivery(cv);
+                            // ✅ AJOUTÉ (17 nov 2026, logs Paul) — livraison récupérée (job_id inconnu du contrôleur) : la ligne
+                            // filet de sécurité (même wo+ticket) refusait l'annulation (UNIQUE) → l'annulation n'était jamais
+                            // enregistrée et le bouton « Retour au bon de travail » ne revenait pas. On convertit cette ligne.
+                            if (idIns <= 0) {
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow dup = dbAnnuler.getByWoAndTicket(woNum, ticketNo);
+                                if (dup != null && !"ANNULATION".equalsIgnoreCase(dup.type)) {
+                                    if (dup.jobId != null && !dup.jobId.trim().isEmpty())
+                                        cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_JOB_ID, dup.jobId);
+                                    cv.remove(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_TS_CREATED_MS);
+                                    int nUp = dbAnnuler.updateDelivery(dup.id, cv);
+                                    LogBus.api(node, "[ANNULATION] ligne existante id=" + dup.id + " (" + dup.type + ") convertie en ANNULATION — maj=" + nUp);
+                                }
+                            }
                         }
                     } finally {
                         try { dbAnnuler.close(); } catch (Exception ignored) {}
