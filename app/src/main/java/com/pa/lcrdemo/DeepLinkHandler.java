@@ -327,6 +327,7 @@ public class DeepLinkHandler {
             // Lue ici, après le verrou PENDING : un lien refusé n'écrase donc rien.
             SimplifiedUiState.setFsProduitDesc(woNum,
                     data.getQueryParameter(SimplifiedConfig.DEEPLINK_PARAM_PRODUIT_DESC));
+            SimplifiedUiState.setProduitDemande(woNum, produit); // ✅ 17 nov 2026 — comparaison produit demandé vs registre (écran simplifié)
 
             // ✅ Configurer l'environnement selon l'URL Dataverse reçue de FSM
             // Un seul APK pour DEV / QA / STAGING / PROD
