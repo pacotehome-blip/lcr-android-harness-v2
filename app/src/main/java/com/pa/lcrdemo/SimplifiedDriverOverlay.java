@@ -573,6 +573,8 @@ final class SimplifiedDriverOverlay {
             titre = "Le registre ne répond plus";
             action = "Arrêtez le débit (fermez la vanne). Le Bluetooth est connecté, mais le registre ne répond pas : "
                 + "vérifiez qu’il est sous tension et que son câble série est bien branché. "
+                // ✅ AJOUTÉ (17 nov 2026, demande Paul — 13 nov : registre figé par son imprimante TM-T88VII) :
+                + "Vérifiez aussi l’imprimante du registre (TM-T88VII) : si elle est en erreur, redémarrez-la. "
                 + "Dès qu’il répond, la livraison reprend exactement là où elle était.";
         } else if ("PERTE2".equals(cle)) {
             titre = "Bluetooth du registre injoignable";

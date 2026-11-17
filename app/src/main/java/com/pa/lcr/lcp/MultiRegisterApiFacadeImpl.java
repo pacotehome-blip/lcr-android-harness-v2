@@ -89,6 +89,16 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     // même temps. Même patron que RegisterConnectionHelper.diagnosticEnCours
     // (déjà éprouvé depuis le 29 juillet pour exactement ce genre de course) :
     // verrou STATIQUE, staleness bypass si un appel précédent reste coincé.
+    // ✅ AJOUTÉ (17 nov 2026, demande Paul — "il faut trouver les registres sur le 250 par défaut, si pas trouvé
+    // selon les BT il faut demander de chercher les registres") — une détection AUTOMATIQUE (sans MAC cible, sans
+    // #série) ne sonde que le node 250 : un registre configuré en node 1, 2 ou autre ne répond pas et le tab restait
+    // vide jusqu'à un scan forcé. En cas d'échec, l'écran (MainActivity) est maintenant prévenu pour PROPOSER la
+    // recherche (jamais lancée automatiquement). Un deep link (MAC / #série / lcrnode fournis) ne passe jamais par ici.
+    public interface RechercheSuggereeListener { void onRechercheSuggeree(java.util.List<String> transportKeysEssayes); }
+    private static volatile RechercheSuggereeListener rechercheListener;
+    public static void setRechercheSuggereeListener(RechercheSuggereeListener l) { rechercheListener = l; }
+    public static void clearRechercheSuggereeListener(RechercheSuggereeListener l) { if (rechercheListener == l) rechercheListener = null; }
+
     private static volatile boolean connectAutoEnCours = false;
     private static volatile long connectAutoStartMs = 0L;
     private static final long CONNECT_AUTO_STALE_MS = 15_000L;
@@ -1167,6 +1177,16 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
         if (hasNode)   safePut(dn, "lcrnode",  node);
         safePut(dn, "scanSuggested", true);
         safePut(dn, "scanEndpoint",  "/v1/register/scan-auto");
+        // ✅ AJOUTÉ (17 nov 2026) — détection purement automatique (ni MAC cible, ni #série, ni node fournis) : seul le
+        // node 250 a été sondé. On prévient l'écran, qui PROPOSE (sans rien lancer) de chercher sur les autres nodes.
+        if (!cibleBt && !hasSerial && !hasNode) {
+            try {
+                LogBus.api(node, "[BT-RECHERCHE] aucun registre au node " + node + " — recherche sur les autres nodes PROPOSÉE à l'utilisateur (non lancée) — transports essayés=" + tried);
+                safePut(dn, "rechercheSuggeree", true);
+                RechercheSuggereeListener l = rechercheListener;
+                if (l != null) l.onRechercheSuggeree(new ArrayList<>(tried));
+            } catch (Throwable ignoredSug) {}
+        }
         safePut(dn, "tried",         new JSONArray(tried));
         safePut(dn, "attemptsDetail", attemptsDetail);
         return ApiResult.fail("Registre non trouvé sur BT ou USB", "ERR_REGISTER_NOT_FOUND", dn);

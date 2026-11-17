@@ -1385,6 +1385,18 @@ public class RegisterTabFragment extends Fragment {
             res.put("fs_gross_l", ng2[1]);
             res.put("product_number", safetyNet.produitNo);
             res.put("preset_requested", safetyNet.presetL);
+            // ✅ CORRIGÉ (17 nov 2026, demande Paul — 443 : « Retour au WO » a renvoyé le ticket 442) — trouvé, preuve BD du
+            // 13 nov : cette finalisation n'écrivait ni start_utc ni end_utc (lignes vides, durée 0). getLatestForWo() trie
+            // par end_utc : une ligne SANS end_utc passe pour « en cours » et se classe dernière → FieldService a été informé
+            // de la livraison précédente (442). On pose maintenant l'heure de confirmation du registre comme fin (approximative,
+            // signalée par end_utc_source) ; le début reste celui de la ligne d'armement s'il est connu.
+            try {
+                java.text.SimpleDateFormat isoUtc = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US);
+                isoUtc.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                res.put("end_utc", isoUtc.format(new java.util.Date()));
+                res.put("end_utc_source", "lecture_registre_approx");
+                if (safetyNet.startUtc != null && !safetyNet.startUtc.isEmpty()) res.put("start_utc", safetyNet.startUtc);
+            } catch (Exception ignoredIso) {}
             org.json.JSONObject extra = new org.json.JSONObject();
             extra.put("result", res);
             extra.put("jobId", safetyNet.jobId);

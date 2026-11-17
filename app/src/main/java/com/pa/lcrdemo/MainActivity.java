@@ -709,6 +709,8 @@ public class MainActivity extends AppCompatActivity {
         demanderAccesFichiersSiAbsent();
         setContentView(R.layout.activity_main);
         ACTIVE_INSTANCE = this;
+        // ✅ AJOUTÉ (17 nov 2026, demande Paul) — détection auto sans résultat au node 250 : PROPOSER la recherche.
+        com.pa.lcr.lcp.MultiRegisterApiFacadeImpl.setRechercheSuggereeListener(rechercheSuggereeListener);
 
         // ✅ AJOUTÉ (24 août 2026, demande Paul — "un moyen pour savoir
         // quel version nous sommes rendu dans l'apk après chaque commit")
@@ -1183,6 +1185,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         if (ACTIVE_INSTANCE == this) ACTIVE_INSTANCE = null;
+        com.pa.lcr.lcp.MultiRegisterApiFacadeImpl.clearRechercheSuggereeListener(rechercheSuggereeListener);
         stopApiServer("Activity destroyed");
         try { scanExec.shutdownNow(); } catch (Exception ignored) {}
         // ✅ FIX (6 août 2026, demande Paul — balayage systématique des
@@ -9092,6 +9095,128 @@ private void connectManualWithIo(TransportIo io, String transportKey, String med
             updateRegisterTabLabel(spec.tabKey, base);
         } catch (Exception ignored) {}
     }
+
+// =========================================================
+// ✅ AJOUTÉ (17 nov 2026, demande Paul — "il faut trouver les registres sur le 250 par défaut, si pas trouvé selon les
+// BT il faut demander de chercher les registres") — jamais lancé tout seul : une boîte de dialogue PROPOSE de chercher
+// sur tous les nodes. Rien n'est proposé pendant une livraison, un diagnostic, une connexion auto en cours, ni plus
+// d'une fois toutes les 5 minutes (un refus n'est pas redemandé en boucle). Le scan lui-même est celui des boutons
+// Scan BT/USB de Configure (scanRegistersWithIo), qui crée les tabs avec le VRAI node et le VRAI #série.
+// =========================================================
+private volatile boolean rechercheDialogOuvert = false;
+private volatile long rechercheDernierePropositionMs = 0L;
+private static final long RECHERCHE_REPROPOSITION_MS = 5 * 60 * 1000L;
+
+private final com.pa.lcr.lcp.MultiRegisterApiFacadeImpl.RechercheSuggereeListener rechercheSuggereeListener =
+    keys -> runOnUiThread(() -> proposerRechercheRegistres(keys));
+
+private void proposerRechercheRegistres(java.util.List<String> transportKeysEssayes) {
+    try {
+        if (isFinishing() || isDestroyed()) return;
+        if (rechercheDialogOuvert) return;
+        long now = System.currentTimeMillis();
+        if (now - rechercheDernierePropositionMs < RECHERCHE_REPROPOSITION_MS) {
+            logUi(null, "[BT-RECHERCHE] proposition déjà faite il y a moins de 5 min — pas de nouvelle boîte");
+            return;
+        }
+        // Règle Paul : aucune interruption pendant une livraison.
+        try {
+            RegisterSessionManager sm = RegisterSessionManager.get(this);
+            for (String[] k : sm.listKnownRegisters()) {
+                if (k != null && k.length >= 3 && k[2] != null && !k[2].isEmpty() && sm.hasRunningDeliveryOn(k[2])) {
+                    logUi(null, "[BT-RECHERCHE] proposition de recherche ignorée — livraison active");
+                    return;
+                }
+            }
+        } catch (Exception ignoredLa) {}
+        if (RegisterConnectionHelper.isDiagnosticEnCours()) return;
+
+        // Transports qui ont répondu « ouvert mais sans registre » : USB et BT seulement (pas de TCP à balayer ici).
+        final java.util.ArrayList<String> choix = new java.util.ArrayList<>();
+        if (transportKeysEssayes != null) {
+            for (String k : transportKeysEssayes) {
+                if (k == null) continue;
+                String u = k.toUpperCase(java.util.Locale.ROOT);
+                if ((u.startsWith("BT:") || u.startsWith("USB")) && !choix.contains(k)) choix.add(k);
+            }
+        }
+        if (choix.isEmpty()) {
+            logUi(null, "[BT-RECHERCHE] aucun transport à chercher (aucun BT/USB essayé) — pas de proposition");
+            return;
+        }
+        final String[] libelles = new String[choix.size()];
+        for (int i = 0; i < libelles.length; i++) {
+            String k = choix.get(i);
+            if (k.toUpperCase(java.util.Locale.ROOT).startsWith("BT:")) {
+                String mac = k.substring(3);
+                String nom = null;
+                try {
+                    android.bluetooth.BluetoothAdapter ad = android.bluetooth.BluetoothAdapter.getDefaultAdapter();
+                    if (ad != null) nom = ad.getRemoteDevice(mac).getName();
+                } catch (Throwable ignoredNom) {}
+                libelles[i] = "BT " + mac + (nom != null && !nom.isEmpty() ? " (" + nom + ")" : "");
+            } else {
+                libelles[i] = "USB";
+            }
+        }
+        final int[] selection = {0};
+        rechercheDialogOuvert = true;
+        rechercheDernierePropositionMs = now;
+        logUi(null, "[BT-RECHERCHE] aucun registre au node 250 — boîte « Chercher les registres » affichée (" + java.util.Arrays.toString(libelles) + ")");
+        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this)
+            .setTitle("Registre introuvable")
+            .setCancelable(true)
+            .setOnDismissListener(d -> rechercheDialogOuvert = false)
+            .setNegativeButton("Plus tard", (d, w) ->
+                logUi(null, "[BT-RECHERCHE] recherche refusée par l'utilisateur (« Plus tard »)"));
+        if (libelles.length == 1) {
+            b.setMessage("Aucun registre ne répond au node 250 (" + libelles[0] + ").\n\n"
+                + "Chercher les registres sur tous les nodes ? (peut prendre jusqu'à 2 minutes)");
+        } else {
+            b.setSingleChoiceItems(libelles, 0, (d, which) -> selection[0] = which);
+            b.setTitle("Registre introuvable — chercher sur :");
+        }
+        b.setPositiveButton("Chercher", (d, w) -> lancerRechercheRegistres(choix.get(selection[0])));
+        b.show();
+    } catch (Throwable t) {
+        rechercheDialogOuvert = false;
+        android.util.Log.w("MainActivity", "proposerRechercheRegistres ERR: " + t.getMessage());
+    }
+}
+
+/** Ouvre (si besoin) le transport choisi puis lance le scan de tous les nodes — celui de Configure. */
+private void lancerRechercheRegistres(final String transportKey) {
+    logUi(null, "[BT-RECHERCHE] recherche demandée par l'utilisateur sur " + transportKey + " (tous les nodes)");
+    toast("Recherche des registres en cours…");
+    new Thread(() -> {
+        try {
+            if (mediaTransportManager == null) mediaTransportManager = MediaTransportManager.get(this);
+            TransportIo io = mediaTransportManager.getByKey(transportKey);
+            if ((io == null || !io.isOpen()) && transportKey.toUpperCase(java.util.Locale.ROOT).startsWith("BT:")) {
+                // La détection automatique ferme un BT qui n'a pas répondu au node 250 : on le rouvre pour balayer.
+                try {
+                    com.pa.lcr.lcp.MultiRegisterApiFacadeImpl facade = new com.pa.lcr.lcp.MultiRegisterApiFacadeImpl(this);
+                    facade.api_btActivateMac(transportKey.substring(3), 250);
+                } catch (Exception eAct) {
+                    logUi(null, "[BT-RECHERCHE] réouverture BT ERR: " + eAct.getMessage());
+                }
+                io = mediaTransportManager.getByKey(transportKey);
+            }
+            if (io == null || !io.isOpen()) {
+                logUi(null, "[BT-RECHERCHE] transport " + transportKey + " impossible à ouvrir — recherche annulée");
+                runOnUiThread(() -> toast("Impossible d'ouvrir " + transportKey));
+                return;
+            }
+            final TransportIo ioFinal = io;
+            runOnUiThread(() -> {
+                ensureActiveTransport(transportKey, "RECHERCHE_REGISTRES");
+                scanRegistersWithIo(ioFinal, transportKey, null);
+            });
+        } catch (Exception e) {
+            logUi(null, "[BT-RECHERCHE] recherche ERR: " + e.getMessage());
+        }
+    }, "recherche-registres").start();
+}
 
 private void ensureActiveTransport(String transportKey, String reason) {
         try {
