@@ -4012,6 +4012,38 @@ public class RegisterTabFragment extends Fragment {
 
     boolean liaisonPerduePourSimplifie() { return etatLiaisonPourSimplifie() != 0; }
 
+    /** ✅ AJOUTÉ (17 nov 2026, demande Paul) — raison « produit demandé absent du registre » (null = aucune erreur). Lecture seule. */
+    String produitIntrouvableRaisonPourSimplifie() { return produitDeepLinkIntrouvableRaison; }
+
+    /** Libellés des produits réellement présents dans le registre (table lue lors du scan). Vide si table inconnue. */
+    java.util.List<String> produitsRegistrePourSimplifie() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        try {
+            com.pa.lcr.lcp.storage.RegisterProductStore st = new com.pa.lcr.lcp.storage.RegisterProductStore(requireContext());
+            if (serialFromArgs == null) return out;
+            for (com.pa.lcr.lcp.storage.RegisterProductStore.Row r : st.getAll(serialFromArgs.trim(), node)) {
+                if (r.description != null && !r.description.trim().isEmpty()) out.add(r.toSpinnerLabel());
+            }
+        } catch (Exception ignored) {}
+        return out;
+    }
+
+    /**
+     * Change le produit du REGISTRE (jamais celui de FieldService). Refusé pendant une livraison.
+     * Tracé dans Support. Retourne vrai si appliqué.
+     */
+    boolean changerProduitRegistrePourSimplifie(String label, String produitDemande) {
+        try {
+            if (livraisonActivePourSimplifie() || spnProduct == null || label == null || label.isEmpty()) return false;
+            String avant = spnProduct.getText() != null ? spnProduct.getText().toString() : "";
+            spnProduct.setText(label, false);
+            produitDeepLinkIntrouvableRaison = null; // le produit choisi existe dans la table du registre
+            LogBus.api(node, "[PRODUIT-MANUEL] Écran simplifié (mot de passe) — registre: \"" + avant + "\" → \"" + label
+                + "\" ; produit demandé (FieldService, inchangé)=" + produitDemande);
+            return true;
+        } catch (Exception e) { return false; }
+    }
+
     /** Vrai si une livraison est en cours (débit ou pause) sur ce registre : aucune action automatique ne doit alors toucher au lien. */
     boolean livraisonActivePourSimplifie() {
         try {

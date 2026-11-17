@@ -82,8 +82,8 @@ final class SimplifiedDriverOverlay {
     // Vues de la surcouche
     private View root;
     private TextView sTxtRegistre, sTxtRegistreEtat, sTxtTitre, sTxtSous, sTxtNet, sTxtGross, sTxtDejaLivre;
-    private TextView sTxtWo, sTxtPreset, sTxtProdFs, sTxtProdReg, sTxtTicket, sTxtVente, sTxtWoCumul, sTxtInit;
-    private View sDot, sBlocProdFs, sPanelWo;
+    private TextView sTxtProdCmp, sTxtWo, sTxtPreset, sTxtProdFs, sTxtProdReg, sTxtTicket, sTxtVente, sTxtWoCumul, sTxtInit;
+    private View sDot, sBlocProdFs, sPanelWo, sFrameProdReg;
     private MaterialCardView sBanner;
     private ProgressBar sProgConn;
     private MaterialButton sBtnTerminer, sBtnAnnuler, sBtnLancer, sBtnRetour, sBtnAdmin;
@@ -136,6 +136,7 @@ final class SimplifiedDriverOverlay {
     private volatile boolean perteEnLivraison = false;
     private Etat dernEtatLivr = null;
     private long dernEtatLivrMs = 0L;
+    private int dernierCmpProduit = -1;   // dernière comparaison produit demandé/registre (pour ne journaliser que les changements)
     private volatile int perteCas = 0;   // 1 = BT connecté mais registre muet ; 2 = BT du registre (Parani) injoignable   // liaison BT/registre perdue PENDANT une livraison
     private long connexionDepuisMs = 0L;
     private boolean connexionLongueSignalee = false;
@@ -252,6 +253,12 @@ final class SimplifiedDriverOverlay {
         sTxtPreset = root.findViewById(R.id.sTxtPreset);
         sTxtProdFs = root.findViewById(R.id.sTxtProdFs);
         sTxtProdReg = root.findViewById(R.id.sTxtProdReg);
+        sTxtProdCmp = root.findViewById(R.id.sTxtProdCmp);
+        sFrameProdReg = root.findViewById(R.id.sFrameProdReg);
+        if (sFrameProdReg != null) {
+            appliquerCadreProduit(false);
+            sFrameProdReg.setOnLongClickListener(v -> { demanderChangementProduitRegistre(); return true; });
+        }
         sTxtTicket = root.findViewById(R.id.sTxtTicket);
         sTxtVente = root.findViewById(R.id.sTxtVente);
         sTxtWoCumul = root.findViewById(R.id.sTxtWoCumul);
@@ -1157,6 +1164,36 @@ final class SimplifiedDriverOverlay {
         sBlocProdFs.setVisibility(fsDesc.isEmpty() ? View.GONE : View.VISIBLE);
         sTxtProdFs.setText(fsDesc);
 
+        // ✅ AJOUTÉ (17 nov 2026, demande Paul) — produit demandé par le deeplink vs produit du registre : « = » ou erreur.
+        if (sTxtProdCmp != null) {
+            String absent = host.produitIntrouvableRaisonPourSimplifie();
+            int cmp = absent != null ? SimplifiedUiState.PRODUIT_DIFFERENT : SimplifiedUiState.comparerProduit(wo, prodReg);
+            if (cmp == SimplifiedUiState.PRODUIT_CONCORDE) {
+                sTxtProdCmp.setText("= Même produit que celui demandé");
+                sTxtProdCmp.setTextColor(Color.parseColor("#1B7F3B"));
+                sTxtProdCmp.setVisibility(View.VISIBLE);
+            } else if (cmp == SimplifiedUiState.PRODUIT_DIFFERENT) {
+                String dem = SimplifiedUiState.getProduitDemande(wo);
+                String demande = !fsDesc.isEmpty() ? fsDesc : (dem.isEmpty() ? "—" : (dem.matches("\\d+") ? "produit " + dem : dem));
+                sTxtProdCmp.setText(absent != null
+                    ? "✖ ERREUR — le produit demandé (" + demande + ") n’est pas dans le registre. Livraison non armée : retournez au bon de travail."
+                    : "✖ ERREUR — le produit du registre ne correspond pas au produit demandé (" + demande + ")");
+                sTxtProdCmp.setTextColor(Color.parseColor("#B3261E"));
+                sTxtProdCmp.setVisibility(View.VISIBLE);
+            } else {
+                sTxtProdCmp.setVisibility(View.GONE);
+            }
+            appliquerCadreProduit(cmp == SimplifiedUiState.PRODUIT_DIFFERENT);
+            if (cmp != dernierCmpProduit) {
+                dernierCmpProduit = cmp;
+                if (cmp == SimplifiedUiState.PRODUIT_CONCORDE || cmp == SimplifiedUiState.PRODUIT_DIFFERENT) {
+                    try { com.pa.lcr.lcp.log.LogBus.api(0, "[PRODUIT-COMPARAISON] " + (cmp == SimplifiedUiState.PRODUIT_CONCORDE ? "concorde" : "ERREUR — aucune concordance")
+                        + " — demandé(deeplink)=" + SimplifiedUiState.getProduitDemande(wo) + " / FieldService=\"" + fsDesc
+                        + "\" — registre=\"" + prodReg + "\""); } catch (Throwable ignoredLb) {}
+                }
+            }
+        }
+
         // Ticket / Sale Number : le texte (avec son soulignement) est copié tel quel
         sTxtTicket.setText(txtTicketNo != null ? txtTicketNo.getText() : "");
         sTxtVente.setText(txtSaleNo != null ? txtSaleNo.getText() : "");
@@ -1365,6 +1402,70 @@ final class SimplifiedDriverOverlay {
         if (animTerminer != null) { animTerminer.cancel(); animTerminer = null; }
         if (sBtnTerminer != null) { sBtnTerminer.setScaleX(1f); sBtnTerminer.setScaleY(1f); }
         dernierPulseTerminer = false;
+    }
+
+
+    // ------------------------------------------------------------------ Produit du registre (cadre + appui long)
+
+    /** Cadre délicat autour du produit du registre : vert (#024B3C, comme « Terminer ») ou rouge en cas d’erreur. */
+    private void appliquerCadreProduit(boolean erreur) {
+        try {
+            if (sFrameProdReg == null) return;
+            float dp = holder.getContext().getResources().getDisplayMetrics().density;
+            android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+            g.setColor(Color.TRANSPARENT);
+            g.setCornerRadius(10 * dp);
+            g.setStroke((int) Math.max(1, 1.5f * dp), Color.parseColor(erreur ? "#B3261E" : "#024B3C"));
+            sFrameProdReg.setBackground(g);
+        } catch (Throwable ignored) {}
+    }
+
+    /** Appui long sur le cadre : mot de passe, puis choix parmi les produits PRÉSENTS dans le registre. Jamais pendant une livraison. */
+    private void demanderChangementProduitRegistre() {
+        final Context ctx = holder.getContext();
+        if (host.livraisonActivePourSimplifie()) {
+            Toast.makeText(ctx, "Changement de produit impossible pendant une livraison", Toast.LENGTH_LONG).show();
+            return;
+        }
+        final android.widget.EditText saisie = new android.widget.EditText(ctx);
+        saisie.setHint("Mot de passe");
+        saisie.setSingleLine(true);
+        saisie.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        android.widget.LinearLayout box = new android.widget.LinearLayout(ctx);
+        int pad = (int) (20 * ctx.getResources().getDisplayMetrics().density);
+        box.setPadding(pad, pad / 2, pad, 0);
+        box.addView(saisie, new android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT));
+        new android.app.AlertDialog.Builder(ctx)
+                .setTitle("Changer le produit du registre")
+                .setMessage("Le produit de FieldService ne change pas. Mot de passe requis.")
+                .setView(box)
+                .setNegativeButton("Annuler", null)
+                .setPositiveButton("Entrer", (d, w) -> {
+                    if (saisie.getText().toString().equals(SimplifiedConfig.ADMIN_PASSWORD)) choisirProduitRegistre();
+                    else Toast.makeText(ctx, "Mot de passe incorrect", Toast.LENGTH_SHORT).show();
+                })
+                .show();
+    }
+
+    private void choisirProduitRegistre() {
+        final Context ctx = holder.getContext();
+        final java.util.List<String> labels = host.produitsRegistrePourSimplifie();
+        if (labels.isEmpty()) {
+            Toast.makeText(ctx, "Produits du registre inconnus — attendez la lecture du registre", Toast.LENGTH_LONG).show();
+            return;
+        }
+        final String wo = woCourant();
+        new android.app.AlertDialog.Builder(ctx)
+                .setTitle("Produit présent dans le registre")
+                .setItems(labels.toArray(new String[0]), (d, which) -> {
+                    if (host.livraisonActivePourSimplifie()) return;
+                    if (host.changerProduitRegistrePourSimplifie(labels.get(which), SimplifiedUiState.getProduitDemande(wo))) {
+                        Toast.makeText(ctx, "Produit du registre : " + labels.get(which), Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNegativeButton("Annuler", null)
+                .show();
     }
 
     // ------------------------------------------------------------------ Admin

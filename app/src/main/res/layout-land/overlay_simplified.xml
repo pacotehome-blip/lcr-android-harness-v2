@@ -397,10 +397,18 @@
                             android:textStyle="bold" />
                     </LinearLayout>
 
-                    <TextView
-                        android:layout_width="wrap_content"
+                    <LinearLayout
+                        android:id="@+id/sFrameProdReg"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="10dp"
+                        android:orientation="vertical"
+                        android:padding="8dp">
+
+<TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="0dp"
                         android:text="Produit du registre"
                         android:textColor="#3A3A3A"
                         android:textSize="12sp" />
@@ -413,6 +421,18 @@
                         android:textColor="#111111"
                         android:textSize="18sp"
                         android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/sTxtProdCmp"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text=""
+                        android:textColor="#1B7F3B"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+                    </LinearLayout>
 
                     <TextView
                         android:id="@+id/sTxtTicket"
