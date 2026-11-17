@@ -641,10 +641,13 @@ final class SimplifiedDriverOverlay {
         }
         if (btnReconnecter != null) btnReconnecter.setVisibility(erreur && !"PRODUIT".equals(cle) ? View.VISIBLE : View.GONE);
         if (btnPrint != null) btnPrint.setVisibility("PRINT".equals(cle) ? View.VISIBLE : View.GONE);
-        bFlamme.setVisibility(erreur && flammeAnimee() ? View.VISIBLE : View.GONE);
+        // ✅ 17 nov 2026 (demande Paul) — service d'impression inactif : la flamme cogne aussi (toc-toc) avec la carte ;
+        // la petite mascotte reste verte (avertissement, pas une erreur de registre).
+        final boolean alerteFlamme = erreur || "PRINT".equals(cle);
+        bFlamme.setVisibility(alerteFlamme && flammeAnimee() ? View.VISIBLE : View.GONE);
         boolean nouvelle = !bulleVisible;
         afficherBulle();
-        if (!erreur) {                 // simple avertissement : carte directe, sans mascotte, sans son
+        if (!alerteFlamme) {           // simple avertissement : carte directe, sans mascotte, sans son
             montrerCarte(true);
             return;
         }
@@ -1152,7 +1155,8 @@ final class SimplifiedDriverOverlay {
         perteEnLivraison = perte;
         // Flamme + toc-toc : registre/BT déconnecté (hors livraison) OU perte de liaison pendant la livraison.
         produitBloque = host.attenteProduitChauffeur && !(etat == Etat.DEBIT || etat == Etat.CONFIRM || etat == Etat.PAUSE || etat == Etat.ENDING);
-        if ((coupe || echecDeepLink || perte || produitBloque) && !oublieErreur) balancerTrombone();
+        boolean enLivrSimple = etat == Etat.DEBIT || etat == Etat.CONFIRM || etat == Etat.PAUSE || etat == Etat.ENDING;
+        if ((coupe || echecDeepLink || perte || produitBloque || (!printActif && !enLivrSimple)) && !oublieErreur) balancerTrombone();
         gererAssistant(coupe, echecDeepLink, etat);
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION
                 ? (coupe ? "Reconnexion au registre nécessaire" : "Connexion en cours…")
