@@ -4572,6 +4572,8 @@ public class DeepLinkHandler {
                         } catch (Exception ignoredToast) {}
                     });
                     final long delaiMaxMs = 30L * 60L * 1000L; // garde-fou : pas de fil bloqué indéfiniment
+                    tabArmRef.attenteProduitChauffeur = true; // l'écran simplifié alerte (flamme + toc-toc)
+                    try {
                     while (System.currentTimeMillis() - debutAttenteMs < delaiMaxMs) {
                         try { Thread.sleep(400); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
                         if (!tabArmRef.isAdded()) break;
@@ -4587,6 +4589,7 @@ public class DeepLinkHandler {
                             return false;
                         }
                     }
+                    } finally { tabArmRef.attenteProduitChauffeur = false; }
                     try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredClearProduit2) {}
                     return true;
                 }

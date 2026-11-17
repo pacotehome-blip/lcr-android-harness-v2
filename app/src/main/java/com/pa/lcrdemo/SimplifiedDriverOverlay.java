@@ -543,6 +543,7 @@ final class SimplifiedDriverOverlay {
         bCarte.animate().alpha(1f).translationY(0f).setDuration(280).start();
     }
 
+    private boolean produitBloque = false;
     private boolean dernCoupe = false, dernEchec = false;
     private Etat dernEtat = null;
 
@@ -561,8 +562,8 @@ final class SimplifiedDriverOverlay {
         boolean enLivraison = etat == Etat.DEBIT || etat == Etat.CONFIRM
                 || etat == Etat.PAUSE || etat == Etat.ENDING;
         // ERREUR = communication perdue ou registre introuvable ; AVERTISSEMENT = impression (mascotte reste verte)
-        boolean erreur = coupe || echecDeepLink || perteEnLivraison;
-        String cle = perteEnLivraison ? ("PERTE" + perteCas) : coupe ? "COMM" : (echecDeepLink ? "DEEPLINK" : (!printActif ? "PRINT" : ""));
+        boolean erreur = coupe || echecDeepLink || perteEnLivraison || produitBloque;
+        String cle = perteEnLivraison ? ("PERTE" + perteCas) : coupe ? "COMM" : (echecDeepLink ? "DEEPLINK" : (produitBloque ? "PRODUIT" : (!printActif ? "PRINT" : "")));
         erreurActive = erreur;
         if (sMascotte != null) { sMascotte.setErreur(erreur); sMascotte.setInquiet(erreur); }
         if (cle.isEmpty()) {          // tout va bien : on range et on remet à zéro
@@ -596,6 +597,14 @@ final class SimplifiedDriverOverlay {
             lancerTriage(cle);
             titre = "Communication perdue avec le registre";
             action = (causeDiag != null && !causeDiag.isEmpty()) ? causeDiag : actionCommunication(cle);
+        } else if ("PRODUIT".equals(cle)) {
+            String regP = spnProduct != null && spnProduct.getText() != null ? spnProduct.getText().toString().trim() : "—";
+            String demP = host.descriptionProduitDemandePourSimplifie();
+            titre = "Produit non concordant";
+            action = "Le produit du registre (" + regP + ") ne correspond pas au produit demandé par FieldService ("
+                + (demP.isEmpty() ? "—" : demP) + "). La livraison n’est pas armée. "
+                + "Faites un appui long sur l’encadré vert du produit, entrez le mot de passe et choisissez le produit : "
+                + "vous serez alors responsable de ce que vous livrez. Sinon, annulez la livraison pour retourner au bon de travail.";
         } else if ("DEEPLINK".equals(cle)) {
             titre = "Registre introuvable";
             lancerTriage(cle);
@@ -630,7 +639,7 @@ final class SimplifiedDriverOverlay {
                     || (("COMM".equals(cle) || "DEEPLINK".equals(cle)) && cle.equals(triageCle) && !diagnosticN1(cle));
             btnContacter.setText(ticket ? "Ouvrir un ticket" : "Contacter le support");
         }
-        if (btnReconnecter != null) btnReconnecter.setVisibility(erreur ? View.VISIBLE : View.GONE);
+        if (btnReconnecter != null) btnReconnecter.setVisibility(erreur && !"PRODUIT".equals(cle) ? View.VISIBLE : View.GONE);
         if (btnPrint != null) btnPrint.setVisibility("PRINT".equals(cle) ? View.VISIBLE : View.GONE);
         bFlamme.setVisibility(erreur && flammeAnimee() ? View.VISIBLE : View.GONE);
         boolean nouvelle = !bulleVisible;
@@ -1142,7 +1151,8 @@ final class SimplifiedDriverOverlay {
         perteCas = perte ? casLiaison : 0;
         perteEnLivraison = perte;
         // Flamme + toc-toc : registre/BT déconnecté (hors livraison) OU perte de liaison pendant la livraison.
-        if ((coupe || echecDeepLink || perte) && !oublieErreur) balancerTrombone();
+        produitBloque = host.attenteProduitChauffeur && !(etat == Etat.DEBIT || etat == Etat.CONFIRM || etat == Etat.PAUSE || etat == Etat.ENDING);
+        if ((coupe || echecDeepLink || perte || produitBloque) && !oublieErreur) balancerTrombone();
         gererAssistant(coupe, echecDeepLink, etat);
         sTxtRegistreEtat.setText(etat == Etat.CONNEXION
                 ? (coupe ? "Reconnexion au registre nécessaire" : "Connexion en cours…")

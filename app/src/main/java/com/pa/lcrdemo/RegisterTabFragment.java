@@ -4052,6 +4052,8 @@ public class RegisterTabFragment extends Fragment {
         } catch (Exception ignored) {}
     }
 
+    /** Vrai tant que le deeplink attend le choix du chauffeur (produit non concordant) — l'écran simplifié alerte. */
+    public volatile boolean attenteProduitChauffeur = false;
     private volatile long derniereAnnulationOperateurMs = 0L;
     public long derniereAnnulationOperateurMs() { return derniereAnnulationOperateurMs; }
     public String getProduitChoisiParChauffeur() { return produitChoisiParChauffeur; }
