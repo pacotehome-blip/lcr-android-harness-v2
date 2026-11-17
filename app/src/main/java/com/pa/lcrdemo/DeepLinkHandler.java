@@ -4535,6 +4535,8 @@ public class DeepLinkHandler {
 
     /** true = livraison annulée pour produit introuvable (dialogue affiché, le
      *  chauffeur reste dans le tab) ; l'appelant doit alors NE PAS armer. */
+    private static int node0(RegisterTabFragment t) { try { return t.getNodeFromArgs(); } catch (Exception e) { return 0; } }
+
     private boolean produitMismatchBloque(RegisterTabFragment tabArmRef, String serialId, String woNum) {
         if (tabArmRef == null) return false;
 
@@ -4558,40 +4560,34 @@ public class DeepLinkHandler {
                     // link suivant, même pour un WO complètement
                     // différent. Nettoyé directement, sans réintroduire
                     // retournerFieldService()/finish().
-                    try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredClearProduit) {}
-                    // ✅ CORRIGÉ (14 sept 2026, demande Paul — "on veut
-                    // laisser le livreur faire le changement dans produit
-                    // ou preset pour ensuite lancer la livraison bouton
-                    // vert avec les changements") — trouvé : le correctif
-                    // précédent affichait bien le dialogue, mais appelait
-                    // ensuite retournerFieldService() → finish() —
-                    // renvoyant le chauffeur à FieldService SANS lui
-                    // laisser la chance de corriger sur place. Ne renvoie
-                    // plus à FieldService ici : affiche le dialogue
-                    // (informatif, rien à décider), puis RESTE dans le
-                    // tab — spnProduct (liste déroulante des vrais
-                    // produits scannés sur le registre) et edtPreset
-                    // restent éditables, btnC (🚀 Lancer la livraison)
-                    // reste disponible pour que le chauffeur corrige et
-                    // relance lui-même via startNewDeliveryC(), qui
-                    // revalide déjà produit et preset à partir de l'écran.
-                    final java.util.concurrent.CountDownLatch produitMismatchLatch =
-                        new java.util.concurrent.CountDownLatch(1);
-                    final String fRaisonMismatch = raisonMismatch;
+                    // ✅ REMPLACÉ (17 nov 2026, demande Paul) — on RESTE DANS LA BOUCLE : la demande du deeplink doit être complétée.
+                    // Sortie 1 : le chauffeur choisit un produit après mot de passe (appui long sur l'encadré vert) → on arme,
+                    //            et il devient imputable (voir buildArmementPayloadExtra).
+                    // Sortie 2 : il annule la livraison → on n'arme pas ; le bouton bleu « Retour au bon de travail » apparaît.
+                    final long debutAttenteMs = System.currentTimeMillis();
+                    com.pa.lcr.lcp.log.LogBus.api(node0(tabArmRef), "[PRODUIT-BOUCLE] en attente d'un choix du chauffeur (mot de passe) ou d'une annulation — " + raisonMismatch);
                     activity.runOnUiThread(() -> {
-                        try {
-                            new android.app.AlertDialog.Builder(activity)
-                                .setTitle("Produit non trouvé sur le registre")
-                                .setMessage(fRaisonMismatch + "\n\nCorrigez le produit ou le preset à l'écran, puis appuyez sur \"Lancer la livraison\".")
-                                .setPositiveButton("OK", (d, w) -> produitMismatchLatch.countDown())
-                                .setCancelable(false)
-                                .show();
-                        } catch (Exception eDialogProduit) {
-                            android.util.Log.w(TAG, "[PRODUIT-MISMATCH] dialogue ERR (non-bloquant): " + eDialogProduit.getMessage());
-                            produitMismatchLatch.countDown();
-                        }
+                        try { android.widget.Toast.makeText(activity,
+                                "Produit non concordant — appui long sur l’encadré vert (mot de passe) ou annulez", android.widget.Toast.LENGTH_LONG).show();
+                        } catch (Exception ignoredToast) {}
                     });
-                    try { produitMismatchLatch.await(); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    final long delaiMaxMs = 30L * 60L * 1000L; // garde-fou : pas de fil bloqué indéfiniment
+                    while (System.currentTimeMillis() - debutAttenteMs < delaiMaxMs) {
+                        try { Thread.sleep(400); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                        if (!tabArmRef.isAdded()) break;
+                        if (tabArmRef.derniereAnnulationOperateurMs() > debutAttenteMs) {
+                            com.pa.lcr.lcp.log.LogBus.api(node0(tabArmRef), "[PRODUIT-BOUCLE] livraison annulée par le chauffeur — pas d'armement");
+                            try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredClearProduit) {}
+                            return true;
+                        }
+                        String encore = tabArmRef.getProduitDeepLinkIntrouvableRaison();
+                        if ((encore == null || encore.isEmpty()) && tabArmRef.raisonProduitNonConcordant(woNum) == null) {
+                            com.pa.lcr.lcp.log.LogBus.api(node0(tabArmRef), "[PRODUIT-BOUCLE] produit choisi par le chauffeur — poursuite de l'armement ("
+                                + tabArmRef.getProduitChoisiParChauffeur() + ")");
+                            return false;
+                        }
+                    }
+                    try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredClearProduit2) {}
                     return true;
                 }
         return false;
@@ -5368,6 +5364,21 @@ public class DeepLinkHandler {
             base = "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}";
         }
         if (tabArmRef == null) return base;
+        // ✅ AJOUTÉ (17 nov 2026, demande Paul) — le chauffeur a choisi lui-même le produit (mot de passe) : il est imputable de ce qu'il livre.
+        try {
+            String choisi = tabArmRef.getProduitChoisiParChauffeur();
+            if (choisi != null && !choisi.isEmpty()) {
+                JSONObject pi = new JSONObject(base);
+                pi.put("produit_choisi_par_chauffeur", true);
+                pi.put("produit_registre_choisi", choisi);
+                pi.put("produit_demande_fieldservice", tabArmRef.descriptionProduitDemandePourSimplifie());
+                base = pi.toString();
+                com.pa.lcr.lcp.log.LogBus.api(node, "[PRODUIT-IMPUTABLE] chauffeur responsable — registre=\"" + choisi
+                    + "\" ; demandé FieldService=\"" + tabArmRef.descriptionProduitDemandePourSimplifie() + "\"");
+            }
+        } catch (Exception eImp) {
+            android.util.Log.w(TAG, "imputabilité produit ERR (non-bloquant): " + eImp.getMessage());
+        }
         try {
             String produitDeepLink = tabArmRef.getCurrentProduitDeepLink();
             String presetDeepLink  = tabArmRef.getCurrentPresetDeepLink();

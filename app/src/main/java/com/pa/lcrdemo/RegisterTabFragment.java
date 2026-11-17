@@ -4052,6 +4052,19 @@ public class RegisterTabFragment extends Fragment {
         } catch (Exception ignored) {}
     }
 
+    private volatile long derniereAnnulationOperateurMs = 0L;
+    public long derniereAnnulationOperateurMs() { return derniereAnnulationOperateurMs; }
+    public String getProduitChoisiParChauffeur() { return produitChoisiParChauffeur; }
+    /** Description du produit demandé par FieldService (sinon valeur brute du deeplink), pour la trace d'imputabilité. */
+    public String descriptionProduitDemandePourSimplifie() {
+        try {
+            String wo = currentWoNum != null ? currentWoNum : "";
+            String d = SimplifiedUiState.getFsProduitDesc(wo);
+            if (d == null || d.isEmpty()) d = SimplifiedUiState.getProduitDemande(wo);
+            return d == null ? "" : d;
+        } catch (Exception e) { return ""; }
+    }
+
     /** Libellés des produits réellement présents dans le registre (table lue lors du scan). Vide si table inconnue. */
     java.util.List<String> produitsRegistrePourSimplifie() {
         java.util.List<String> out = new java.util.ArrayList<>();
@@ -4390,6 +4403,7 @@ public class RegisterTabFragment extends Fragment {
     }
 
     public void prefillFromDeepLink(String woNum, String produit, String preset) {
+        produitChoisiParChauffeur = null; // nouvelle demande deeplink : l'ancien choix du chauffeur ne vaut plus
         prefillFromDeepLink(woNum, "", produit, preset);
     }
 
@@ -7973,6 +7987,7 @@ public class RegisterTabFragment extends Fragment {
         if (btnRetourWO != null) btnRetourWO.setEnabled(false);
         // ✅ Poser le flag AVANT bg.execute — évite race avec onStateChanged(ENDED)
         cancelInProgress = true;
+        derniereAnnulationOperateurMs = System.currentTimeMillis();
         // ✅ AJOUTÉ (13 oct 2026, demande Paul — annulation = mêmes informations
         // qu'une livraison complète) — job_id capturé AVANT forceEndSync(), qui
         // peut réinitialiser le job courant du contrôleur.
@@ -8052,6 +8067,30 @@ public class RegisterTabFragment extends Fragment {
                 } else if (tentativesValidationAnnulation > 0) {
                     LogBus.api(node, "[ANNULATION-VALIDATION] registre confirmé propre après "
                         + tentativesValidationAnnulation + " réessai(s) — aucun résidu, aucune nouvelle livraison démarrée");
+                }
+
+                // ✅ AJOUTÉ (17 nov 2026, demande Paul — « si je suis encore à pending / ce que tu vois sur status,
+                // il faut faire Resolve A ») — constaté : après une annulation, le registre peut rester à
+                // END_DELIVERY (ds=0x0400, bit 0x80 absent = ticket encore en attente) ; Resolve (A) le libère.
+                // Resolve (A) = alignement sans impression, sans armement ; jamais pendant un débit.
+                try {
+                    for (int essaiA = 1; essaiA <= 3; essaiA++) {
+                        try { c.requestStatus(); Thread.sleep(600); } catch (Exception ignoredRq) {}
+                        com.pa.lcr.lcp.DeliveryState stA = c.getState();
+                        if (stA == com.pa.lcr.lcp.DeliveryState.RUNNING_FLOWING || stA == com.pa.lcr.lcp.DeliveryState.RUNNING_PAUSED) break;
+                        int dsA = c.getLastDelStatus();
+                        boolean encorePending = (dsA & 0x0400) != 0 && (dsA & 0x0080) == 0;
+                        if (!encorePending) {
+                            if (essaiA > 1) LogBus.api(node, "[ANNULATION-RESOLVE-A] registre revenu au repos (ds=0x" + Integer.toHexString(dsA) + ") après " + (essaiA - 1) + " Resolve (A)");
+                            break;
+                        }
+                        LogBus.api(node, "[ANNULATION-RESOLVE-A] ticket encore en attente après annulation (ds=0x" + Integer.toHexString(dsA)
+                            + ", dc=0x" + Integer.toHexString(c.getLastDelCode()) + ") — Resolve (A) automatique " + essaiA + "/3");
+                        try { c.api_deliveryAlignA(); } catch (Exception ignoredAl) {}
+                        try { Thread.sleep(800); } catch (Exception ignoredSl) {}
+                    }
+                } catch (Exception eResA) {
+                    LogBus.api(node, "[ANNULATION-RESOLVE-A] ERR (non-bloquant): " + eResA.getMessage());
                 }
 
                 // 4. Lire le ticket UID généré par endDelivery
