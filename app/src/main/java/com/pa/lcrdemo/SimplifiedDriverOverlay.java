@@ -208,6 +208,7 @@ final class SimplifiedDriverOverlay {
         lp.setMargins(m, m, m, m);
         wrapper.addView(btnRetourSimple, lp);
         construireBulle(ctx, wrapper);
+        construireEcran2(ctx, wrapper);
 
         holder.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override public void onViewAttachedToWindow(View v) { start(); }
@@ -389,7 +390,7 @@ final class SimplifiedDriverOverlay {
         bulle.setOrientation(LinearLayout.VERTICAL);
         bulle.setPadding((int) (4 * dp), 0, 0, 0);
         bFlamme = new FlammeView(ctx);
-        bulle.addView(bFlamme, new LinearLayout.LayoutParams((int) (140 * dp), (int) (140 * dp)));
+        bulle.addView(bFlamme, new LinearLayout.LayoutParams((int) (70 * dp), (int) (70 * dp))); // 18 nov 2026 : flamme (et son animation) réduite de moitié
 
         bCarte = new LinearLayout(ctx);
         bCarte.setOrientation(LinearLayout.VERTICAL);
@@ -496,6 +497,213 @@ final class SimplifiedDriverOverlay {
         wrapper.addView(bulle, lpBulle);
     }
 
+    // ------------------------------------------------------------------ écran simplifié 2 (produit non concordant)
+    private FrameLayout ecran2;
+    private LinearLayout ecran2Contenu;
+    private boolean ecran2Visible = false;
+
+    private void construireEcran2(Context ctx, FrameLayout wrapper) {
+        final float dp = ctx.getResources().getDisplayMetrics().density;
+        ecran2 = new FrameLayout(ctx);
+        android.graphics.drawable.GradientDrawable fond = new android.graphics.drawable.GradientDrawable();
+        fond.setColor(Color.parseColor("#F3F4F3"));
+        fond.setCornerRadius(16 * dp);
+        fond.setStroke((int) (2 * dp), Color.parseColor("#B3261E"));
+        ecran2.setBackground(fond);
+        android.widget.ScrollView sv = new android.widget.ScrollView(ctx);
+        ecran2Contenu = new LinearLayout(ctx);
+        ecran2Contenu.setOrientation(LinearLayout.VERTICAL);
+        int p = (int) (12 * dp);
+        ecran2Contenu.setPadding(p, p, p, p);
+        sv.addView(ecran2Contenu, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
+        ecran2.addView(sv, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
+        // sous la petite flamme (76 dp de haut de page + 70 dp de flamme)
+        lp.setMargins((int) (8 * dp), (int) (150 * dp), (int) (8 * dp), (int) (8 * dp));
+        ecran2.setVisibility(View.GONE);
+        wrapper.addView(ecran2, lp);
+    }
+
+    private void montrerEcran2(boolean voir) {
+        if (ecran2 == null) return;
+        if (!voir) {
+            ecran2Visible = false;
+            ecran2.setVisibility(View.GONE);
+            return;
+        }
+        remplirEcran2();
+        if (!ecran2Visible) {
+            ecran2Visible = true;
+            ecran2.setVisibility(View.VISIBLE);
+            if (ValueAnimator.areAnimatorsEnabled()) {
+                ecran2.setAlpha(0f);
+                ecran2.animate().alpha(1f).setDuration(280).start();
+            }
+        }
+    }
+
+    private TextView t2(String texte, float sp, int couleur, boolean gras) {
+        TextView tv = new TextView(holder.getContext());
+        tv.setText(texte);
+        tv.setTextSize(sp);
+        tv.setTextColor(couleur);
+        if (gras) tv.setTypeface(tv.getTypeface(), android.graphics.Typeface.BOLD);
+        return tv;
+    }
+
+    private MaterialButton b2(String texte, int fond, View.OnClickListener l) {
+        MaterialButton b = new MaterialButton(holder.getContext());
+        b.setText(texte);
+        b.setAllCaps(true);
+        b.setBackgroundTintList(ColorStateList.valueOf(fond));
+        b.setTextColor(Color.WHITE);
+        b.setOnClickListener(l);
+        return b;
+    }
+
+    private LinearLayout carte2(int bordure) {
+        final float dp = holder.getContext().getResources().getDisplayMetrics().density;
+        LinearLayout c = new LinearLayout(holder.getContext());
+        c.setOrientation(LinearLayout.VERTICAL);
+        int p = (int) (10 * dp);
+        c.setPadding(p, p, p, p);
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+        g.setColor(Color.WHITE);
+        g.setCornerRadius(12 * dp);
+        g.setStroke((int) (1.5f * dp), bordure);
+        c.setBackground(g);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, 0, (int) (10 * dp));
+        c.setLayoutParams(lp);
+        return c;
+    }
+
+    /** Contenu de l'écran 2 : produit demandé, produits du registre actif, autres registres du lien, sorties. */
+    private void remplirEcran2() {
+        if (ecran2Contenu == null) return;
+        final Context ctx = holder.getContext();
+        final float dp = ctx.getResources().getDisplayMetrics().density;
+        ecran2Contenu.removeAllViews();
+        final String wo = woCourant();
+        final String demande = host.descriptionProduitDemandePourSimplifie();
+        ecran2Contenu.addView(t2("✖ Produit non concordant", 20, Color.parseColor("#B3261E"), true));
+        TextView info = t2("Demandé par FieldService : " + (demande.isEmpty() ? "—" : demande)
+                + "\nLe registre indiqué par le deep link ne l’a pas : ce n’est peut-être pas le bon. La livraison n’est pas armée.",
+                14, Color.parseColor("#1C1F1E"), false);
+        info.setPadding(0, (int) (4 * dp), 0, (int) (10 * dp));
+        ecran2Contenu.addView(info);
+
+        // 1) registre actif : ses produits (choisir = mot de passe + imputable)
+        LinearLayout actif = carte2(Color.parseColor("#024B3C"));
+        actif.addView(t2("Registre actif — produits", 12, Color.parseColor("#555555"), false));
+        final java.util.List<String> produits = host.produitsRegistrePourSimplifie();
+        if (produits.isEmpty()) {
+            actif.addView(t2("Produits du registre inconnus — attendez la lecture.", 14, Color.parseColor("#B3261E"), false));
+        }
+        for (final String p : produits) {
+            MaterialButton bp = b2(p, Color.parseColor("#024B3C"), v -> demanderMotDePasse(() -> {
+                if (host.livraisonActivePourSimplifie()) return;
+                if (host.changerProduitRegistrePourSimplifie(p, SimplifiedUiState.getProduitDemande(wo))) {
+                    Toast.makeText(ctx, "Produit du registre : " + p + " — vous êtes responsable de la livraison", Toast.LENGTH_LONG).show();
+                }
+            }));
+            bp.setAllCaps(false);
+            actif.addView(bp);
+        }
+        actif.addView(t2("Choisir un produit demande le mot de passe : vous êtes alors responsable de ce que vous livrez.",
+                12, Color.parseColor("#555555"), false));
+        ecran2Contenu.addView(actif);
+
+        // 2) autres registres du lien
+        try {
+            android.app.Activity act = host.getActivity();
+            if (act instanceof MainActivity) {
+                final MainActivity ma = (MainActivity) act;
+                java.util.List<String[]> regs = ma.registresPourSimplifie();
+                boolean titre = false;
+                com.pa.lcr.lcp.storage.RegisterProductStore st = new com.pa.lcr.lcp.storage.RegisterProductStore(ctx);
+                try {
+                    for (String[] r : regs) {
+                        if ("1".equals(r[2])) continue; // le registre actif est déjà affiché
+                        String[] parts = r[0].split(":");
+                        if (parts.length < 3) continue;
+                        final int node;
+                        try { node = Integer.parseInt(parts[1].trim()); } catch (NumberFormatException nfe) { continue; }
+                        final String serial = parts[2].trim();
+                        if (!titre) {
+                            titre = true;
+                            TextView h = t2("AUTRES REGISTRES DU LIEN", 12, Color.parseColor("#024B3C"), true);
+                            h.setPadding(0, (int) (4 * dp), 0, (int) (6 * dp));
+                            ecran2Contenu.addView(h);
+                        }
+                        boolean trouve = false;
+                        StringBuilder lp = new StringBuilder();
+                        for (com.pa.lcr.lcp.storage.RegisterProductStore.Row row : st.getAll(serial, node)) {
+                            if (row.description == null || row.description.trim().isEmpty()) continue;
+                            String lbl = row.toSpinnerLabel();
+                            boolean ok = SimplifiedUiState.comparerProduit(wo, lbl) == SimplifiedUiState.PRODUIT_CONCORDE;
+                            trouve |= ok;
+                            if (lp.length() > 0) lp.append("\n");
+                            lp.append(ok ? "✔ " : "• ").append(lbl);
+                        }
+                        LinearLayout c = carte2(Color.parseColor(trouve ? "#1B7F3B" : "#C9CFCC"));
+                        c.addView(t2(r[1], 15, Color.parseColor("#1C1F1E"), true));
+                        c.addView(t2(lp.length() == 0 ? "Produits non lus" : lp.toString(), 14, Color.parseColor("#1C1F1E"), false));
+                        c.addView(t2(trouve ? "✔ Produit trouvé" : "✖ Produit absent", 13,
+                                Color.parseColor(trouve ? "#1B7F3B" : "#B3261E"), true));
+                        if (trouve) {
+                            c.addView(b2("Utiliser ce registre", Color.parseColor("#024B3C"), v -> demanderMotDePasse(() -> {
+                                if (host.livraisonActivePourSimplifie()) return;
+                                if (!ma.relancerDeepLinkSurRegistre(serial, node)) {
+                                    Toast.makeText(ctx, "Changement de registre impossible", Toast.LENGTH_LONG).show();
+                                } else {
+                                    Toast.makeText(ctx, "Registre " + serial + " — vous êtes responsable de la livraison", Toast.LENGTH_LONG).show();
+                                }
+                            })));
+                        }
+                        ecran2Contenu.addView(c);
+                    }
+                } finally { try { st.close(); } catch (Exception ignored) {} }
+            }
+        } catch (Throwable t) { Log.w(TAG, "ecran2 registres ERR: " + t.getMessage()); }
+
+        // 3) sorties
+        ecran2Contenu.addView(b2("Retour au bon de travail", Color.parseColor("#1D5FA8"), v -> cliquer(btnRetourWO)));
+        ecran2Contenu.addView(b2("Annuler la livraison", Color.parseColor("#B3261E"), v -> {
+            double n = 0, g = 0;
+            try { n = nombre(txtQtyNet); g = nombre(txtQtyGross); } catch (Throwable ignored) {}
+            if (n <= 0.0 && g <= 0.0) host.annulerPourSimplifie(); else cliquer(btnAnnuler);
+        }));
+    }
+
+    /** Demande le mot de passe (celui de l'admin) puis exécute l'action. */
+    private void demanderMotDePasse(final Runnable apres) {
+        final Context ctx = holder.getContext();
+        final EditText saisie = new EditText(ctx);
+        saisie.setHint("Mot de passe");
+        saisie.setSingleLine(true);
+        saisie.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        LinearLayout box = new LinearLayout(ctx);
+        int pad = (int) (20 * ctx.getResources().getDisplayMetrics().density);
+        box.setPadding(pad, pad / 2, pad, 0);
+        box.addView(saisie, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        new android.app.AlertDialog.Builder(ctx)
+                .setTitle("Mot de passe requis")
+                .setMessage("Vous serez responsable de ce que vous livrez.")
+                .setView(box)
+                .setNegativeButton("Annuler", null)
+                .setPositiveButton("Entrer", (d, w) -> {
+                    if (saisie.getText().toString().equals(SimplifiedConfig.ADMIN_PASSWORD)) apres.run();
+                    else Toast.makeText(ctx, "Mot de passe incorrect", Toast.LENGTH_SHORT).show();
+                })
+                .show();
+    }
+
     /** Même geste que le long press « Reconnect » d'un onglet de registre. */
     private void reconnecterRegistre() {
         try {
@@ -533,6 +741,8 @@ final class SimplifiedDriverOverlay {
     }
 
     private void montrerCarte(boolean voir) {
+        // ✅ 18 nov 2026 — produit non concordant : « écran simplifié 2 » à la place de la carte d'erreur
+        if ("PRODUIT".equals(cleAlerte)) { montrerEcran2(voir); return; }
         if (bCarte == null || carteVisible == voir) return;
         carteVisible = voir;
         if (!voir) { bCarte.setVisibility(View.GONE); return; }
@@ -863,6 +1073,7 @@ final class SimplifiedDriverOverlay {
     }
 
     private void cacherBulle() {
+        montrerEcran2(false);
         if (bulle == null || !bulleVisible) return;
         bulleVisible = false;
         carteVisible = false;

@@ -4171,6 +4171,12 @@ private void setupTabsTop() {
         return out;
     }
 
+    /** ✅ AJOUTÉ (18 nov 2026) — le chauffeur choisit un autre registre pour le deep link en cours (écran simplifié 2). */
+    public boolean relancerDeepLinkSurRegistre(String serial, int node) {
+        try { return deepLinkHandler != null && deepLinkHandler.relancerSurAutreRegistre(serial, node); }
+        catch (Exception e) { return false; }
+    }
+
     /** Bascule sur un autre registre (même chemin que le toucher d'un onglet). */
     public void choisirRegistrePourSimplifie(String tabKey) {
         selectRegisterTabByKey(tabKey);

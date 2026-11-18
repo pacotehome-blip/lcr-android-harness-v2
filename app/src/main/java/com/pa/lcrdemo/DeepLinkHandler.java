@@ -130,6 +130,7 @@ public class DeepLinkHandler {
         if (!"lcrdemo".equals(data.getScheme())) return;
 
         dernierIntentDeepLink = intent;
+        registreSubstitueDe = intent.getStringExtra("registre_substitue_de"); // null = deep link normal
         String host = data.getHost();
         android.util.Log.i(TAG, "Deep link reçu: " + data.toString());
 
@@ -2356,6 +2357,40 @@ public class DeepLinkHandler {
     // Même principe que le réappairage : au lieu de renvoyer le chauffeur dans FieldService, on attend puis on relance
     // le deep link depuis le début, UNE seule fois par WO sur 120 s (la 2e passe refait tout le chemin normal).
     private volatile Intent dernierIntentDeepLink;
+
+    // ✅ AJOUTÉ (18 nov 2026, demande Paul — écran simplifié 2) : le chauffeur choisit un AUTRE registre du lien (mot de passe) :
+    // la boucle d'attente produit s'arrête et le MÊME deep link est rejoué avec le #série et le node du registre choisi.
+    static volatile long abandonBoucleProduitMs = 0L;
+    private volatile String registreSubstitueDe = null; // "serial/node" du registre indiqué par le deep link d'origine
+
+    public boolean relancerSurAutreRegistre(String serialChoisi, int nodeChoisi) {
+        final Intent it = dernierIntentDeepLink;
+        if (it == null || it.getData() == null || serialChoisi == null || serialChoisi.trim().isEmpty()) return false;
+        try {
+            Uri d = it.getData();
+            String ancienSerial = d.getQueryParameter("serialid");
+            String ancienNode = d.getQueryParameter("lcrnode");
+            Uri.Builder b = d.buildUpon().clearQuery();
+            for (String nom : d.getQueryParameterNames()) {
+                if ("serialid".equals(nom) || "lcrnode".equals(nom)) continue;
+                for (String v : d.getQueryParameters(nom)) b.appendQueryParameter(nom, v);
+            }
+            b.appendQueryParameter("serialid", serialChoisi.trim());
+            b.appendQueryParameter("lcrnode", String.valueOf(nodeChoisi));
+            final Intent nouveau = new Intent(Intent.ACTION_VIEW, b.build());
+            nouveau.putExtra("registre_substitue_de", (ancienSerial == null ? "?" : ancienSerial) + "/" + (ancienNode == null ? "?" : ancienNode));
+            com.pa.lcr.lcp.log.LogBus.api(nodeChoisi, "[REGISTRE-CHANGE] le chauffeur remplace le registre du deep link (" + ancienSerial + "/" + ancienNode
+                + ") par " + serialChoisi + "/" + nodeChoisi + " — relance du deep link (chauffeur imputable)");
+            abandonBoucleProduitMs = System.currentTimeMillis();
+            new Thread(() -> {
+                try { Thread.sleep(1500); } catch (InterruptedException ignored) {}
+                activity.runOnUiThread(() -> handleDeepLink(nouveau));
+            }, "relance-autre-registre").start();
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
     private String relanceEchecBtCle;
     private long relanceEchecBtMs;
     private synchronized boolean relanceApresEchecBtAutorisee(String woNum, String woIdGuid) {
@@ -4577,6 +4612,11 @@ public class DeepLinkHandler {
                     while (System.currentTimeMillis() - debutAttenteMs < delaiMaxMs) {
                         try { Thread.sleep(400); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
                         if (!tabArmRef.isAdded()) break;
+                        if (abandonBoucleProduitMs > debutAttenteMs) {
+                            com.pa.lcr.lcp.log.LogBus.api(node0(tabArmRef), "[PRODUIT-BOUCLE] abandon — le chauffeur a choisi un autre registre");
+                            try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredClearAb) {}
+                            return true;
+                        }
                         if (tabArmRef.derniereAnnulationOperateurMs() > debutAttenteMs) {
                             com.pa.lcr.lcp.log.LogBus.api(node0(tabArmRef), "[PRODUIT-BOUCLE] livraison annulée par le chauffeur — pas d'armement");
                             try { new ActiveDeliveryStore(activity).clear(); } catch (Exception ignoredClearProduit) {}
@@ -5367,6 +5407,19 @@ public class DeepLinkHandler {
             base = "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}";
         }
         if (tabArmRef == null) return base;
+        // ✅ AJOUTÉ (18 nov 2026) — registre choisi par le chauffeur à la place de celui du deep link : imputable aussi.
+        try {
+            String sub = registreSubstitueDe;
+            if (sub != null && !sub.isEmpty()) {
+                JSONObject ps = new JSONObject(base);
+                ps.put("registre_substitue_par_chauffeur", true);
+                ps.put("registre_demande_deeplink", sub);
+                base = ps.toString();
+                com.pa.lcr.lcp.log.LogBus.api(node, "[REGISTRE-IMPUTABLE] chauffeur responsable — registre utilisé à la place de " + sub);
+            }
+        } catch (Exception eSub) {
+            android.util.Log.w(TAG, "imputabilité registre ERR (non-bloquant): " + eSub.getMessage());
+        }
         // ✅ AJOUTÉ (17 nov 2026, demande Paul) — le chauffeur a choisi lui-même le produit (mot de passe) : il est imputable de ce qu'il livre.
         try {
             String choisi = tabArmRef.getProduitChoisiParChauffeur();
