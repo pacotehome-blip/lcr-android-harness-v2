@@ -549,7 +549,7 @@ public class LocalDeliveryBackup {
         new Thread(() -> {
             try {
                 try { Thread.sleep(delaiMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                cleanupOldBackupsAsync(app, 0, checker, false, (restored, kept, deleted, messages) -> { // FIX 13 nov 2026 : 0 = supprime chaque JSON SYNCED dès que Dataverse le confirme (jamais sans confirmation)
+                cleanupOldBackupsAsync(app, 1, checker, false, (restored, kept, deleted, messages) -> { // 19 nov 2026 : on garde le dernier JSON SYNCED jusqu'à la prochaine livraison (le 13 nov : 0 = tout supprimer dès confirmation Dataverse). Jamais un non-SYNCED, jamais sans confirmation
                     cleanupAutoDebutMs.set(0L);
                     cleanupAutoFinMs.set(System.currentTimeMillis());
                     cleanupAutoRefusesConsecutifs.set(0);
@@ -880,10 +880,22 @@ public class LocalDeliveryBackup {
         new Thread(() -> purgeOldSyncedBackups(ctx, days), "LocalDeliveryBackupPurge").start();
     }
 
+    /** Candidat à la purge : fichier JSON déjà lu, avec sa date et son état SYNCED en BD locale. */
+    private static final class PurgeCand {
+        final Uri uri; final File file; final String name; final long ts; final boolean synced;
+        PurgeCand(Uri uri, File file, String name, long ts, boolean synced) {
+            this.uri = uri; this.file = file; this.name = name; this.ts = ts; this.synced = synced;
+        }
+    }
+
+    // ✅ CORRIGÉ (19 nov 2026, demande Paul — « il devait toujours en garder un en arrière jusqu'à ce qu'il y ait une nouvelle
+    // livraison ») — la purge des 7 jours ne supprime plus le fichier SYNCED le PLUS RÉCENT : il reste jusqu'à ce qu'une nouvelle
+    // livraison synchronisée le remplace. Les non-SYNCED ne sont jamais touchés (inchangé).
     private static void purgeOldSyncedBackups(Context ctx, int days) {
         long cutoffMs = System.currentTimeMillis() - (days * 24L * 60L * 60L * 1000L);
         List<String> messages = new ArrayList<>();
         int deleted = 0, kept = 0, errors = 0;
+        List<PurgeCand> cands = new ArrayList<>();
 
         LcrDeliveryStatusDb lcrDb = new LcrDeliveryStatusDb(ctx.getApplicationContext());
         try {
@@ -908,17 +920,10 @@ public class LocalDeliveryBackup {
                                     raw = readAll(in);
                                 }
                                 JSONObject j = new JSONObject(new String(raw, StandardCharsets.UTF_8));
-                                long backupTs = j.optLong("backup_ts", 0L);
                                 String ticketNo = j.optString("ticket_no", "");
-                                if (backupTs == 0L || backupTs >= cutoffMs) { kept++; continue; }
                                 LcrDeliveryStatusDb.DeliveryRow row = ticketNo.isEmpty() ? null : lcrDb.getByTicketNo(ticketNo);
                                 boolean synced = row != null && LcrDeliveryStatusDb.SYNC_SYNCED.equals(row.syncStatus);
-                                if (synced) {
-                                    ctx.getContentResolver().delete(fileUri, null, null);
-                                    deleted++;
-                                } else {
-                                    kept++;
-                                }
+                                cands.add(new PurgeCand(fileUri, null, name, j.optLong("backup_ts", 0L), synced));
                             } catch (Exception e) {
                                 errors++;
                                 messages.add(name + ": " + e.getMessage());
@@ -943,16 +948,10 @@ public class LocalDeliveryBackup {
                             byte[] raw;
                             try (InputStream in = new java.io.FileInputStream(f)) { raw = readAll(in); }
                             JSONObject j = new JSONObject(new String(raw, StandardCharsets.UTF_8));
-                            long backupTs = j.optLong("backup_ts", 0L);
                             String ticketNo = j.optString("ticket_no", "");
-                            if (backupTs == 0L || backupTs >= cutoffMs) { kept++; continue; }
                             LcrDeliveryStatusDb.DeliveryRow row = ticketNo.isEmpty() ? null : lcrDb.getByTicketNo(ticketNo);
                             boolean synced = row != null && LcrDeliveryStatusDb.SYNC_SYNCED.equals(row.syncStatus);
-                            if (synced) {
-                                if (f.delete()) deleted++; else errors++;
-                            } else {
-                                kept++;
-                            }
+                            cands.add(new PurgeCand(null, f, f.getName(), j.optLong("backup_ts", 0L), synced));
                         } catch (Exception e) {
                             errors++;
                             messages.add(f.getName() + ": " + e.getMessage());
@@ -964,6 +963,25 @@ public class LocalDeliveryBackup {
             }
         } finally {
             try { lcrDb.close(); } catch (Exception ignored) {}
+        }
+
+        // Le SYNCED le plus récent (toutes dates confondues) est protégé : « un en arrière » jusqu'à la prochaine livraison.
+        PurgeCand protege = null;
+        for (PurgeCand pc : cands) {
+            if (pc.synced && (protege == null || pc.ts > protege.ts)) protege = pc;
+        }
+        for (PurgeCand pc : cands) {
+            boolean expire = pc.ts != 0L && pc.ts < cutoffMs;
+            if (!pc.synced || !expire || pc == protege) { kept++; continue; }
+            try {
+                boolean ok = pc.uri != null
+                        ? ctx.getContentResolver().delete(pc.uri, null, null) > 0
+                        : (pc.file != null && pc.file.delete());
+                if (ok) deleted++; else errors++;
+            } catch (Exception e) {
+                errors++;
+                messages.add(pc.name + ": " + e.getMessage());
+            }
         }
 
         Log.i(TAG, "purgeOldSyncedBackups: supprimés=" + deleted + " conservés=" + kept
