@@ -4167,6 +4167,44 @@ public class DeepLinkHandler {
                         android.util.Log.w(TAG, "onDeliveryEnded: relecture ticket_no (result absent) ERR (non-bloquant): " + eTicketFinVide.getMessage());
                     }
                 }
+                // ✅ AJOUTÉ (19 nov 2026, demande Paul — fichiers …_1795123375604 / …_1795123507302 : ticket_no vide à la racine alors que
+                // le payload porte ticket_no/sale_no 456 / 457) — les registres « jamais d'impression » laissent le champ #23 à 0 : la
+                // relecture ci-dessus ne rend rien, mais le numéro de vente (#22) = ticket_number est déjà dans le snapshot de fin.
+                // Dernier repli, après la relecture du registre : ticket_no/sale_no/delivery_uid du snapshot, SEULEMENT si ce numéro
+                // n'appartient pas déjà à une AUTRE livraison du même registre (snapshot périmé d'un cycle précédent = jamais utilisé).
+                if (ticketNo.isEmpty()) {
+                    try {
+                        String tSnap = d.optString("ticket_no", "").trim();
+                        if (tSnap.isEmpty()) tSnap = d.optString("sale_no", "").trim();
+                        if (tSnap.isEmpty()) {
+                            String uidSnap = d.optString("delivery_uid", "");
+                            String pref = woNum != null ? woNum + "-" : "";
+                            if (!pref.isEmpty() && uidSnap.startsWith(pref)) tSnap = uidSnap.substring(pref.length()).trim();
+                        }
+                        if (!tSnap.isEmpty() && !"0".equals(tSnap)) {
+                            boolean prisParAutre = false;
+                            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbTk =
+                                new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+                            try {
+                                com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow exTk =
+                                    dbTk.getByTicketNoAndSerial(tSnap, serialIdParam != null ? serialIdParam : "");
+                                String jobFin = d.optString("jobId", "");
+                                prisParAutre = exTk != null && exTk.jobId != null && !exTk.jobId.isEmpty()
+                                    && !exTk.jobId.equals(jobFin);
+                            } finally {
+                                try { dbTk.close(); } catch (Exception ignoredTk) {}
+                            }
+                            if (!prisParAutre) {
+                                ticketNo = tSnap;
+                                if (saleNo.isEmpty()) saleNo = tSnap;
+                                android.util.Log.w(TAG, "onDeliveryEnded: ticket_no vide — repris du snapshot de fin (numéro de vente): " + ticketNo);
+                                try { com.pa.lcr.lcp.log.LogBus.api(nodeParam, "[TICKET-SNAPSHOT] ticket_no absent de result et #23=0 — numéro de vente du snapshot utilisé: " + ticketNo); } catch (Exception ignoredLbTk) {}
+                            }
+                        }
+                    } catch (Exception eTkSnap) {
+                        android.util.Log.w(TAG, "onDeliveryEnded: repli ticket snapshot ERR (non-bloquant): " + eTkSnap.getMessage());
+                    }
+                }
                 // ✅ CORRIGÉ (20 oct 2026, demande Paul — ticket 351 : fin par le bouton Terminer pendant la pause) :
                 // FILET-TERMINER n'envoie ni produit ni preset (produitNo=0, preset_requested=0). Comme cette
                 // fin passe par upsertByJobId(), la ligne de CETTE livraison (créée à 23:15:33Z avec son produit
