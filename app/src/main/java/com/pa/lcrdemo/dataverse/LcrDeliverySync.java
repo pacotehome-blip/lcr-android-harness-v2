@@ -201,8 +201,21 @@ public class LcrDeliverySync {
                     String ticketPourNomFichier = (!LcrDeliveryStatusDb.STOP_TYPE_ORPHELIN.equals(row.stopType)
                         && row.ticketNo != null && !row.ticketNo.trim().isEmpty())
                         ? row.ticketNo : row.jobId;
+                    // ✅ AJOUTÉ (19 nov 2026, demande Paul) — imputabilité du produit aussi à la racine de ce fichier réécrit.
+                    com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.copierImputabiliteVersRacine(jsonSynced, row.payloadJson);
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                         ctx, row.woNum, ticketPourNomFichier, jsonSynced);
+                    // ✅ AJOUTÉ (19 nov 2026, demande Paul — « un coup que la livraison est complétée je n'ai plus besoin du json du début
+                    // pour le running_flowing ») — le fichier nommé par ticket vient d'être écrit : le fichier de départ (nommé par
+                    // job_id) devient redondant. Filet commun à tous les chemins de fin (le nettoyage supprime aussi les restes).
+                    try {
+                        if (row.jobId != null && !row.jobId.trim().isEmpty()
+                                && !row.jobId.equals(ticketPourNomFichier)
+                                && !"RUNNING_FLOWING".equals(row.stopType)
+                                && !LcrDeliveryStatusDb.STOP_TYPE_ORPHELIN.equals(row.stopType)) {
+                            com.pa.lcr.lcp.storage.LocalDeliveryBackup.deleteArmementBackupAsync(ctx, row.woNum, row.jobId);
+                        }
+                    } catch (Exception ignoredDelArm) {}
                 } catch (Exception eJsonSync) {
                     Log.w(TAG, "Mise à jour JSON sync_status=SYNCED ERR (non-bloquant): " + eJsonSync.getMessage());
                 }

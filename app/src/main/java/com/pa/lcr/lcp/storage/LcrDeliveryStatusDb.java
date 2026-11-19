@@ -1015,6 +1015,17 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         "produit_no_requested", "preset_requested_deeplink", "modifie_apres_mismatch_chauffeur"
     };
 
+    /** Recopie à la RACINE de {@code cible} les champs d'imputabilité présents dans {@code payloadJson} (chaîne payload_complet). Jamais bloquant. */
+    public static void copierImputabiliteVersRacine(org.json.JSONObject cible, String payloadJson) {
+        if (cible == null || payloadJson == null || payloadJson.isEmpty()) return;
+        try {
+            org.json.JSONObject pi = new org.json.JSONObject(payloadJson);
+            for (String k : CLES_IMPUTABILITE_RACINE) {
+                if (pi.has(k)) cible.put(k, pi.get(k));
+            }
+        } catch (Exception ignoredImp) {}
+    }
+
     public static org.json.JSONObject construireJsonLivraisonComplet(
             String jobId, String woNum, String woIdGuid, String ticketNo, String saleNo,
             double netL, double grossL, String serialId, int lcrnode, String btmac,
@@ -1041,12 +1052,7 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         j.put("payload_complet", payloadInterne);
         // ✅ AJOUTÉ (19 nov 2026, demande Paul) — imputabilité du produit (forcé par le livreur, registre substitué…) aussi à la
         // RACINE du fichier JSON, en plus de payload_complet (qui reste la source de la restauration : rien à relire ailleurs).
-        try {
-            org.json.JSONObject pi = new org.json.JSONObject(payloadInterne);
-            for (String k : CLES_IMPUTABILITE_RACINE) {
-                if (pi.has(k)) j.put(k, pi.get(k));
-            }
-        } catch (Exception ignoredImp) {}
+        copierImputabiliteVersRacine(j, payloadInterne);
         j.put("sync_status", syncStatus != null ? syncStatus : SYNC_PENDING);
         return j;
     }

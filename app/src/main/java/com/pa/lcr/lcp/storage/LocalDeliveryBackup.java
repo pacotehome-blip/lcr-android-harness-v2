@@ -325,6 +325,41 @@ public class LocalDeliveryBackup {
                     ? listBackupFileRefsMediaStore(ctx, messages)
                     : listBackupFileRefsLegacy(ctx, messages);
 
+            // Étape 0 — ✅ AJOUTÉ (19 nov 2026, demande Paul — « un coup que la livraison est complétée je n'ai plus besoin du json du
+            // début ») : pour un job_id qui a DÉJÀ son fichier final (ticket_no renseigné, pas un armement), les fichiers
+            // intermédiaires du même job_id (armement RUNNING_FLOWING, instantané sans ticket) sont supprimés. Jamais sans fichier
+            // final présent ; avant la restauration pour qu'un armement ne ressuscite pas en ligne RUNNING_FLOWING.
+            try {
+                java.util.Map<String, String> finalParJob = new java.util.HashMap<>();
+                for (BackupFileRef ref : refs) {
+                    try {
+                        JSONObject j0 = new JSONObject(new String(ref.content, StandardCharsets.UTF_8));
+                        String jid = j0.optString("job_id", "");
+                        String tk0 = j0.optString("ticket_no", "");
+                        if (!jid.isEmpty() && !tk0.isEmpty() && !estJsonArmement(j0)) finalParJob.put(jid, tk0);
+                    } catch (Exception ignored0) {}
+                }
+                List<BackupFileRef> retires = new ArrayList<>();
+                for (BackupFileRef ref : refs) {
+                    try {
+                        JSONObject j0 = new JSONObject(new String(ref.content, StandardCharsets.UTF_8));
+                        String jid = j0.optString("job_id", "");
+                        if (jid.isEmpty() || !finalParJob.containsKey(jid)) continue;
+                        boolean intermediaire = estJsonArmement(j0) || j0.optString("ticket_no", "").isEmpty();
+                        if (intermediaire && ref.delete(ctx)) {
+                            retires.add(ref);
+                            messages.add("Supprimé (fichier de départ, livraison terminée) : job_id=" + jid + " ticket=" + finalParJob.get(jid));
+                        }
+                    } catch (Exception ignored0) {}
+                }
+                if (!retires.isEmpty()) {
+                    refs.removeAll(retires);
+                    Log.i(TAG, "cleanup étape 0 : " + retires.size() + " fichier(s) de départ supprimé(s) (fichier final présent)");
+                }
+            } catch (Exception eEtape0) {
+                Log.w(TAG, "cleanup étape 0 ERR (non-bloquant): " + eEtape0.getMessage());
+            }
+
             // Étape 1 — restaurer en BD locale tout PENDING pas encore présent,
             // avant de toucher à quoi que ce soit — jamais de perte.
             int restored = 0;
