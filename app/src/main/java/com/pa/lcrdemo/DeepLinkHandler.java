@@ -2156,6 +2156,9 @@ public class DeepLinkHandler {
                             android.util.Log.w(TAG, "Recherche produit (armement) ERR (non-bloquant): " + e.getMessage());
                         }
                         String[] guidsArm = guidsLivraison(jobId, woNum, tabArmRef);
+                        // ✅ AJOUTÉ (19 nov 2026) — calculé UNE fois : la BD ET le fichier JSON de départ portent le même payload
+                        // (avant, le JSON de départ n'avait que status/job_id et perdait l'imputabilité du produit forcé).
+                        final String payloadArmExtra = buildArmementPayloadExtra(tabArmRef, jobId, fProduct, fPresetD, node, descArm, codeArm, typeArm);
                         android.content.ContentValues cvArm =
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
                                 jobId, woNum, woIdGuid, ticketArm, ticketArm,
@@ -2164,7 +2167,7 @@ public class DeepLinkHandler {
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                                 "RUNNING_FLOWING",
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                                buildArmementPayloadExtra(tabArmRef, jobId, fProduct, fPresetD, node, descArm, codeArm, typeArm),
+                                payloadArmExtra,
                                 guidsArm[0], guidsArm[1]);
                         cvArm.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_SOURCE, "ARMEMENT");
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb dbArm =
@@ -2184,7 +2187,7 @@ public class DeepLinkHandler {
                                 fProduct, descArm, codeArm, typeArm, fPresetD,
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                                 com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                                "{\"status\":\"RUNNING_FLOWING\",\"job_id\":\"" + jobId + "\"}",
+                                payloadArmExtra,
                                 guidsArm[0], guidsArm[1]);
                         com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                             activity.getApplicationContext(), woNum, jobId, backupPayloadArm);
@@ -4252,6 +4255,16 @@ public class DeepLinkHandler {
                 String[] guidsFin = guidsLivraison(d.optString("jobId", ""), woNum, null);
                 if (guidsFin[0].isEmpty()) guidsFin[0] = guidsFinStore[0];
                 if (guidsFin[1].isEmpty()) guidsFin[1] = guidsFinStore[1];
+                // ✅ AJOUTÉ (19 nov 2026, demande Paul) — le JSON de FIN garde l'imputabilité posée à l'armement
+                // (produit forcé par le livreur, registre substitué…) : le fichier de départ est supprimé à la fin.
+                String extraJsonFin = extraJsonCorrige;
+                try {
+                    JSONObject dFin = new JSONObject(extraJsonCorrige != null ? extraJsonCorrige : "{}");
+                    reporterImputabiliteArmement(dFin, d.optString("jobId", ""));
+                    extraJsonFin = dFin.toString();
+                } catch (Exception eImpFin) {
+                    android.util.Log.w(TAG, "Report imputabilité (fin) ERR (non-bloquant): " + eImpFin.getMessage());
+                }
                 android.content.ContentValues cv =
                     com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.construireLivraisonComplete(
                         d.optString("jobId", ""), woNum, woIdGuid, ticketNo, saleNo,
@@ -4260,7 +4273,7 @@ public class DeepLinkHandler {
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                         "LIVRAISON",
                         com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                        extraJsonCorrige, guidsFin[0], guidsFin[1]);
+                        extraJsonFin, guidsFin[0], guidsFin[1]);
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_WO_ID_GUID,
                     woIdGuid != null ? woIdGuid.replace("{","").replace("}","") : "");
                 cv.put(com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.COL_DELTA_NET_L,  deltaNet);
@@ -4348,7 +4361,7 @@ public class DeepLinkHandler {
                             produitNo, produitDescriptionFin, produitCodeFin, produitTypeFin, presetL,
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.TYPE_ORIGINAL,
                             com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.SYNC_PENDING,
-                            extraJsonCorrige, guidsFin[0], guidsFin[1]);
+                            extraJsonFin, guidsFin[0], guidsFin[1]);
                     com.pa.lcr.lcp.storage.LocalDeliveryBackup.backupDeliveryAsync(
                         activity.getApplicationContext(), woNum, ticketNo, backupPayloadFin);
                     // ✅ AJOUTÉ (17 sept 2026, demande Paul) — le fichier
@@ -5362,6 +5375,33 @@ public class DeepLinkHandler {
         return new String[]{stop != null ? stop : "", prod != null ? prod : ""};
     }
 
+    /** Champs d'imputabilité posés à l'armement (voir buildArmementPayloadExtra) à conserver dans le JSON/ligne de fin. */
+    private static final String[] CLES_IMPUTABILITE = {
+        "produit_choisi_par_chauffeur", "produit_registre_choisi", "produit_demande_fieldservice",
+        "produit_identique_deeplink", "produit_force_volontairement", "produit_demande_deeplink", "produit_force_ts_ms",
+        "registre_substitue_par_chauffeur", "registre_demande_deeplink",
+        "produit_no_requested", "preset_requested_deeplink", "modifie_apres_mismatch_chauffeur"
+    };
+
+    /** Recopie dans {@code cible} les champs d'imputabilité de la ligne d'armement (même job_id). Jamais bloquant. */
+    private void reporterImputabiliteArmement(JSONObject cible, String jobId) {
+        if (cible == null || jobId == null || jobId.isEmpty()) return;
+        com.pa.lcr.lcp.storage.LcrDeliveryStatusDb db = null;
+        try {
+            db = new com.pa.lcr.lcp.storage.LcrDeliveryStatusDb(activity);
+            com.pa.lcr.lcp.storage.LcrDeliveryStatusDb.DeliveryRow row = db.getByJobId(jobId);
+            if (row == null || row.payloadJson == null || row.payloadJson.isEmpty()) return;
+            JSONObject src = new JSONObject(row.payloadJson);
+            for (String k : CLES_IMPUTABILITE) {
+                if (src.has(k) && !cible.has(k)) cible.put(k, src.get(k));
+            }
+        } catch (Exception e) {
+            android.util.Log.w(TAG, "reporterImputabiliteArmement ERR (non-bloquant): " + e.getMessage());
+        } finally {
+            if (db != null) { try { db.close(); } catch (Exception ignored) {} }
+        }
+    }
+
     // ✅ AJOUTÉ (14 sept 2026, demande Paul — "on fait une sortie de
     // boucle pour prendre en compte le changement du produit et preset,
     // on saisi dans support et dataverse ce que le livreur a changé dans
@@ -5428,6 +5468,13 @@ public class DeepLinkHandler {
                 pi.put("produit_choisi_par_chauffeur", true);
                 pi.put("produit_registre_choisi", choisi);
                 pi.put("produit_demande_fieldservice", tabArmRef.descriptionProduitDemandePourSimplifie());
+                // ✅ AJOUTÉ (19 nov 2026, demande Paul — « ajouter dans le json que le produit n'est pas identique au deeplink
+                // et que le livreur a volontairement forcé un produit de livraison »)
+                boolean differe = tabArmRef.produitDifferentDuDeeplink();
+                pi.put("produit_identique_deeplink", !differe);
+                pi.put("produit_force_volontairement", differe);
+                pi.put("produit_demande_deeplink", tabArmRef.getCurrentProduitDeepLink() != null ? tabArmRef.getCurrentProduitDeepLink() : "");
+                pi.put("produit_force_ts_ms", System.currentTimeMillis());
                 base = pi.toString();
                 com.pa.lcr.lcp.log.LogBus.api(node, "[PRODUIT-IMPUTABLE] chauffeur responsable — registre=\"" + choisi
                     + "\" ; demandé FieldService=\"" + tabArmRef.descriptionProduitDemandePourSimplifie() + "\"");

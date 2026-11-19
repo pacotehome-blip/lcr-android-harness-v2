@@ -4018,6 +4018,17 @@ public class RegisterTabFragment extends Fragment {
     /** Produit du registre choisi EXPRESSÉMENT par le chauffeur (appui long + mot de passe) : seul cas où une non-concordance avec le deeplink est tolérée. */
     private volatile String produitChoisiParChauffeur = null;
 
+    /** Vrai si le produit RÉEL du registre diffère de celui demandé par le deeplink / FieldService (ou n'a pu être vérifié). */
+    boolean produitDifferentDuDeeplink() {
+        try {
+            String wo = currentWoNum != null ? currentWoNum : "";
+            String reel = produitRegistreReel(wo);
+            if (reel.isEmpty()) return false;
+            if (reel.startsWith(PRODUIT_NON_VERIFIE)) return true;
+            return SimplifiedUiState.comparerProduit(wo, reel) == SimplifiedUiState.PRODUIT_DIFFERENT;
+        } catch (Exception e) { return false; }
+    }
+
     /** Marqueur : le sélecteur ne montre que le texte du deeplink et le produit réel du registre est inconnu. */
     static final String PRODUIT_NON_VERIFIE = "\u0001NON_VERIFIE";
 
