@@ -629,6 +629,21 @@ public class RegisterConnectionHelper {
             }
         } catch (Exception ignored) {}
 
+        // ✅ AJOUTÉ (19 nov 2026, demande Paul — logs 18:45:29 : un diagnostic a fait « BT-RESET » (fermeture des sockets +
+        // attente 4 s) sur un lien DÉJÀ rétabli par la relance du deeplink, en pleine initialisation → « Transport not open »,
+        // deuxième déconnexion, armement jamais atteint). Si le registre répond déjà (sonde #série sur un transport vivant),
+        // on traite comme « rien à réinitialiser » : étapes 1-2 et fermeture des sockets zombis ignorées.
+        boolean lienDejaSain = false;
+        try {
+            if (!livraisonActive && findAliveTransportForSerial(fSerialIdFinal, fNodeFinal, null) != null) {
+                lienDejaSain = true;
+                livraisonActive = true; // réutilise la garde existante (étapes 1-2 + zombis)
+                try { com.pa.lcr.lcp.log.LogBus.api(fNodeFinal, "[BT-RESET] ignoré — le registre répond déjà sur un lien vivant (#série="
+                    + fSerialIdFinal + ") : pas de fermeture de sockets pendant la relance"); } catch (Exception ignoredLb) {}
+            }
+        } catch (Exception ignored) {}
+        final boolean lienDejaSainF = lienDejaSain;
+
         // ✅ FIX (4 août 2026, demande Paul — "la recherche du registre selon
         // son média ne fonctionne pas avec diagnostic... il ne cherche pas
         // selon son média") — trouvé : les étapes 1-2 faisaient un reset BT
@@ -664,7 +679,7 @@ public class RegisterConnectionHelper {
         // pas de sens quand USB est déjà branché), mais "ignorée" sonnait
         // comme un problème plutôt qu'un simple saut logique attendu.
         etapes[0] = (livraisonActive || usbDevicePresent) ? "Fermeture connexion — non nécessaire ("
-                + (livraisonActive ? "livraison active" : "USB déjà branché, étape BT non applicable") + ")" : "Fermeture connexion existante";
+                + (lienDejaSainF ? "registre déjà joignable" : livraisonActive ? "livraison active" : "USB déjà branché, étape BT non applicable") + ")" : "Fermeture connexion existante";
         updateDlg.run();
         if (!livraisonActive && !usbDevicePresent) {
             try { activity.btDisconnect(); Thread.sleep(800); } catch (Exception ignored) {}
@@ -675,7 +690,7 @@ public class RegisterConnectionHelper {
         // ÉTAPE 2 — Réinitialisation Bluetooth
         if (annule[0]) { fermerDialogueAnnule(dlg); return; }
         etapes[1] = (livraisonActive || usbDevicePresent) ? "Réinitialisation BT — non nécessaire ("
-                + (livraisonActive ? "livraison active" : "USB déjà branché, étape BT non applicable") + ")" : "Réinitialisation Bluetooth";
+                + (lienDejaSainF ? "registre déjà joignable" : livraisonActive ? "livraison active" : "USB déjà branché, étape BT non applicable") + ")" : "Réinitialisation Bluetooth";
         updateDlg.run();
         if (!livraisonActive && !usbDevicePresent) {
             try {
