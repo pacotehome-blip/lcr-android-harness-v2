@@ -59,7 +59,7 @@ final class SimplifiedUiState {
     static final int PRODUIT_DIFFERENT = 2;  // aucun critère ne concorde → erreur
     static final int PRODUIT_ATTENTE = 3;    // produit du registre pas encore connu → rien d'affiché
 
-    private static String norm(String s) {
+    static String norm(String s) {
         if (s == null) return "";
         String n = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
                 .replaceAll("\\p{M}+", "");

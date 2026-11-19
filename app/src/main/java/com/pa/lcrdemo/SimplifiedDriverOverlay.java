@@ -1386,8 +1386,10 @@ final class SimplifiedDriverOverlay {
         sTxtWo.setText(wo.isEmpty() ? "—" : wo);
         String preset = edtPreset != null && edtPreset.getText() != null ? edtPreset.getText().toString().trim() : "";
         sTxtPreset.setText(preset.isEmpty() ? "—" : preset + " L");
-        String prodReg = spnProduct != null && spnProduct.getText() != null ? spnProduct.getText().toString().trim() : "";
-        sTxtProdReg.setText(prodReg.isEmpty() ? "—" : prodReg);
+        // 19 nov 2026 : libellé RÉEL du registre (jamais le texte du deeplink posé dans le sélecteur — fausse concordance).
+        String prodReg = host.produitRegistreReel(wo);
+        boolean prodNonVerifie = prodReg.startsWith(RegisterTabFragment.PRODUIT_NON_VERIFIE);
+        sTxtProdReg.setText(prodNonVerifie ? "à vérifier" : (prodReg.isEmpty() ? "—" : prodReg));
 
         String fsDesc = SimplifiedUiState.getFsProduitDesc(wo);
         sBlocProdFs.setVisibility(fsDesc.isEmpty() ? View.GONE : View.VISIBLE);
@@ -1406,7 +1408,9 @@ final class SimplifiedDriverOverlay {
                 String demande = !fsDesc.isEmpty() ? fsDesc : (dem.isEmpty() ? "—" : (dem.matches("\\d+") ? "produit " + dem : dem));
                 sTxtProdCmp.setText(absent != null
                     ? "✖ ERREUR — le produit demandé (" + demande + ") n’est pas dans le registre. Livraison non armée : retournez au bon de travail."
-                    : "✖ ERREUR — le produit du registre ne correspond pas au produit demandé (" + demande + "). Livraison non armée : appui long pour changer (mot de passe) ou retour au bon de travail.");
+                    : prodNonVerifie
+                        ? "✖ ERREUR — le produit du registre n’a pas pu être vérifié (demandé : " + demande + "). Livraison non armée : appui long pour choisir le produit (mot de passe) ou retour au bon de travail."
+                        : "✖ ERREUR — le produit du registre ne correspond pas au produit demandé (" + demande + "). Livraison non armée : appui long pour changer (mot de passe) ou retour au bon de travail.");
                 sTxtProdCmp.setTextColor(Color.parseColor("#B3261E"));
                 sTxtProdCmp.setVisibility(View.VISIBLE);
             } else {
@@ -1418,7 +1422,7 @@ final class SimplifiedDriverOverlay {
                 if (cmp == SimplifiedUiState.PRODUIT_CONCORDE || cmp == SimplifiedUiState.PRODUIT_DIFFERENT) {
                     try { com.pa.lcr.lcp.log.LogBus.api(0, "[PRODUIT-COMPARAISON] " + (cmp == SimplifiedUiState.PRODUIT_CONCORDE ? "concorde" : "ERREUR — aucune concordance")
                         + " — demandé(deeplink)=" + SimplifiedUiState.getProduitDemande(wo) + " / FieldService=\"" + fsDesc
-                        + "\" — registre=\"" + prodReg + "\""); } catch (Throwable ignoredLb) {}
+                        + "\" — registre=\"" + (prodNonVerifie ? "NON VÉRIFIÉ" : prodReg) + "\""); } catch (Throwable ignoredLb) {}
                 }
             }
         }

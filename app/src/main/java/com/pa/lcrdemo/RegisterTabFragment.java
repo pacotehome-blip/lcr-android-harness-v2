@@ -4018,6 +4018,36 @@ public class RegisterTabFragment extends Fragment {
     /** Produit du registre choisi EXPRESSÉMENT par le chauffeur (appui long + mot de passe) : seul cas où une non-concordance avec le deeplink est tolérée. */
     private volatile String produitChoisiParChauffeur = null;
 
+    /** Marqueur : le sélecteur ne montre que le texte du deeplink et le produit réel du registre est inconnu. */
+    static final String PRODUIT_NON_VERIFIE = "\u0001NON_VERIFIE";
+
+    /**
+     * ✅ AJOUTÉ (19 nov 2026, demande Paul — logs 18:49:50 : après reconnexion, « registre="propane : 100" » = le texte du
+     * DEEPLINK posé dans le sélecteur par prefillFromDeepLink ; la comparaison se faisait donc avec elle-même et la
+     * livraison s'est armée sans boucle ni imputabilité). Retourne le libellé RÉEL du produit du registre :
+     * - le texte du sélecteur s'il correspond à un libellé de la table du registre ;
+     * - sinon (sélecteur = texte du deeplink) : le produit validé à l'init, ou l'unique produit de la table ;
+     * - sinon PRODUIT_NON_VERIFIE si la table est connue (jamais de fausse concordance) ;
+     * - table inconnue (banc non scanné) : le texte du sélecteur, comportement inchangé.
+     */
+    String produitRegistreReel(String woNum) {
+        String spin = (spnProduct != null && spnProduct.getText() != null) ? spnProduct.getText().toString().trim() : "";
+        try {
+            java.util.List<String> table = produitsRegistrePourSimplifie();
+            if (table.isEmpty()) return spin;
+            if (spin.isEmpty() || table.contains(spin)) return spin;
+            String n = SimplifiedUiState.norm(spin);
+            String dem = SimplifiedUiState.norm(SimplifiedUiState.getProduitDemande(woNum));
+            String fs = SimplifiedUiState.norm(SimplifiedUiState.getFsProduitDesc(woNum));
+            boolean texteDuDeeplink = !n.isEmpty() && (n.equals(dem) || n.equals(fs));
+            if (!texteDuDeeplink) return spin;
+            com.pa.lcr.lcp.storage.RegisterProductStore.Row v = initValidatedProductRow;
+            if (v != null && v.description != null && !v.description.trim().isEmpty()) return v.toSpinnerLabel();
+            if (table.size() == 1) return table.get(0);
+            return PRODUIT_NON_VERIFIE;
+        } catch (Exception e) { return spin; }
+    }
+
     /**
      * ✅ AJOUTÉ (17 nov 2026, demande Paul) — porte d'armement : null = on peut armer ; sinon raison du refus.
      * Refuse si le produit du registre ne concorde pas avec le produit demandé par le deeplink, sauf choix express du chauffeur.
@@ -4025,8 +4055,12 @@ public class RegisterTabFragment extends Fragment {
      */
     public String raisonProduitNonConcordant(String woNum) {
         try {
-            String label = (spnProduct != null && spnProduct.getText() != null) ? spnProduct.getText().toString().trim() : "";
+            String label = produitRegistreReel(woNum);
             if (label.isEmpty()) return null;
+            if (label.startsWith(PRODUIT_NON_VERIFIE)) {
+                // Pas de preuve de concordance (voir produitRegistreReel) : on ne laisse pas passer en silence.
+                return "Le produit du registre n’a pas pu être vérifié (demandé : " + descriptionProduitDemandePourSimplifie() + ")";
+            }
             if (produitChoisiParChauffeur != null && produitChoisiParChauffeur.equals(label)) return null;
             if (SimplifiedUiState.comparerProduit(woNum, label) != SimplifiedUiState.PRODUIT_DIFFERENT) return null;
             String dem = SimplifiedUiState.getFsProduitDesc(woNum);
