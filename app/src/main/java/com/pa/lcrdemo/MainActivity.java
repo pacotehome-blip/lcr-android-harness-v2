@@ -1907,10 +1907,19 @@ tabRegisters = findViewById(R.id.tabRegisters);
                                 for (int i = 0; i < scanned.length(); i++) {
                                     JSONObject row = scanned.optJSONObject(i);
                                     if (row == null) continue;
+                                    // ✅ 19 nov 2026 — pas de « -999 dBm (INCONNU) » trompeur : « non mesuré » + qualité réelle de la liaison
+                                    int rssiRow = row.optInt("rssi", -999);
+                                    boolean rssiOk = rssiRow > -999 && !"INCONNU".equals(row.optString("rssi_quality", "INCONNU"));
                                     sb.append("• ").append(row.optString("name", "?"))
-                                      .append("  MAC=").append(row.optString("mac", "?"))
-                                      .append("  RSSI=").append(row.optInt("rssi", 0)).append(" dBm")
-                                      .append("  (").append(row.optString("rssi_quality", "?")).append(")\n");
+                                      .append("  MAC=").append(row.optString("mac", "?")).append("\n    ");
+                                    if (rssiOk) sb.append("Signal : ").append(rssiRow).append(" dBm (").append(row.optString("rssi_quality", "?")).append(")");
+                                    else sb.append("Signal radio : non mesuré");
+                                    if (row.has("io_quality")) {
+                                        sb.append("\n    Liaison avec le registre : ").append(row.optString("io_quality", "?"))
+                                          .append("  — latence ").append(row.optInt("io_latency_ms", 0)).append(" ms, ")
+                                          .append(row.optInt("io_errors", 0)).append(" erreur(s) / ").append(row.optInt("io_samples", 0)).append(" échanges");
+                                    }
+                                    sb.append("\n");
                                 }
                             }
                             txt = sb.toString().trim();
@@ -8531,7 +8540,8 @@ private boolean ensureBtConnectPermission() {
 		return;
 	}
         if (requestCode == REQ_LOCATION_BT_SIGNAL) {
-            boolean ok = (grantResults != null && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+            boolean ok = (grantResults != null && grantResults.length > 0);
+            if (ok) for (int gr : grantResults) if (gr != PackageManager.PERMISSION_GRANTED) { ok = false; break; }
             if (ok) logMedia1("BT Signal: permission localisation accordée");
             else { logMedia1("BT Signal: permission localisation refusée"); toast("Permission localisation requise pour le scan RSSI BT"); }
             return;
@@ -8554,10 +8564,16 @@ if (requestCode == 9101) {
         try {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                int p = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN);
-                if (p == PackageManager.PERMISSION_GRANTED) return true;
+                // ✅ 19 nov 2026 (demande Paul — « je veux la qualité du signal ») : BLUETOOTH_SCAN est déclarée SANS
+                // neverForLocation → Android 12+ exige AUSSI la localisation pour que la découverte livre des résultats.
+                boolean scanOk = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED;
+                boolean locOk = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+                if (scanOk && locOk) return true;
                 if (!prompt) return false;
-                ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.BLUETOOTH_SCAN}, REQ_LOCATION_BT_SIGNAL);
+                java.util.List<String> manque = new java.util.ArrayList<>();
+                if (!scanOk) manque.add(Manifest.permission.BLUETOOTH_SCAN);
+                if (!locOk) manque.add(Manifest.permission.ACCESS_FINE_LOCATION);
+                ActivityCompat.requestPermissions(this, manque.toArray(new String[0]), REQ_LOCATION_BT_SIGNAL);
                 return false;
             }
             int p = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION);

@@ -679,6 +679,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                             JSONObject row = new JSONObject();
                             try {
                                 row.put("mac", foundMac);
+                                ajouterQualiteLiaison(row, foundMac);
                                 row.put("name", dev.getName() != null ? dev.getName() : JSONObject.NULL);
                                 row.put("rssi", rssi);
                                 row.put("rssi_quality", quality);
@@ -712,9 +713,32 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                 appCtx.registerReceiver(receiver, filter);
             }
 
-            // Annuler seulement si déjà en cours
-            if (adapter.isDiscovering()) adapter.cancelDiscovery();
-            boolean scanStarted = adapter.startDiscovery();
+            // ✅ 19 nov 2026 (demande Paul — « je veux la qualité du signal ») : cancelDiscovery() est asynchrone ;
+            // relancer startDiscovery() tout de suite était refusé (false) → « DB fallback » → -999 / INCONNU.
+            // On attend la fin de l'annulation puis on réessaie (3 essais), et on journalise la raison si ça refuse encore.
+            if (adapter.isDiscovering()) {
+                adapter.cancelDiscovery();
+                for (int w = 0; w < 20 && adapter.isDiscovering(); w++) { try { Thread.sleep(100); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; } }
+            }
+            boolean scanStarted = false;
+            for (int essai = 1; essai <= 3 && !scanStarted; essai++) {
+                scanStarted = adapter.startDiscovery();
+                if (!scanStarted) {
+                    try { Thread.sleep(700); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                }
+            }
+            if (!scanStarted) {
+                try {
+                    boolean permScan = Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+                        || appCtx.checkSelfPermission(android.Manifest.permission.BLUETOOTH_SCAN) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+                    boolean permLoc = appCtx.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+                    android.location.LocationManager lm = (android.location.LocationManager) appCtx.getSystemService(Context.LOCATION_SERVICE);
+                    boolean locOn = lm != null && (Build.VERSION.SDK_INT < Build.VERSION_CODES.P ? lm.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER) : lm.isLocationEnabled());
+                    com.pa.lcr.lcp.log.LogBus.api(0, "[BT-RSSI] startDiscovery() REFUSÉ après 3 essais — BLUETOOTH_SCAN=" + permScan
+                        + " LOCALISATION(permission)=" + permLoc + " LOCALISATION(service actif)=" + locOn
+                        + " découverte en cours=" + adapter.isDiscovering() + " SDK=" + Build.VERSION.SDK_INT);
+                } catch (Exception ignoredDiag) {}
+            }
             if (!scanStarted) {
                 JSONArray dbScanned = new JSONArray();
                 for (BluetoothDevice dev : targets) {
@@ -725,6 +749,7 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
                     row.put("name", dev.getName() != null ? dev.getName() : JSONObject.NULL);
                     row.put("rssi", last != null ? last.optInt("rssi", -999) : -999);
                     row.put("rssi_quality", last != null ? last.optString("rssi_quality", "INCONNU") : "INCONNU");
+                    ajouterQualiteLiaison(row, devMac);
                     row.put("source", "DB_LAST");
                     row.put("ts_ms", System.currentTimeMillis());
                     dbScanned.put(row);
@@ -772,6 +797,19 @@ public final class MultiRegisterApiFacadeImpl implements ApiFacade {
     // =========================================================
     // Helpers signal
     // =========================================================
+
+    /** ✅ 19 nov 2026 — qualité RÉELLE de la liaison (erreurs, délais, latence des échanges LCP) quand le registre est connecté :
+     *  disponible même quand la découverte radio (RSSI) est refusée par Android. */
+    private void ajouterQualiteLiaison(JSONObject row, String mac) {
+        try {
+            BtSppTransportIo.IoSnapshot live = mediaMgr.getLiveIoSnapshot(MediaTransportManager.btKey(mac));
+            if (live == null || live.samples <= 0) return;
+            row.put("io_quality", BtSignalStore.ioQuality(live.errors, live.timeouts, live.samples, live.latencyAvgMs));
+            row.put("io_latency_ms", live.latencyAvgMs);
+            row.put("io_errors", live.errors + live.timeouts);
+            row.put("io_samples", live.samples);
+        } catch (Exception ignored) {}
+    }
 
     /** Vérifie si au moins une livraison est active (sur n'importe quel controller) */
     private boolean isAnyDeliveryActive() {
