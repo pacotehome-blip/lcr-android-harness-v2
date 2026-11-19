@@ -1007,6 +1007,14 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
             presetL, type, syncStatus, payloadExtra, "", "");
     }
 
+    /** Champs d'imputabilité recopiés à la racine du JSON de sauvegarde (voir DeepLinkHandler.buildArmementPayloadExtra). */
+    private static final String[] CLES_IMPUTABILITE_RACINE = {
+        "produit_choisi_par_chauffeur", "produit_registre_choisi", "produit_demande_fieldservice",
+        "produit_identique_deeplink", "produit_force_volontairement", "produit_demande_deeplink", "produit_force_ts_ms",
+        "registre_substitue_par_chauffeur", "registre_demande_deeplink",
+        "produit_no_requested", "preset_requested_deeplink", "modifie_apres_mismatch_chauffeur"
+    };
+
     public static org.json.JSONObject construireJsonLivraisonComplet(
             String jobId, String woNum, String woIdGuid, String ticketNo, String saleNo,
             double netL, double grossL, String serialId, int lcrnode, String btmac,
@@ -1028,8 +1036,17 @@ public class LcrDeliveryStatusDb extends SQLiteOpenHelper {
         j.put("btmac", btmac != null ? btmac : "");
         j.put("type", type != null ? type : TYPE_ORIGINAL);
         j.put("backup_ts", System.currentTimeMillis());
-        j.put("payload_complet", construirePayloadInterne(
-            produitNo, produitDescription, produitCode, produitType, presetL, payloadExtra));
+        String payloadInterne = construirePayloadInterne(
+            produitNo, produitDescription, produitCode, produitType, presetL, payloadExtra);
+        j.put("payload_complet", payloadInterne);
+        // ✅ AJOUTÉ (19 nov 2026, demande Paul) — imputabilité du produit (forcé par le livreur, registre substitué…) aussi à la
+        // RACINE du fichier JSON, en plus de payload_complet (qui reste la source de la restauration : rien à relire ailleurs).
+        try {
+            org.json.JSONObject pi = new org.json.JSONObject(payloadInterne);
+            for (String k : CLES_IMPUTABILITE_RACINE) {
+                if (pi.has(k)) j.put(k, pi.get(k));
+            }
+        } catch (Exception ignoredImp) {}
         j.put("sync_status", syncStatus != null ? syncStatus : SYNC_PENDING);
         return j;
     }
