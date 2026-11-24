@@ -7768,6 +7768,109 @@ private boolean ensureBtConnectPermission() {
             + (baudConfirme != null ? "\n  débit=" + baudConfirme : "");
     }
 
+    /** Une tentative de lecture du #80 pendant le balayage — sert au diagnostic de la validation (lecture seule). */
+    private static final class TentativeScan {
+        final int node, essai; final long ms; final String issue;
+        TentativeScan(int node, int essai, long ms, String issue) { this.node = node; this.essai = essai; this.ms = ms; this.issue = issue; }
+    }
+    private final java.util.List<TentativeScan> diagScan = java.util.Collections.synchronizedList(new java.util.ArrayList<TentativeScan>());
+
+    /** Classe l'échec d'une tentative : silence (aucune trame valide dans le délai), refus du registre (rc), transport coupé. */
+    private static String classerEchecScan(Exception e) {
+        String m = e.getMessage() == null ? "" : e.getMessage();
+        if (e instanceof com.pa.lcr.lcp.LcpLink.TransportException) return "TRANSPORT";
+        if (m.contains("Timeout waiting LCP response")) return "SILENCE";
+        if (m.contains("Queued timeout")) return "FILE_ATTENTE";
+        int i = m.indexOf("rc=0x");
+        if (i >= 0) return "REFUS " + m.substring(i, Math.min(m.length(), i + 7));
+        return e.getClass().getSimpleName();
+    }
+
+    /**
+     * Diagnostic de la validation (demande Paul 23 nov 2026) : par registre trouvé — firmware, essai auquel il a répondu
+     * et délai de chaque tentative, 5 lectures de mesure (min/moy/max, échecs), état du registre (delivery status
+     * et drapeaux) ; globalement — décompte des échecs par type et nodes ayant répondu de façon anormale (refus rc).
+     * Lecture seule (#80, #60, delivery status), jamais d'écriture.
+     */
+    private String diagnosticScan(com.pa.lcr.lcp.transport.TransportIo io, java.util.List<NodeTrouve> trouves, int[] cfg) {
+        StringBuilder sb = new StringBuilder("\n\n  ── Diagnostic du balayage (délai=" + cfg[0] + "ms, essais=" + cfg[1] + ", pause=" + cfg[2] + "ms) ──");
+        java.util.List<TentativeScan> copie;
+        synchronized (diagScan) { copie = new java.util.ArrayList<>(diagScan); }
+        java.util.Map<String, Integer> parType = new java.util.TreeMap<>();
+        java.util.Set<Integer> nodesTrouves = new java.util.HashSet<>();
+        if (trouves != null) for (NodeTrouve t : trouves) nodesTrouves.add(t.node);
+        long totalMs = 0;
+        for (TentativeScan t : copie) {
+            totalMs += t.ms;
+            String k = t.issue.equals("OK") ? "OK" : t.issue;
+            Integer c = parType.get(k); parType.put(k, c == null ? 1 : c + 1);
+        }
+        sb.append("\n  ").append(copie.size()).append(" tentatives en ").append(totalMs).append(" ms — ").append(parType);
+        java.util.List<String> anormaux = new java.util.ArrayList<>();
+        for (TentativeScan t : copie) {
+            if (!t.issue.equals("OK") && !t.issue.equals("SILENCE") && !nodesTrouves.contains(t.node)) {
+                anormaux.add("node " + t.node + " essai " + t.essai + " : " + t.issue + " (" + t.ms + "ms)");
+            }
+        }
+        if (!anormaux.isEmpty()) {
+            sb.append("\n  ⚠ ").append(anormaux.size()).append(" réponse(s) anormale(s) (le registre a répondu mais autrement qu'attendu) :");
+            for (int i = 0; i < Math.min(10, anormaux.size()); i++) sb.append("\n     ").append(anormaux.get(i));
+            if (anormaux.size() > 10) sb.append("\n     … +").append(anormaux.size() - 10);
+        }
+        if (trouves == null || trouves.isEmpty()) {
+            sb.append("\n  Aucun node n'a donné de trame valide : câble/pont/débit à vérifier (voir les types ci-dessus).");
+            return sb.toString();
+        }
+        for (NodeTrouve nt : trouves) {
+            sb.append("\n\n  node ").append(nt.node).append(" (#série ").append(nt.serial).append(")");
+            com.pa.lcr.lcp.LcpLink lien = new com.pa.lcr.lcp.LcpLink(io, nt.node, 255, true);
+            String fw = "?";
+            try { fw = lien.opGetFirmwareVersion(); } catch (Exception ignored) {}
+            sb.append("\n    firmware=").append(fw);
+            StringBuilder histo = new StringBuilder();
+            for (TentativeScan t : copie) {
+                if (t.node != nt.node) continue;
+                if (histo.length() > 0) histo.append(" → ");
+                histo.append("essai ").append(t.essai).append(" ").append(t.issue).append(" ").append(t.ms).append("ms");
+            }
+            sb.append("\n    balayage : ").append(histo.length() > 0 ? histo : "?");
+            int ok = 0, tot = 5; long min = Long.MAX_VALUE, max = 0, somme = 0;
+            java.util.Map<String, Integer> echecs = new java.util.TreeMap<>();
+            for (int i = 0; i < tot; i++) {
+                if (validationExterneAnnulee) break;
+                long t0 = System.currentTimeMillis();
+                try {
+                    lien.opGetField(80, cfg[0]);
+                    long d = System.currentTimeMillis() - t0;
+                    ok++; somme += d; min = Math.min(min, d); max = Math.max(max, d);
+                } catch (Exception e) {
+                    String k = classerEchecScan(e);
+                    Integer c = echecs.get(k); echecs.put(k, c == null ? 1 : c + 1);
+                }
+                if (cfg[2] > 0) { try { Thread.sleep(cfg[2]); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; } }
+            }
+            sb.append("\n    5 lectures #80 : ").append(ok).append("/").append(tot).append(" réussies");
+            if (ok > 0) sb.append(", délai min/moy/max = ").append(min).append("/").append(somme / ok).append("/").append(max).append(" ms");
+            if (!echecs.isEmpty()) sb.append(", échecs ").append(echecs);
+            try {
+                int[] ds = lien.opDeliveryStatus(3000);
+                int w = ds[1];
+                StringBuilder fl = new StringBuilder();
+                if ((w & com.pa.lcr.lcp.LcpLink.DC_TICKET_PENDING) != 0) fl.append(" TICKET_EN_ATTENTE");
+                if ((w & com.pa.lcr.lcp.LcpLink.DC_FLOW_ACTIVE) != 0) fl.append(" FLUX_ACTIF");
+                if ((w & com.pa.lcr.lcp.LcpLink.DC_DELIVERY_ACTIVE) != 0) fl.append(" LIVRAISON_ACTIVE");
+                if ((w & com.pa.lcr.lcp.LcpLink.DC_BEGIN_DELIVERY) != 0) fl.append(" DEBUT_LIVRAISON");
+                if ((w & com.pa.lcr.lcp.LcpLink.DC_DATA_ACCESS_ERROR) != 0) fl.append(" ERREUR_ACCES_DONNEES");
+                if ((w & com.pa.lcr.lcp.LcpLink.DC_CONFIG_EVENT) != 0) fl.append(" EVENEMENT_CONFIG");
+                if ((w & com.pa.lcr.lcp.LcpLink.DC_CALIBRATION_EVENT) != 0) fl.append(" EVENEMENT_CALIBRATION");
+                sb.append("\n    état : delivery status=0x").append(Integer.toHexString(w)).append(fl.length() > 0 ? " —" + fl : " — aucun drapeau d'occupation/verrou");
+            } catch (Exception e) {
+                sb.append("\n    état : delivery status illisible — ").append(classerEchecScan(e)).append(" (registre occupé ou protégé ?)");
+            }
+        }
+        return sb.toString();
+    }
+
     /** Résultat d'un balayage de node réussi — {node, #série}. */
     private static final class NodeTrouve {
         final int node;
@@ -7843,21 +7946,28 @@ private boolean ensureBtConnectPermission() {
     private java.util.List<NodeTrouve> scannerTousLesNodes(com.pa.lcr.lcp.transport.TransportIo io,
                                                            int timeoutMs, int essaisParNode, int pauseMs) {
         java.util.List<NodeTrouve> trouves = new java.util.ArrayList<>();
+        diagScan.clear();
         for (int node = 1; node <= 250; node++) {
             boolean trouveCeNode = false;
             for (int essai = 1; essai <= essaisParNode && !trouveCeNode; essai++) {
                 if (validationExterneAnnulee) return trouves;
+                final long tTent = System.currentTimeMillis();
                 try {
                     com.pa.lcr.lcp.LcpLink tmp = new com.pa.lcr.lcp.LcpLink(io, node, 255, true);
                     byte[] raw = tmp.opGetField(80, timeoutMs);
                     String serial = decodeSerialBytes(raw);
                     if (serial != null && !serial.trim().isEmpty()) {
+                        diagScan.add(new TentativeScan(node, essai, System.currentTimeMillis() - tTent, "OK"));
                         logMedia1("[VALIDATION-SCAN] node=" + node + " trouvé à l'essai " + essai + "/" + essaisParNode
                             + " (délai=" + timeoutMs + "ms, pause=" + pauseMs + "ms) — le balayage continue jusqu'à 250");
                         trouves.add(new NodeTrouve(node, serial));
                         trouveCeNode = true;
+                    } else {
+                        diagScan.add(new TentativeScan(node, essai, System.currentTimeMillis() - tTent, "SERIE_VIDE"));
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception eTent) {
+                    diagScan.add(new TentativeScan(node, essai, System.currentTimeMillis() - tTent, classerEchecScan(eTent)));
+                }
                 if (!trouveCeNode && pauseMs > 0 && !(node == 250 && essai == essaisParNode)) {
                     try { Thread.sleep(pauseMs); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return trouves; }
                 }
@@ -7948,7 +8058,7 @@ private boolean ensureBtConnectPermission() {
                         java.util.List<String> lignesBaud = detecterBaudDetaille(usbPort, trouve.node);
                         detailBauds = "\n  Débits testés :\n" + String.join("\n", lignesBaud);
                     }
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "19200 (confirmé — port app)", prn_fwUsb) + ligneProduits + detailBauds + lignesAutresNodes(io, "USB", tousUsb, "19200 (confirmé — port app)", avecProduits);
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "19200 (confirmé — port app)", prn_fwUsb) + ligneProduits + detailBauds + lignesAutresNodes(io, "USB", tousUsb, "19200 (confirmé — port app)", avecProduits) + diagnosticScan(io, tousUsb, cfgScan);
                 }
                 // ✅ AJOUTÉ (20 août 2026, demande Paul — "ajouter dans la
                 // validation la détection du baud rate") — au lieu de
@@ -7965,7 +8075,7 @@ private boolean ensureBtConnectPermission() {
                     }
                 }
                 return "⚠ Présent mais silencieux (" + ms + "ms) — débit introuvable parmi "
-                        + java.util.Arrays.toString(BAUD_DETECT_ORDER);
+                        + java.util.Arrays.toString(BAUD_DETECT_ORDER) + diagnosticScan(io, tousUsb, cfgScan);
             } catch (Exception e) {
                 return "❌ Erreur — " + e.getClass().getSimpleName() + ": " + e.getMessage();
             }
@@ -8039,9 +8149,9 @@ private boolean ensureBtConnectPermission() {
                     final int prn_fwBt = tmp.opGetPrinterType();
                     enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwBt, prn_fwBt);
                     String ligneProduitsBt = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)", prn_fwBt) + ligneProduitsBt + lignesAutresNodes(tmpIo, candidatKey, tousBt, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)", avecProduits);
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)", prn_fwBt) + ligneProduitsBt + lignesAutresNodes(tmpIo, candidatKey, tousBt, "pont supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (RFCOMM)", avecProduits) + diagnosticScan(tmpIo, tousBt, cfgScan);
                 }
-                return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — débit du pont BT à vérifier séparément (voir guide)";
+                return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — débit du pont BT à vérifier séparément (voir guide)" + diagnosticScan(tmpIo, tousBt, cfgScan);
             } catch (Exception e) {
                 return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
             } finally {
@@ -8069,9 +8179,9 @@ private boolean ensureBtConnectPermission() {
                     final int prn_fwTcp = tmp.opGetPrinterType();
                     enregistrerRegistreDepuisValidation(candidatKey, trouve.node, trouve.serial, fwTcp, prn_fwTcp);
                     String ligneProduitsTcp = avecProduits ? scannerProduitsPourValidation(tmp, trouve.node, trouve.serial) : "";
-                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)", prn_fwTcp) + ligneProduitsTcp + lignesAutresNodes(tmpIo, candidatKey, tousTcp, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)", avecProduits);
+                    return "✅ Présent — #série=" + trouve.serial + " (" + ms + "ms)" + infosSupplementaires(tmp, trouve.node, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)", prn_fwTcp) + ligneProduitsTcp + lignesAutresNodes(tmpIo, candidatKey, tousTcp, "N-Port supposé 19200 côté série — réponse valide obtenue, jamais mesuré directement par l'app (TCP)", avecProduits) + diagnosticScan(tmpIo, tousTcp, cfgScan);
                 }
-                return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — mauvais débit probable";
+                return "⚠ Présent mais silencieux (" + ms + "ms, 250 nodes balayés ; " + cfgTxt + ") — mauvais débit probable" + diagnosticScan(tmpIo, tousTcp, cfgScan);
             } catch (Exception e) {
                 return "❌ Absent/injoignable — " + e.getClass().getSimpleName() + ": " + e.getMessage();
             } finally {
