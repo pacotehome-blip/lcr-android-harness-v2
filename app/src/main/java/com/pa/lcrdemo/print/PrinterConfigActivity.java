@@ -417,6 +417,34 @@ public class PrinterConfigActivity extends Activity {
             dlg.dismiss();
             refreshList();
             send(store.get(truck, mac), false);
+            pousserVersDataverse(); // ajout / modification : monte aussi a filgo_imprimante (sans attendre le prochain demarrage)
+        });
+    }
+
+    /**
+     * Pousse tout de suite vers Dataverse (table filgo_imprimante) les imprimantes saisies ici. Jusqu'a present cet envoi
+     * n'avait lieu qu'au demarrage de l'APK (PrintDataverseSync.syncAll). Hors ligne ou sans jeton : la ligne reste
+     * "a envoyer" et partira au prochain syncAll. Ne bloque jamais l'ecran.
+     */
+    private void pousserVersDataverse() {
+        withToken(token -> {
+            if (token == null) {
+                LogBus.api(0, "[PRINT-SYNC] imprimante enregistree ; envoi a Dataverse reporte (pas de jeton / hors ligne)");
+                ui.post(() -> Toast.makeText(this, "Dataverse : envoi reporte (hors ligne)", Toast.LENGTH_SHORT).show());
+                return;
+            }
+            String msg;
+            try {
+                com.pa.lcrdemo.dataverse.PrintDataverseSync.envoyerImprimantesADataverse(getApplicationContext(), token);
+                int reste = store.listToPushToDataverse().size();
+                msg = reste == 0 ? "Dataverse : imprimante envoyee"
+                        : "Dataverse : " + reste + " imprimante(s) non envoyee(s), voir le journal";
+            } catch (Exception e) {
+                msg = "Dataverse : echec de l'envoi (" + e.getMessage() + ")";
+                LogBus.api(0, "[PRINT-SYNC] " + msg);
+            }
+            final String m = msg;
+            ui.post(() -> { Toast.makeText(this, m, Toast.LENGTH_LONG).show(); refreshList(); });
         });
     }
 
