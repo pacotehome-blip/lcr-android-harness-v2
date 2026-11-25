@@ -449,6 +449,34 @@ public final class PrintDataverseSync {
         journal("imprimantes: Dataverse lu (" + rows.size() + " ligne(s), " + changees + " nouvelle(s)/modifiee(s), " + ignorees + " ignoree(s))");
     }
 
+    /** Dernier recours : GUID de la citerne lu sur une ligne filgo_imprimante deja presente (meme registre ou meme nom). */
+    private static String guidDepuisDataverse(Context ctx, String token, Meta m, ImprimanteCiterneStore.Row r) {
+        try {
+            String org = LcrConfig.getDataverseUrl(ctx);
+            String nom = r.truckId == null ? "" : r.truckId.trim();
+            String serie = r.registreSerial == null ? "" : r.registreSerial.trim();
+            java.util.List<String> filtres = new java.util.ArrayList<>();
+            if (!serie.isEmpty()) filtres.add("filgo_registre eq '" + serie.replace("'", "''") + "'");
+            if (!nom.isEmpty() && !m.nameAttr.isEmpty()) filtres.add(m.nameAttr + " eq '" + nom.replace("'", "''") + "'");
+            for (String f : filtres) {
+                String u = org + "/api/data/v9.2/" + m.set + "?$select=filgo_citerne_id&$top=5&$filter="
+                        + java.net.URLEncoder.encode(f, "UTF-8").replace("+", "%20");
+                JSONArray a = getJson(u, token, 15000, 30000).optJSONArray("value");
+                if (a == null) continue;
+                for (int i = 0; i < a.length(); i++) {
+                    String g = guid(a.getJSONObject(i).optString("filgo_citerne_id", ""));
+                    if (!g.isEmpty()) {
+                        journal("imprimantes: GUID de la citerne repris d'une ligne Dataverse existante (" + f + ")");
+                        return g;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            journal("imprimantes: recherche du GUID dans Dataverse ERR " + e.getMessage());
+        }
+        return "";
+    }
+
     /** Local -> Dataverse : cree ou met a jour filgo_imprimante pour chaque ligne saisie / modifiee ici. */
     public static void envoyerImprimantesADataverse(Context ctx, String token) throws Exception {
         ImprimanteCiterneStore store = new ImprimanteCiterneStore(ctx);
@@ -469,12 +497,20 @@ public final class PrintDataverseSync {
                 for (java.util.Map.Entry<Integer, String> e : choix.entrySet()) {
                     if (r.driverType.equals(driverDepuisLibelle(e.getValue()))) { valeurModele = e.getKey(); break; }
                 }
+                if (valeurModele == null && "REGISTRE_COGNITIVE_CPL".equals(r.driverType)) {
+                    // Pas de choix « registre » dans filgo_model : on prend le choix Cognitive du catalogue.
+                    for (java.util.Map.Entry<Integer, String> e : choix.entrySet()) {
+                        if (e.getValue() != null && e.getValue().toUpperCase(Locale.ROOT).contains("COGNITIVE")) { valeurModele = e.getKey(); break; }
+                    }
+                }
                 if (valeurModele == null) {
+                    journal("imprimantes: choix filgo_model disponibles = " + choix);
                     journal("imprimantes: " + r.truckId + " non envoyee, aucun choix filgo_model ne correspond au pilote " + r.driverType);
                     err++;
                     continue;
                 }
                 String citerne = guidCiternePour(ctx, r);
+                if (citerne.isEmpty()) citerne = guidDepuisDataverse(ctx, token, m, r);
                 if (citerne.isEmpty()) {
                     journal("imprimantes: " + r.truckId + " non envoyee a Dataverse, GUID de la citerne introuvable (registre " + r.registreSerial + ")");
                     err++;
